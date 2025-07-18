@@ -43,28 +43,26 @@ if __name__ == "__main__":
 
     dataset = datasets.load_dataset(data_source, "default")
 
-    # train_dataset = dataset["train"].select([i for i in range(2000)])
-    # test_dataset = dataset["validation"].select([i for i in range(100)])
+    train_dataset = dataset["train"].select([i for i in range(100)])
+    test_dataset = dataset["validation"].select([i for i in range(10)])
 
-    train_dataset = dataset["train"]
-    test_dataset = dataset["validation"]
+    # train_dataset = dataset["train"]
+    # test_dataset = dataset["validation"]
 
-    instruction_following = 'Please reason step by step with steps separated by "\n\n", and put the index of the correct answer within \\boxed{{}}.'
+    instruction_following = 'Let\'s think step by step and output the index number of the correct answer after "####".'
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
-        option_mapping = ["A", "B", "C", "D","E", "F", "G", "H", "I", "J"]
         def process_fn(example, idx):
             context = example.pop("context")
             question_raw = example.pop("query")
             answer_raw = example.pop("options")# list
-            solution = option_mapping[int(example.pop("correct_option"))]
+            solution = int(example.pop("correct_option")) +1
 
-            answers = "\n\n".join(["Option (" + option_mapping[i] +"):"+ answer_raw[i] + ".\n" for i in range(len(answer_raw))])
-            question = context + "\n\n" +question_raw + "\n\n" + answers + "\n\n" + instruction_following
+            answers = "\n".join([f"Option {i+1}:"+ answer_raw[i] + ".\n" for i in range(len(answer_raw))])
+            question = context + "\n\n" +question_raw + "\n\n" + answers
             # solution = extract_solution(answer_raw)
 
-            # import pdb;pdb.set_trace()
             data = {
                 "data_source": data_source,
                 "prompt": [
