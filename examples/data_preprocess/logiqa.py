@@ -76,6 +76,7 @@ if __name__ == "__main__":
                 "ability": "math",
                 "reward_model": {"style": "rule", "ground_truth": solution},
                 "answer": solution,
+                "raw_prompt": context + "\n\n" +question_raw + "\n\n" + answers,
                 "extra_info": {
                     "split": split,
                     "index": idx,

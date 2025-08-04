@@ -321,6 +321,7 @@ class vLLMRollout(BaseRollout):
         ):
             self.inference_engine.free_cache_engine()
 
+
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
 
