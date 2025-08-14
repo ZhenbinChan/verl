@@ -80,6 +80,11 @@ sh bash_scripts/eval.sh
 
 ## Configurations
 
+### Vllm online inference sevice
+```
+sh bash_scripts/VllmBackend/start_vllm_server.sh
+```
+
 ### Process Reward Model
 ```
 PRM_PATH="/path/to/prm/model"
