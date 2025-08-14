@@ -983,30 +983,44 @@ class RayPPOTrainer:
                     with _timer("reward", timing_raw):
                         # compute reward model score
                         if self.use_rm:
+                            import time
+                            start = time.perf_counter()
+
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        else:
-                            reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
-                            ################# 新增功能：打印 reward 和具体细节 ##########
-                            if "reward_detail" in reward_logging_info.keys():
-                                metrics.update(reward_logging_info["reward_detail"])
-                                pprint(reward_logging_info["reward_detail"])
+                            end = time.perf_counter()
+                            print(f"######## Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples #########")
 
-                            if "outcome_reward" in reward_logging_info.keys():
-                                metrics.update({"reward/outcome_reward": np.mean(reward_logging_info["outcome_reward"])})
-                                for i in range(len(reward_logging_info["ground_truth"])):
-                                    self.record_table.add_data(
-                                        epoch,
-                                        self.global_steps,
-                                        str(reward_logging_info["prompt"][i]),
-                                        str(reward_logging_info["response"][i]),
-                                        str(reward_logging_info["ground_truth"][i]),
-                                        str(reward_logging_info["outcome_reward"][i])
-                                    )
-                            ##########################################################
+                        # if self.config.reward_model.launch_reward_fn_async:
+                        #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                        # else:
+                        reward_dict = self.reward_fn(batch, return_dict=True)
+                        
+                        # PRM: function reward
+                        reward_fn_tensor = reward_dict["reward_tensor"]
+                        reward_fn_dict = DataProto.from_dict({
+                            "verifiable_rewards": reward_fn_tensor.sum(-1),
+                            "reward_fn_scores": reward_fn_tensor,
+                        })
+                        batch.union(reward_fn_dict)
+                        # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
+                        ################# 新增功能：打印 reward 和具体细节 ##########
+                        # if "reward_detail" in reward_dict.keys():
+                        #     metrics.update(reward_dict["reward_detail"])
+                        #     print(reward_dict["reward_detail"])
+                        if "outcome_reward" in reward_dict.keys():
+                            metrics.update({"reward/outcome_reward": np.mean(reward_dict["outcome_reward"])})
+                            for i in range(len(reward_dict["ground_truth"])):
+                                self.record_table.add_data(
+                                    epoch,
+                                    self.global_steps,
+                                    str(reward_dict["prompt"][i]),
+                                    str(reward_dict["response"][i]),
+                                    str(reward_dict["ground_truth"][i]),
+                                    str(reward_dict["outcome_reward"][i])
+                                )
+                        ##########################################################
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
@@ -1033,15 +1047,28 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with _timer("adv", timing_raw):
+                        """
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
+                        """
+                        # PRM: compute token-level scores from rm_scores and reward_fn_scores
+                        token_level_vr = batch.batch['reward_fn_scores']
 
-                        print(f"{list(reward_extra_infos_dict.keys())=}")
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        if 'rm_scores' in batch.batch.keys():
+                            vr_coef = self.config.reward_model.get('verifiable_reward_coef', 1.0)
+                            rm_coef = self.config.reward_model.get('modeling_reward_coef', 1.0)
+                            rm_scores = batch.batch['rm_scores']
+                            token_level_scores = token_level_vr * vr_coef + rm_scores * rm_coef
+                        else:
+                            token_level_scores = token_level_vr
+                        batch.batch['token_level_scores'] = token_level_scores
+
+                        # print(f"{list(reward_extra_infos_dict.keys())=}")
+                        # if reward_extra_infos_dict:
+                        #     batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
