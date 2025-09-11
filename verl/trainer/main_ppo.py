@@ -23,6 +23,31 @@ import ray
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 # from verl.trainer.ppo.reward import load_reward_manager
 
+
+# Vscode debug 使用
+#import debugpy
+#try:
+#    # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#    debugpy.listen(("localhost", 9501))
+#    print("Waiting for debugger attach")
+#    debugpy.wait_for_client()
+#except Exception as e:
+#    pass
+# 同时在vscode debuger 加入：
+#{
+#            "name": "sh_file_debug",
+#            "type": "debugpy",
+#            "request": "attach",
+#            "connect": {
+#                "host": "localhost",
+#                "port": 9501
+#            }
+#        },
+
+
+
+
+
 os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
 
 
@@ -81,6 +106,7 @@ def run_ppo(config) -> None:
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     def run(self, config):
+        import pdb;pdb.set_trace()
         # print initial config
         from pprint import pprint
 
