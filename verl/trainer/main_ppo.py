@@ -54,8 +54,9 @@ os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
 def get_custom_reward_fn(config):
     import importlib.util
     import sys
-
+    
     reward_fn_config = config.get("custom_reward_function") or {}
+
     file_path = reward_fn_config.get("path")
     if not file_path:
         return None
@@ -106,7 +107,7 @@ def run_ppo(config) -> None:
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     def run(self, config):
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         # print initial config
         from pprint import pprint
 

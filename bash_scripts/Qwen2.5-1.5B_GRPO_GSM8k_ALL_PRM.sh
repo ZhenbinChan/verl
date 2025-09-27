@@ -1,8 +1,14 @@
 set -x
 
-HOME=/home/chenzhb/Workspaces/verl
+# if not started
+# ray start --head --port 4869
+HOME=~/work/verl
 
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+unset http_proxy
+unset https_proxy
+
+# MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-7B-Instruct
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -14,6 +20,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=${MODEL_PATH} \
+    +actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
@@ -34,15 +41,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     reward_model.enable=True \
-    reward_model.model.path="/home/chenzhb/Workspaces/LLMs/ReasonFlux-PRM-7B" \
+    reward_model.model.path="jinachris/PURE-PRM-7B" \
+    +reward_model.model.fsdp_config.model_dtype=bf16 \
     reward_model.reward_manager='prime' \
-    reward_model.micro_batch_size=1 \
+    reward_model.worker_type=prm \
+    reward_model.micro_batch_size_per_gpu=1 \
     trainer.critic_warmup=0 \
+    trainer.val_before_train=True \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
     trainer.experiment_name='Qwen2.5-1.5b_grpo_GSM8K_ALL_epoch10_PRM' \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=5 \
-    trainer.total_epochs=10 $@
+    trainer.test_freq=2 \
+    trainer.total_epochs=1 $@

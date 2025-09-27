@@ -1,10 +1,10 @@
 set -x
 
-HOME=/share/nlp/chenzhenbin/Workspaces/verl
+HOME=~
 
-MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 
-PRM_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/PURE-PRM-7B
+PRM_PATH=Qwen/PURE-PRM-7B
 
 
 python3 -m verl.trainer.main_ppo \
@@ -31,7 +31,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=10 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=10 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -43,11 +43,11 @@ python3 -m verl.trainer.main_ppo \
     reward_model.micro_batch_size_per_gpu=10 \
     reward_model.model.fsdp_config.optimizer_offload=True \
     trainer.critic_warmup=0 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
     trainer.experiment_name='Qwen2.5-1.5B_GRPO_LogiQA_PRM_eps1' \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=10 \

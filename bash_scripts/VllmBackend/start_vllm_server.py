@@ -67,9 +67,9 @@ def main():
     args = parser.parse_args()
     
     # Validate model path
-    if not os.path.exists(args.model):
-        print(f"Error: Model path does not exist: {args.model}")
-        sys.exit(1)
+    # if not os.path.exists(args.model):
+    #     print(f"Error: Model path does not exist: {args.model}")
+    #     sys.exit(1)
     
     start_vllm_server(
         model_path=args.model,

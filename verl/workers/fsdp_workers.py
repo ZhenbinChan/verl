@@ -1396,6 +1396,7 @@ class ProcessRewardModelWorker(Worker):
         if credit_assignment in ["gamma-decay", "strict min-form"]:
             self.disable_approx_min_form_credit_assignment = True
         else:
+            print("*** Using approximate min-form credit assignment. (PURE) ***")
             self.disable_approx_min_form_credit_assignment = False
             self.temperature = credit_assignment
 
@@ -1767,7 +1768,8 @@ class ProcessRewardModelWorker(Worker):
         prm_data = self._build_inputs_for_prm(data)
         prm_data = prm_data.to("cuda")
         prm_data.union(data.select(batch_keys=["reward_mask", "responses"]))
-
+        # print("PRM WORKER CONFIG")
+        # print(self.config)
         with self.ulysses_sharding_manager:
             prm_data = self.ulysses_sharding_manager.preprocess_data(data=prm_data)
 
@@ -1793,11 +1795,43 @@ class ProcessRewardModelWorker(Worker):
                 revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
                 token_level_scores = token_level_scores[revert_indices]
 
-            
+            # record the steps, the rewards.
+            import numpy as np
+
+            reward_details = []
+            bs = data.batch['prompts'].size(0)
+            solution_tokens = data.batch["responses"]
+            score_ids = data.batch["score_ids"]
+            score_mask = data.batch["score_mask"]
+
+            for i in range(bs):
+                sample_steps_info = []
+                valid_scores_indices = score_ids[i][score_mask[i]]
+                
+                # 遍历每一个步骤
+                for step_idx, step_end_pos in enumerate(valid_scores_indices):
+                    if step_idx == 0:
+                        start_pos = 0
+                    else:
+                        start_pos = valid_scores_indices[step_idx - 1] + 1
+                    
+                    # 提取步骤的 token IDs 并解码为文本
+                    step_token_ids = solution_tokens[i, start_pos : step_end_pos + 1] # 包含末尾的分隔符
+                    step_text = self.tokenizer.decode(step_token_ids, skip_special_tokens=True)
+                    
+                    # 提取该步骤对应的奖励分数
+                    step_reward = token_level_scores[i, step_end_pos].item()
+                    
+                    sample_steps_info.append({"step": step_idx + 1, "text": step_text, "reward": step_reward})
+                
+                reward_details.append(sample_steps_info)
             # output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
             output = DataProto.from_dict(tensors={"rm_scores": token_level_scores, 
                                                   "score_ids": data.batch['score_ids'],
                                                   "reward_mask": data.batch['reward_mask']},
+                                         non_tensors={
+                                                "reward_details": np.array(reward_details, dtype=object) # non_tensor_batch 需要 numpy 数组
+                                            }
                                          #meta_info=step_info
                                          )
 

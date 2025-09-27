@@ -1001,10 +1001,30 @@ class RayPPOTrainer:
                             start = time.perf_counter()
 
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            reward_details_to_print = reward_tensor.non_tensor_batch.get("reward_details", None)
                             batch = batch.union(reward_tensor)
 
                             end = time.perf_counter()
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples")
+                            prompts_text = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                            responses_text = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            for log_index in range(min(3, len(prompts_text))):
+                                prompt_to_log = prompts_text[log_index]
+                                response_to_log = responses_text[log_index]
+                                details_to_log = reward_details_to_print[log_index]
+                                
+                                # 格式化步骤详情以便打印和记录
+                                steps_breakdown_str = ""
+                                for step_info in details_to_log:
+                                    steps_breakdown_str += f"Step {step_info['step']}: [Reward: {step_info['reward']:.4f}]\n"
+                                    steps_breakdown_str += f"Text: {step_info['text']}\n---\n"
+                                
+                                print("\n" + "="*20 + " Rollout & Reward Breakdown " + "="*20)
+                                print(f"Prompt: {prompt_to_log}")
+                                print(f"Full Response: {response_to_log}")
+                                print("--- Steps Breakdown ---")
+                                print(steps_breakdown_str)
+                                print("="*64 + "\n")
                         
                         # if self.config.reward_model.launch_reward_fn_async:
                         #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
@@ -1135,7 +1155,8 @@ class RayPPOTrainer:
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                # reward_extra_infos_dict=reward_extra_infos_dict,
+                                reward_extra_infos_dict={},
                                 dump_path=rollout_data_dir,
                             )
 

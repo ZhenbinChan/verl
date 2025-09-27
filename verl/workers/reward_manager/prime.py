@@ -104,6 +104,7 @@ class PrimeRewardManager:
         sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
         ground_truth = [data_item.non_tensor_batch["reward_model"]["ground_truth"] for data_item in data]
         data_sources = data.non_tensor_batch[self.reward_fn_key]
+        print("Using data sources: ", set(data_sources))
         extra_info = data.non_tensor_batch.get("extra_info", None)
 
         assert len(sequences_str) == len(ground_truth) == len(data_sources)
@@ -132,33 +133,33 @@ class PrimeRewardManager:
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if "rm_scores" in data.batch.keys():
-            return data.batch["rm_scores"]
+            reward_tensor = data.batch["rm_scores"]
+        else:
+            reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
 
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+            already_print_data_sources = {}
 
-        already_print_data_sources = {}
+            # batched scoring
+            prompt_ids = data.batch["prompts"]
+            prompt_length = prompt_ids.shape[-1]
 
-        # batched scoring
-        prompt_ids = data.batch["prompts"]
-        prompt_length = prompt_ids.shape[-1]
+            response_ids = data.batch["responses"]
+            valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
+            sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+            data_sources = data.non_tensor_batch["data_source"]
 
-        response_ids = data.batch["responses"]
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
-        sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-        data_sources = data.non_tensor_batch["data_source"]
+            scores = self.verify(data)
 
-        scores = self.verify(data)
+            for i in range(len(data)):
+                data_source = data_sources[i]
+                reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
 
-        for i in range(len(data)):
-            data_source = data_sources[i]
-            reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
+                if data_source not in already_print_data_sources:
+                    already_print_data_sources[data_source] = 0
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print(sequences_str)
+                if already_print_data_sources[data_source] < self.num_examine:
+                    already_print_data_sources[data_source] += 1
+                    # print(sequences_str)
 
         if return_dict:
             return {"reward_tensor": reward_tensor}
