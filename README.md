@@ -62,7 +62,7 @@ python3 examples/data_preprocess/logiqa.py --local_dir data/logiqa
 
 
 ```bash
-
+ray start --head --port 6379
 sh bash_scripts/*.sh
 
 ```

@@ -1503,6 +1503,11 @@ class ProcessRewardModelWorker(Worker):
         return process_reward_module
 
     def _init_separator(self, config):
+        # NOTE: SPLIT STEP CHAR: 推理时， 用来分割 步骤 的符号，可以是多个 token
+        # NOTE: STEP SEPARATOR: 训练时， 每个步骤 的结尾符号，通常是一个 token, 在分割完之后重新加上
+        # (1) 先分割步骤，split step char丢掉
+        # (2) 每个步骤的结尾加上 step separator token
+        
         # split response into steps based on what character
         split_step_char = config.get("split_step_char", "\n\n")
         self.split_step_tokens = []
@@ -2665,7 +2670,7 @@ class RayJudgePRMWorker(Worker):
         self.config = config
 
         # 配置
-        self.model_path = config.get("model_path", "/data/home/scyb224/Workspace/LLMs/Qwen2.5-7B-Instruct")
+        self.model_path = config.get("model_path", "Qwen/Qwen2.5-7B-Instruct")
         self.split_step_char = config.get("split_step_char", "\n\n")
         self.disable_approx_min_form_credit_assignment = config.get("disable_approx_min_form_credit_assignment", False)
         self.credit_assignment_temperature = config.get("credit_assignment_temperature", 1.0)
