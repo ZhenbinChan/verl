@@ -48,7 +48,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
 
-os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
+os.environ["RAY_ADDRESS"] = "127.0.0.1:6379"
 
 
 def get_custom_reward_fn(config):
