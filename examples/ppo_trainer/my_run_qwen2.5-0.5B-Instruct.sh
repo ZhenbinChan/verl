@@ -1,14 +1,14 @@
 # ray job submit --address="http://127.0.0.1:8265" \
-#     --runtime-env=/data/home/scyb224/Workspace/verl/verl/trainer/runtime_env.yaml \
+#     --runtime-env=./verl/trainer/runtime_env.yaml \
 #     --no-wait \
 #     -- \
 python -m verl.trainer.main_ppo \
-    data.train_files=/data/home/scyb224/Workspace/verl/data/gsm8k/train.parquet \
-    data.val_files=/data/home/scyb224/Workspace/verl/data/gsm8k/test.parquet \
+    data.train_files=./data/gsm8k/train.parquet \
+    data.val_files=./data/gsm8k/test.parquet \
     data.train_batch_size=32 \
     data.max_prompt_length=512 \
     data.max_response_length=256 \
-    actor_rollout_ref.model.path=/data/home/scyb224/Workspace/LLMs/Qwen2.5-0.5B-Instruct \
+    actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
@@ -17,7 +17,7 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     critic.optim.lr=1e-5 \
-    critic.model.path=/data/home/scyb224/Workspace/LLMs/Qwen2.5-0.5B-Instruct \
+    critic.model.path=Qwen/Qwen2.5-0.5B-Instruct \
     critic.ppo_micro_batch_size_per_gpu=4 \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.logger=['console','wandb'] \

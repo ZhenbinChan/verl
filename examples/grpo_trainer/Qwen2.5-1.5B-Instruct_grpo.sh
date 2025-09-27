@@ -1,8 +1,8 @@
 set -x
 
-HOME=/data/home/scyb224/Workspace/verl
+HOME=.
 
-MODEL_PATH=/data/home/scyb224/Workspace/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \

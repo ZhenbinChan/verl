@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    data_source = '/home/chenzhb/Workspaces/Datasets/OpenR1-Math-220k'
+    data_source = 'open-r1/OpenR1-Math-220k'
 
     dataset = datasets.load_dataset(data_source, 'default')
 
