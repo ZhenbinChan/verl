@@ -2,16 +2,16 @@ set -x
 
 # if not started
 # ray start --head --port 4869
-HOME=~/work/verl
+HOME=.
 
 unset http_proxy
 unset https_proxy
 
-# MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+# MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 MODEL_PATH=Qwen/Qwen2.5-7B-Instruct
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=step_grpo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_batch_size=128 \

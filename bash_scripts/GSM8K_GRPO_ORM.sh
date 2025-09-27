@@ -1,6 +1,6 @@
 set -x
 
-HOME=~
+HOME=.
 
 MODEL_PATH=Qwen/Qwen2.5-7B-Instruct
 

@@ -2,9 +2,9 @@ set -x
 
 PROJECT_NAME='pure'
 EXPERIMENT_NAME='Qwen2.5-1.5B_logiQA_PRIME'
-DATA_PATH=/home/chenzhb/Workspaces/verl/data/logiqa
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
-CKPT_PATH=/home/chenzhb/Workspaces/verl/checkpoints
+DATA_PATH=./data/logiqa
+MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
+CKPT_PATH=./checkpoints
 
 python3 -m verl.trainer.main_ppo \
     data.train_files=["$DATA_PATH/train.parquet"] \

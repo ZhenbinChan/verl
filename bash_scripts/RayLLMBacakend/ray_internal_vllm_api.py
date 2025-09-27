@@ -92,7 +92,7 @@ class RayVLLMService:
 # 全局服务实例
 _service = None
 
-async def get_service(model_path: str = "/data/home/scyb224/Workspace/LLMs/Qwen2.5-7B-Instruct"):
+async def get_service(model_path: str = "Qwen/Qwen2.5-7B-Instruct"):
     """获取服务实例"""
     global _service
     if _service is None:

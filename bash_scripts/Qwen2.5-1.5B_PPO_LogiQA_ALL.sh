@@ -1,10 +1,10 @@
 set -x
 
-HOME=~/
+HOME=./
 
 MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 
-PRM_PATH=Qwen/PURE-PRM-7B
+PRM_PATH=jinachris/PURE-PRM-7B
 
 python -m verl.trainer.main_ppo \
   data.train_files=$HOME/data/logiqa/train.parquet \

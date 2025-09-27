@@ -1,8 +1,8 @@
 set -x
 
-HOME=/home/chenzhb/Workspaces/verl
+HOME=.
 
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-Math-1.5B
+MODEL_PATH=Qwen/Qwen2.5-Math-1.5B
 
 python -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/math/train.parquet \
