@@ -1,10 +1,10 @@
 set -x
 
-HOME=/share/nlp/chenzhenbin/Workspaces/verl/
+HOME=~/
 
-MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 
-PRM_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/PURE-PRM-7B
+PRM_PATH=Qwen/PURE-PRM-7B
 
 python -m verl.trainer.main_ppo \
   data.train_files=$HOME/data/logiqa/train.parquet \
