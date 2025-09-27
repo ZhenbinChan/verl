@@ -11,15 +11,15 @@
 
 
 
-nohup sh /share/nlp/chenzhenbin/Workspaces/verl/bash_scripts/VllmBackend/start_vllm_fast.sh > /share/nlp/chenzhenbin/Workspaces/verl/bash_scripts/VllmBackend/vllm.log 2>&1 & echo $! > /share/nlp/chenzhenbin/Workspaces/verl/bash_scripts/VllmBackend/run.pid
+nohup sh ~/bash_scripts/VllmBackend/start_vllm_fast.sh > ~/bash_scripts/VllmBackend/vllm.log 2>&1 & echo $! > ~/bash_scripts/VllmBackend/run.pid
 echo "VLLM API Start Succeed!"
 
 ray start --head
 echo "Ray start Succeed!"
 
-HOME=/share/nlp/chenzhenbin/Workspaces/verl
+HOME=.
 cd $HOME
-MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 PRM_PATH=None
 
 conda activate verl
