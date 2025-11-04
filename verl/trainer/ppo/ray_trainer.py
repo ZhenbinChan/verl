@@ -1005,10 +1005,13 @@ class RayPPOTrainer:
                             batch = batch.union(reward_tensor)
 
                             end = time.perf_counter()
+                            
+                            # ROLLOUT PRINT!
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples")
                             prompts_text = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             responses_text = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            for log_index in range(min(3, len(prompts_text))):
+                            
+                            for log_index in range(min(3, len(prompts_text))): 
                                 prompt_to_log = prompts_text[log_index]
                                 response_to_log = responses_text[log_index]
                                 details_to_log = reward_details_to_print[log_index]
@@ -1081,7 +1084,9 @@ class RayPPOTrainer:
                         with _timer("values", timing_raw):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
-
+                    
+                    
+                    # TODO: weighted sum should be at the advantages, not the rewards
                     with _timer("adv", timing_raw):
                         """
                         # we combine with rule-based rm
@@ -1094,13 +1099,21 @@ class RayPPOTrainer:
                         token_level_vr = batch.batch['reward_fn_scores']
 
                         if 'rm_scores' in batch.batch.keys():
+                            print("We have Process Rewards. Now we should do a weighted sum of advantages.")
                             vr_coef = self.config.reward_model.get('verifiable_reward_coef', 1.0)
                             rm_coef = self.config.reward_model.get('modeling_reward_coef', 1.0)
                             rm_scores = batch.batch['rm_scores']
-                            token_level_scores = token_level_vr * vr_coef + rm_scores * rm_coef
+                            token_level_scores = token_level_vr * vr_coef + rm_scores * rm_coef # TODO: CHANGE HERE
+                            # token_level_scores_dict = {
+                            #     "verifiable_rewards": token_level_vr,
+                            #     "rm_scores": rm_scores,
+                            #     "vr_coef": vr_coef,
+                            #     "rm_coef": rm_coef,
+                            # }
+                            # batch.batch['token_level_scores_dict'] = token_level_scores_dict
                         else:
                             token_level_scores = token_level_vr
-                        batch.batch['token_level_scores'] = token_level_scores
+                            batch.batch['token_level_scores'] = token_level_scores
 
                         # print(f"{list(reward_extra_infos_dict.keys())=}")
                         # if reward_extra_infos_dict:

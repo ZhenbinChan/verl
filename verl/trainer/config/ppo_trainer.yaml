@@ -70,6 +70,7 @@ actor_rollout_ref:
       offload_policy: False # only for fsdp2, offload param\grad\optimizer during train
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+      model_dtype: bfloat16 # null, float32, float16, bfloat16
   ref:
     strategy: fsdp
     fsdp_config:
@@ -78,6 +79,7 @@ actor_rollout_ref:
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
+      model_dtype: bfloat16 # null, float32, float16, bfloat16
     use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
@@ -157,6 +159,7 @@ critic:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
       fsdp_size: -1
+      # model_dtype: float32 # null, float32, float16, bfloat16
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
   ppo_micro_batch_size_per_gpu: null
@@ -191,6 +194,7 @@ reward_model:
       param_offload: False
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+      # model_dtype: bfloat16 # null, float32, float16, bfloat16
   llm_as_judge_api:
     model_name: 'judge-model'
   micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
