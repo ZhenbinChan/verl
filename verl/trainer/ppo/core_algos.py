@@ -197,6 +197,8 @@ def compute_grpo_prm_advantage(
         Returns: `(torch.Tensor)`
             shape: (bs, response_length)
     """
+    # print(score_idx.shape)
+    # print(token_level_rewards.shape)
     bsz, response_length = token_level_rewards.shape
     max_steps = score_idx.shape[1]
     

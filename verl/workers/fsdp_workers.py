@@ -198,7 +198,7 @@ class ActorRolloutRefWorker(Worker):
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
-            print(f"Model config after override: {actor_model_config}")
+                print(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh)
@@ -1871,7 +1871,7 @@ class RemoteLLMJudgeWorker(Worker):
 
         # Remote inference configuration
         self.api_base_url = config.llm_as_judge_api.get("api_base_url", "http://127.0.0.1:8000")
-        self.api_key = config.llm_as_judge_api.get("api_key","sk-QpaRQWxuaYyNcROMt3qi5g")
+        self.api_key = config.llm_as_judge_api.get("api_key","sk-Yw3l_G6NFtbwd14Mj30HXg")
         self.model_name = config.llm_as_judge_api.get("model_name", "judge-model")
         self.max_judge_output_length = config.llm_as_judge_api.get("max_judge_output_length", 100)
         self.temperature = config.llm_as_judge_api.get("temperature", 0.6)
@@ -2125,7 +2125,7 @@ Please provide your evaluation and place your final score in \\boxed{{}} format.
             try:
                 start_time = time.time()
 
-                response = self.session.post(f"{self.api_base_url}/v1/chat/completions", json=payload, timeout=self.request_timeout)
+                response = self.session.post(f"{self.api_base_url}/v1/chat/completions", headers={"Authorization": "Bearer sk-Yw3l_G6NFtbwd14Mj30HXg"}, json=payload, timeout=self.request_timeout)
 
                 end_time = time.time()
 
@@ -2273,12 +2273,12 @@ class AsyncRemoteLLMJudgeWorker(Worker):
         self.length_penalty = config.llm_as_judge_api.get('length_penalty', 1.0)
         
         # 并发控制参数
-        self.max_concurrent_requests = config.llm_as_judge_api.get('max_concurrent_requests', 10)
+        self.max_concurrent_requests = config.llm_as_judge_api.get('max_concurrent_requests', 50)
         
         # Judge prompt template
         self.judge_prompt_template = config.llm_as_judge_api.get('judge_prompt_template', None)
         if self.judge_prompt_template is None:
-            self.judge_prompt_template = """Please evaluate the quality of the following reasoning step in solving the problem.\n\n[Problem]{problem}\n\n[Previous steps]{previous_steps}\n\n[Current step being evaluated]{current_step}\n\nPlease rate this step on a scale from 0 to 1, where:\n - 0: Completely incorrect or harmful to the solution\n- 1: Perfectly correct and helpful for solving the problem\n\nConsider:\n- Mathematical accuracy(20\% score)\n- Logical consistency with previous steps(50\% score)\n- Progress towards the solution(30\% score)\n\nPlease provide your evaluation and place your final score in \\boxed{{}} format. For example: \\boxed{{0.875}}"""
+            self.judge_prompt_template = """[Problem]{problem}\n\n[Previous steps]{previous_steps}\n\n[Current step being evaluated]{current_step}\n\n[Correct Answer]{ground_truth}\n\nPlease judge the correctness of the current step based on the problem description, previous solution steps, and the answer to the question. If the current step is logically inconsistent with the previous step, it will be considered an error. Please provide a detailed analysis and put the final judgment result in \\boxed{{}} (e.g., \\boxed{{true}} or \\boxed{{false}})"""
         
         # Step separation configuration
         self.split_step_char = config.llm_as_judge_api.get('split_step_char', '\n\n')
@@ -2297,7 +2297,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
         from verl.utils.fs import copy_to_local
         
         # Use a simple tokenizer for text processing
-        tokenizer_path = self.config.llm_as_judge_api.get('tokenizer_path', "Qwen/Qwen2.5-1.5B-Instruct")
+        tokenizer_path = self.config.llm_as_judge_api.get('tokenizer_path', "")
         trust_remote_code = self.config.llm_as_judge_api.get('trust_remote_code', True)
         
         if os.path.exists(tokenizer_path):
@@ -2336,12 +2336,14 @@ class AsyncRemoteLLMJudgeWorker(Worker):
             
             if response.status_code == 200:
                 logger.info(f"Successfully connected to remote LLM server at {self.api_base_url}")
-                print(f"Successfully connected to remote LLM server at {self.api_base_url}")
+                print(f"[info]Successfully connected to remote LLM server at {self.api_base_url}")
             else:
-                logger.warning(f"Remote server returned status {response.status_code}")
-                
+                logger.warning(f"Remote server returned status {response.status_code} at {self.api_base_url}")
+                print(f"[warning]Remote server returned status {response.status_code} at {self.api_base_url}")
         except requests.RequestException as e:
-            logger.error(f"Failed to connect to remote LLM server: {e}")
+            logger.error(f"[error]Failed to connect to remote LLM server: {e}")
+            print(f"[error]Failed to connect to remote LLM server: {e}")
+
             raise RuntimeError(f"Cannot connect to remote LLM server at {self.api_base_url}")
         finally:
             session.close()
@@ -2464,8 +2466,10 @@ class AsyncRemoteLLMJudgeWorker(Worker):
             return result
         return wrapper
 
-    async def _async_llm_judge_step(self, session, semaphore, problem_text, previous_steps_text, current_step_text):
+    async def _async_llm_judge_step(self, session, semaphore, problem_text, previous_steps_text, current_step_text, ground_truth, outcome_reward):
         """Use remote LLM API to judge a single reasoning step asynchronously"""
+
+        outcome_score = outcome_reward.sum()
         
         async with semaphore:  # Control concurrent requests
             problem_text_advance = self._extract_content_value(problem_text)
@@ -2476,7 +2480,8 @@ class AsyncRemoteLLMJudgeWorker(Worker):
             prompt = self.judge_prompt_template.format(
                 problem=problem_text,
                 previous_steps=previous_steps_text,
-                current_step=current_step_text
+                current_step=current_step_text,
+                ground_truth=ground_truth
             )
             
             # Prepare API request
@@ -2504,7 +2509,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
                     async with session.post(
                         f"{self.api_base_url}/v1/chat/completions",
                         json=payload,
-                        #headers=self.headers,#如果是自己的API可以不需要
+                        headers=self.headers,#如果是自己的API可以不需要
                         timeout=aiohttp.ClientTimeout(total=self.request_timeout)
                     ) as response:
                         
@@ -2516,8 +2521,10 @@ class AsyncRemoteLLMJudgeWorker(Worker):
                             
                             # Extract and return score
                             score = self._extract_score_from_response(response_text)
-                            print("#"*60 + "\n" + f"[LLM-as-Judge Response]\n{response_text}\n[LLM-as-a-Judge score] {score}")
-
+                            print(f"[info] Step Reward = 0.3 * {score} + 0.7 * {outcome_score}")
+                            score = 0.3 * score + 0.7 * outcome_score
+                            #print("#"*60 + "\n" + f"[LLM-as-Judge Response]\n{response_text}\n[LLM-as-a-Judge score] {score}")
+                            #print("[LLM-as-Judge score]{score}", score)
                             if self.rank == 0 and attempt == 0:  # Log only on first successful attempt and rank 0
                                 logger.debug(f"Async judge response time: {end_time - start_time:.3f}s")
                             
@@ -2544,6 +2551,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
         score_ids = data.batch['score_ids']
         score_mask = data.batch['score_mask']
         reward_mask = data.batch['reward_mask']
+        outcome_reward = data.batch["outcome_reward"]
         
         # Prepare all tasks for concurrent execution
         tasks = []
@@ -2565,11 +2573,14 @@ class AsyncRemoteLLMJudgeWorker(Worker):
 
         
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for batch_idx in tqdm(range(bs),desc=f"Computing the step reward"):
+            #for batch_idx in tqdm(range(bs),desc=f"Computing the step reward"):
+            for batch_idx in range(bs):
                 # Extract problem text
                 problem_ids = data.batch['prompts'][batch_idx]
                 problem_mask = data.batch['attention_mask'][batch_idx][:len(problem_ids)]
                 valid_problem_ids = problem_ids[problem_mask.bool()]
+                ground_truth = data.non_tensor_batch["answer"][batch_idx]
+                #print(ground_truth)
                 problem_text = self.tokenizer.decode(valid_problem_ids, skip_special_tokens=True)
                 
                 # Process each step
@@ -2588,7 +2599,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
 
                     # Create async task for judging this step
                     task = self._async_llm_judge_step(
-                        session, semaphore, problem_text, previous_steps_text, current_step_text
+                        session, semaphore, problem_text, previous_steps_text, current_step_text, ground_truth, outcome_reward[batch_idx,:]
                     )
                     tasks.append(task)
                     task_positions.append((batch_idx, step_end_pos))
@@ -2604,8 +2615,8 @@ class AsyncRemoteLLMJudgeWorker(Worker):
             scores = await asyncio.gather(*tasks, return_exceptions=True)
             end_time = time.time()
             
-            if self.rank == 0:
-                logger.info(f"Processing {len(tasks)} tasks took {end_time - start_time:.2f} seconds")
+            #if self.rank == 0:
+            #    logger.info(f"Processing {len(tasks)} tasks took {end_time - start_time:.2f} seconds")
         
         # Initialize scores tensor
         step_scores = torch.zeros_like(reward_mask, dtype=torch.float32, device=reward_mask.device)
@@ -2616,7 +2627,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
                 logger.error(f"Task failed: {score}")
                 score = 0.0  # Fallback score
             step_scores[batch_idx, step_end_pos] = score
-            logger.info(f"###### Step {step_end_pos} for batch {batch_idx} scored: {score} ######")
+            #logger.info(f"###### Step {step_end_pos} for batch {batch_idx} scored: {score} ######")
         
         return step_scores
 
@@ -2632,7 +2643,7 @@ class AsyncRemoteLLMJudgeWorker(Worker):
         # Judge all steps for all samples using async concurrency
         token_level_scores = asyncio.run(self._async_judge_all_steps(data))
 
-        # Apply credit assignment if configured
+        # PURE:Apply credit assignment
         if not self.disable_approx_min_form_credit_assignment:
             reward_mask = data.batch['reward_mask']
             weight = torch.softmax(
@@ -2643,7 +2654,13 @@ class AsyncRemoteLLMJudgeWorker(Worker):
             )
             token_level_scores *= weight
 
-        output = DataProto.from_dict(tensors={'rm_scores': token_level_scores})
+        # output = DataProto.from_dict(tensors={'rm_scores': token_level_scores})
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores, 
+                                                  "score_ids": data.batch['score_ids'],
+                                                  "reward_mask": data.batch['reward_mask']},
+                                         #meta_info=step_info
+                                         )
+
         output = output.to('cpu')
         
         return output

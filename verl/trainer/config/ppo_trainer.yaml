@@ -196,7 +196,13 @@ reward_model:
       fsdp_size: -1
       # model_dtype: bfloat16 # null, float32, float16, bfloat16
   llm_as_judge_api:
+    api_base_url: "https://:127.0.0.1:8000"
     model_name: 'judge-model'
+    api_key: "sk-Yw3l_G6NFtbwd14Mj30HXg"
+    tokenizer_path: ${actor_rollout_ref.model.path}
+    top_k: 50
+    top_p: 0.9
+    min_p: 0.01
   micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
   micro_batch_size_per_gpu: null # set a number
   max_length: null
@@ -244,7 +250,7 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
-  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: /share/nlp/chenzhenbin/Workspaces/verl/checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready

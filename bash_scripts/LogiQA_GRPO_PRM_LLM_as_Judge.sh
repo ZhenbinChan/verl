@@ -1,15 +1,15 @@
 set -x
 
-HOME=.
+HOME=/share/nlp/chenzhenbin/Workspaces/verl
 
-MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
+MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/logiqa/train.parquet \
-    data.val_files=$HOME/data/logiqa/test.parquet \
+    algorithm.adv_estimator=step_grpo \
+    data.train_files=$HOME/data/logiqa_outline/train.parquet \
+    data.val_files=$HOME/data/logiqa_outline/test.parquet \
     data.train_batch_size=16 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=2048 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
@@ -33,19 +33,22 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=10 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
-    reward_model.enable=false \
-    reward_model.worker_type='orm' \
+    reward_model.enable=True \
+    reward_model.worker_type='async_judge' \
     reward_model.reward_manager='naive_plus' \
-    reward_model.model.path=${PRM_PATH} \
+    reward_model.llm_as_judge_api.api_base_url="https://litellm.mybigai.ac.cn" \
+    reward_model.llm_as_judge_api.api_key="sk-Yw3l_G6NFtbwd14Mj30HXg" \
+    reward_model.llm_as_judge_api.model_name='deepseek-v3-250324' \
     reward_model.micro_batch_size_per_gpu=10 \
     reward_model.model.fsdp_config.optimizer_offload=True \
     trainer.critic_warmup=0 \
+    trainer.val_before_train=False \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
-    trainer.experiment_name='Qwen2.5-1.5B_GRPO_LogiQA_ORM_eps3' \
+    trainer.experiment_name='Qwen2.5-1.5B_GRPO_LogiQA_PRM_eps1_Judge' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=10 \
-    trainer.total_epochs=3 $@
+    trainer.total_epochs=1 $@
 
