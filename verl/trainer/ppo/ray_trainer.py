@@ -996,8 +996,8 @@ class RayPPOTrainer:
 
                     with _timer("reward", timing_raw):
                         # [info] 对每一步使用 Outcome Reward 加权使用
-                        reward_dict = self.reward_fn(batch, return_dict=True)
-                        batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
+                        # reward_dict = self.reward_fn(batch, return_dict=True)
+                        # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
 
                         # compute reward model score
                         if self.use_rm:
@@ -1013,7 +1013,7 @@ class RayPPOTrainer:
                         # if self.config.reward_model.launch_reward_fn_async:
                         #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                         # else:
-                        # reward_dict = self.reward_fn(batch, return_dict=True)#[info]上面如果不先计算 ORM，解除注释这一行
+                        reward_dict = self.reward_fn(batch, return_dict=True)#[info]上面如果不先计算 ORM，解除注释这一行
                         
                         # PRM: function reward
                         reward_fn_tensor = reward_dict["reward_tensor"]# Outcome Reward

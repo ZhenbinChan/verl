@@ -44,10 +44,6 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 #            }
 #        },
 
-
-
-
-
 os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
 
 
@@ -172,15 +168,16 @@ class TaskRunner:
             if config.reward_model.strategy in ["fsdp", "fsdp2"]:
                 if config.reward_model.worker_type == "prm":
                     from verl.workers.fsdp_workers import ProcessRewardModelWorker as RewardModelWorker
-                    print("#"*30 + "Using ProcessRewardModelWorker!!!!" + "#"*30)
+                    print("[info] Using ProcessRewardModelWorker!")
                 elif config.reward_model.worker_type == "orm":
                     from verl.workers.fsdp_workers import RewardModelWorker
+                    print("[info] Using RewardModelWorker")
                 elif config.reward_model.worker_type == "judge":
                     from verl.workers.fsdp_workers import RemoteLLMJudgeWorker as RewardModelWorker
-                    print("#"*30 + "Using LLM-as-Judge for PRM" + "#"*30)
+                    print("[info] Using LLM-as-Judge for PRM!")
                 elif config.reward_model.worker_type == "async_judge":
                     from verl.workers.fsdp_workers import AsyncRemoteLLMJudgeWorker as RewardModelWorker
-                    print("#"*30 + "Using Async LLM-as-Judge for PRM" + "#"*30)
+                    print("[info] Using Async LLM-as-Judge for PRM!")
                 else:
                     raise NotImplementedError
             elif config.reward_model.strategy == "megatron":
@@ -199,33 +196,28 @@ class TaskRunner:
         reward_manager_name = config.reward_model.get("reward_manager", "naive")
         if reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
-
             reward_manager_cls = NaiveRewardManager
 
         elif reward_manager_name == "prime":
             from verl.workers.reward_manager import PrimeRewardManager
-
             reward_manager_cls = PrimeRewardManager
 
         elif reward_manager_name == "batch":
             from verl.workers.reward_manager import BatchRewardManager
-
             reward_manager_cls = BatchRewardManager
 
         elif reward_manager_name == "dapo":
             from verl.workers.reward_manager import DAPORewardManager
-
             reward_manager_cls = DAPORewardManager
 
         elif reward_manager_name == "naive_plus":
             from verl.workers.reward_manager import NaivePlusRewardManager
-
             reward_manager_cls = NaivePlusRewardManager
 
         elif reward_manager_name == "naive_math220k":
             from verl.workers.reward_manager import NaiveMath220KRewardManager
-
             reward_manager_cls = NaiveMath220KRewardManager
+
         else:
             raise NotImplementedError
 
