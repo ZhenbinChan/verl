@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import math
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -59,6 +60,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.tree_structure import TreeManager
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 WorkerType = Type[Worker]
@@ -318,6 +320,8 @@ class RayPPOTrainer:
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
+
+        self.tree_manager = TreeManager(tokenizer=self.tokenizer, pad_token_id=getattr(self.tokenizer, "pad_token_id", 0))
 
         self.record_table = None
 
@@ -933,8 +937,10 @@ class RayPPOTrainer:
         for epoch in range(self.config.trainer.total_epochs):
 
             for batch_dict in self.train_dataloader:
+                # Todo: 为了每一个 prompt 初始化一颗搜索树（因此，需要写一个tree_structure.py 文件放在 utils 文件夹，里面包含这个树的类）。其中，树里面的每个结点是 response 的一个步骤。（在 tree_structure.py中我们还需要定义一个 Node 类，这个类要记录是否是叶子、步骤的平均熵是多少等）tree_structure.py 的 实现请参考普通的 MCTS过程，可能它还要包含一个根据叶子结点的评分进行回传的功能。
                 metrics = {}
                 timing_raw = {}
+                reward_extra_infos_dict = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # pop those keys for generation
@@ -951,6 +957,10 @@ class RayPPOTrainer:
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
 
+                # Initialize a search tree for each prompt in the current batch
+                self.tree_manager.register_batch(gen_batch)
+
+
                 is_last_step = self.global_steps >= self.total_training_steps
 
                 with _timer("step", timing_raw):
@@ -963,6 +973,29 @@ class RayPPOTrainer:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                             self.async_rollout_manager.sleep()
 
+                    # 多轮 Top-K 扩展：每轮挑选最高熵的 k 个步骤进行扩展
+                    tree_rounds = self.config.trainer.get("tree_rounds", 1)
+                    tree_top_k = self.config.trainer.get("tree_top_k", 1)
+                    for _ in range(max(1, tree_rounds)):
+                        branch_plan = self.tree_manager.prepare_branches(
+                            gen_batch=gen_batch,
+                            gen_batch_output=gen_batch_output,
+                            compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
+                            top_k=tree_top_k,
+                        )
+
+                        if branch_plan is not None and branch_plan.branch_batch is not None and branch_plan.batch_size > 0:
+                            with _timer("gen_branch", timing_raw):
+                                branch_gen_output = self.actor_rollout_wg.generate_sequences(branch_plan.branch_batch)
+                            self.tree_manager.commit_branch_outputs(branch_gen_output, branch_plan)
+
+                    # 将树中所有路径整理成 DataProto，作为训练使用的响应集合
+                    tree_batch_output = self.tree_manager.build_response_batch()
+                    if tree_batch_output is not None:
+                        gen_batch_output = tree_batch_output
+
+
+                    # --------------------------------------------------------------------------- #
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -979,9 +1012,30 @@ class RayPPOTrainer:
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    # 为每个 prompt 生成分组 uid，并按响应数量展开（含 rollout.n 和 tree 扩展倍数）
+                    base_bs = int(batch.batch.batch_size[0])
+                    resp_bs = int(gen_batch_output.batch.batch_size[0]) if gen_batch_output.batch is not None else 0
+
+                    prompt_uids = np.array([str(uuid.uuid4()) for _ in range(base_bs)], dtype=object)
+
+                    repeat_times = self.config.actor_rollout_ref.rollout.n
+                    if base_bs > 0 and resp_bs > 0:
+                        tree_factor = math.ceil(resp_bs / base_bs)
+                        repeat_times = max(repeat_times, tree_factor)
+
+                    # repeat batch to match expanded responses
+                    batch = batch.repeat(repeat_times=repeat_times, interleave=True)
+
+                    # slice to response batch size if oversized
+                    if resp_bs > 0 and int(batch.batch.batch_size[0]) > resp_bs:
+                        keep_idx = torch.arange(resp_bs, device=batch.batch["attention_mask"].device)
+                        batch = batch.index_select(keep_idx)
+
+                    # expand uids to match the current batch size (after slice)
+                    final_bs = int(batch.batch.batch_size[0])
+                    expanded_uids = np.resize(np.repeat(prompt_uids, repeat_times), final_bs)
+                    batch.non_tensor_batch["uid"] = expanded_uids
+
                     batch = batch.union(gen_batch_output)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
@@ -995,12 +1049,13 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     with _timer("reward", timing_raw):
+                        using_tree_rewards = "reward_fn_scores" in batch.batch
                         # [info] 对每一步使用 Outcome Reward 加权使用
                         # reward_dict = self.reward_fn(batch, return_dict=True)
                         # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
 
                         # compute reward model score
-                        if self.use_rm:
+                        if self.use_rm and not using_tree_rewards:
                             import time
                             start = time.perf_counter()
 
@@ -1010,37 +1065,48 @@ class RayPPOTrainer:
                             end = time.perf_counter()
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples in total!!")
                         
-                        # if self.config.reward_model.launch_reward_fn_async:
-                        #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        # else:
-                        reward_dict = self.reward_fn(batch, return_dict=True)#[info]上面如果不先计算 ORM，解除注释这一行
-                        
-                        # PRM: function reward
-                        reward_fn_tensor = reward_dict["reward_tensor"]# Outcome Reward
-                        if not self.use_rm:
+                        if using_tree_rewards:
+                            reward_fn_tensor = batch.batch.get("reward_fn_scores")
+                            if reward_fn_tensor is None:
+                                raise ValueError("Tree rewards expected but reward_fn_scores missing")
+                            # ensure verifiable_rewards exists
+                            if "verifiable_rewards" not in batch.batch:
+                                verifiable_rewards = reward_fn_tensor.sum(-1)
+                                batch.union(DataProto.from_dict({"verifiable_rewards": verifiable_rewards}))
                             reward_tensor = reward_fn_tensor
-                        reward_fn_dict = DataProto.from_dict({
-                            "verifiable_rewards": reward_fn_tensor.sum(-1),
-                            "reward_fn_scores": reward_fn_tensor,
-                        })
-                        batch.union(reward_fn_dict)
-                        # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
-                        ################# 新增功能：打印 reward 和具体细节 ##########
-                        # if "reward_detail" in reward_dict.keys():
-                        #     metrics.update(reward_dict["reward_detail"])
-                        #     print(reward_dict["reward_detail"])
-                        if "outcome_reward" in reward_dict.keys():
-                            metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
-                            for i in range(len(reward_dict["ground_truth"])):
-                                self.record_table.add_data(
-                                    epoch,
-                                    self.global_steps,
-                                    str(reward_dict["prompt"][i]),
-                                    str(reward_dict["response"][i]),
-                                    str(reward_dict["ground_truth"][i]),
-                                    str(reward_dict["outcome_reward"][i])
-                                )
-                        ##########################################################
+                        else:
+                            # if self.config.reward_model.launch_reward_fn_async:
+                            #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                            # else:
+                            reward_dict = self.reward_fn(batch, return_dict=True)#[info]上面如果不先计算 ORM，解除注释这一行
+                            
+                            # PRM: function reward
+                            reward_fn_tensor = reward_dict["reward_tensor"]# Outcome Reward
+                            if not self.use_rm:
+                                reward_tensor = reward_fn_tensor
+                            reward_fn_dict = DataProto.from_dict({
+                                "verifiable_rewards": reward_fn_tensor.sum(-1),
+                                "reward_fn_scores": reward_fn_tensor,
+                            })
+                            batch.union(reward_fn_dict)
+                            # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
+                            ################# 新增功能：打印 reward 和具体细节 ##########
+                            # if "reward_detail" in reward_dict.keys():
+                            #     metrics.update(reward_dict["reward_detail"])
+                            #     print(reward_dict["reward_detail"])
+                            if "outcome_reward" in reward_dict.keys():
+                                metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
+                                for i in range(len(reward_dict["ground_truth"])):
+                                    self.record_table.add_data(
+                                        epoch,
+                                        self.global_steps,
+                                        str(reward_dict["prompt"][i]),
+                                        str(reward_dict["response"][i]),
+                                        str(reward_dict["ground_truth"][i]),
+                                        str(reward_dict["outcome_reward"][i])
+                                    )
+                            ##########################################################
+
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
@@ -1155,7 +1221,6 @@ class RayPPOTrainer:
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
-
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
@@ -1167,19 +1232,7 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
-                # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                # TODO: implement actual tflpo and theoretical tflpo
-                n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
-
-                # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
-
-
-                
                 if is_last_step:
                     # 补充保存最后的 checkpoint
                     with _timer("save_checkpoint", timing_raw):

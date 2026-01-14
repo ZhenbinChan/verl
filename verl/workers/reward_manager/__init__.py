@@ -18,5 +18,6 @@ from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
 from .naive_math220k import NaiveMath220KRewardManager
 from .naive_plus import NaivePlusRewardManager
+from .tree import TreeRewardManager
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager"]
+__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager","TreeRewardManager"]

@@ -44,7 +44,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 #            }
 #        },
 
-os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
+# os.environ["RAY_ADDRESS"] = "127.0.0.1:4869"
 
 
 def get_custom_reward_fn(config):
@@ -217,6 +217,10 @@ class TaskRunner:
         elif reward_manager_name == "naive_math220k":
             from verl.workers.reward_manager import NaiveMath220KRewardManager
             reward_manager_cls = NaiveMath220KRewardManager
+
+        elif reward_manager_name == "tree":
+            from verl.workers.reward_manager import TreeRewardManager
+            reward_manager_cls = TreeRewardManager
 
         else:
             raise NotImplementedError
