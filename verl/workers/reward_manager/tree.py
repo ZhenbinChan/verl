@@ -36,7 +36,6 @@ class TreeRewardManager:
         the corresponding step token spans (split by blank line "\n\n"). Otherwise falls
         back to the original single-outcome reward logic.
         """
-
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 

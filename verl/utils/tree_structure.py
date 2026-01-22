@@ -250,9 +250,13 @@ class TreeManager:
             parent = tree.root
             node_chain: list[Node] = []
             step_rewards: list[float] = []
+            step_content: list[str] = []
             for (s, e), seg_text, seg_ent in zip(step_token_spans, segments, step_entropies):
+                import pdb;pdb.set_trace()
                 # use stub scorer to assign reward (random 0/1 by default)
                 seg_reward = self.step_scorer(seg_text)
+                if seg_reward == 1:
+                    step_content.append(seg_text)
                 node = tree.add_step(step_idx=e - 1 if e > 0 else -1, entropy=seg_ent, reward=seg_reward, text=seg_text, parent=parent)
                 parent = node
                 node_chain.append(node)
