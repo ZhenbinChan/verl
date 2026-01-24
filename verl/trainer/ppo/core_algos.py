@@ -262,6 +262,79 @@ def compute_grpo_prm_advantage(
 
     return token_advantages, token_advantages
 
+def compute_tree_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    score_idx: torch.Tensor,
+    reward_mask: torch.Tensor,
+    token_level_values: torch.Tensor,
+    token_level_q_values: torch.Tensor,
+    gamma: float = 0.99,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: str = True,
+):
+    """Combine step-level (Q-V) advantage with GRPO-style outcome advantage for tree rollouts.
+
+    Args:
+        token_level_rewards: step rewards per token (shape: bs x resp_len)
+        response_mask: mask over valid response tokens (bs x resp_len)
+        index: prompt indices for grouping rollouts (bs,)
+        score_idx: step end token positions (bs x max_steps, padded with -1)
+        reward_mask: mask for valid steps (bs x max_steps)
+        token_level_values: state-value per token (bs x resp_len)
+        token_level_q_values: Q/return per token (bs x resp_len)
+        gamma: discount factor (currently unused here; provided for completeness)
+    Returns:
+        advantages: (bs x resp_len)
+        returns: (bs x resp_len)
+    """
+    bsz, resp_len = token_level_rewards.shape
+
+    # -------- Step-level Advantage: A = Q - V, broadcast to each step span --------
+    step_adv = torch.zeros_like(token_level_rewards)
+    for i in range(bsz):
+        last_end = -1
+        for j in range(score_idx.size(1)):
+            if reward_mask[i, j] <= 0:
+                continue
+            end_pos = score_idx[i, j]
+            if end_pos < 0 or end_pos >= resp_len:
+                continue
+            start_pos = last_end + 1
+            start_pos = max(0, start_pos)
+            start_pos = min(start_pos, resp_len - 1)
+            # advantage at the step end token
+            step_a = token_level_q_values[i, end_pos] - token_level_values[i, end_pos]
+            # broadcast to tokens within this step span
+            step_adv[i, start_pos : end_pos + 1] = step_a
+            last_end = end_pos
+    step_adv = step_adv * response_mask
+
+    # -------- Traditional GRPO Advantage using final step reward per trajectory --------
+    outcome_reward_mat = torch.zeros_like(token_level_rewards)
+    for i in range(bsz):
+        # find last valid step
+        valid_positions = [score_idx[i, j].item() for j in range(score_idx.size(1)) if reward_mask[i, j] > 0 and score_idx[i, j] >= 0]
+        if not valid_positions:
+            continue
+        last_pos = max(valid_positions)
+        last_pos = min(last_pos, resp_len - 1)
+        outcome_reward_mat[i, last_pos] = token_level_rewards[i, last_pos]
+
+    grpo_adv, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=outcome_reward_mat,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    )
+
+    # -------- Combine --------
+    combined_adv = step_adv + grpo_adv
+    combined_adv = combined_adv * response_mask
+
+    return combined_adv, combined_adv
 
 
 

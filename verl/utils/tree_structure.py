@@ -8,12 +8,14 @@ helper to build new branch inputs from the highest-entropy step of each response
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import hashlib
 import torch
 import random
 import numpy as np
+
+from verl.utils.reward_score.logi import compute_score
 
 from verl.protocol import DataProto
 
@@ -29,8 +31,9 @@ class Node:
         text: Decoded text up to this step for inspection/debugging.
         parent: Parent node. None for root.
         children: Child nodes branched from this step.
-        visits: Number of times this node has been visited/updated.
-        value_sum: Accumulated value used for backpropagation.
+        visits: Number of times this node has been visited/updated (random step reward only).
+        value_sum: Accumulated value used for backpropagation (random step reward only).
+        state_value: Deterministic value computed from outcome-based backpropagation.
     """
 
     step_idx: int
@@ -41,6 +44,9 @@ class Node:
     children: list["Node"] = field(default_factory=list)
     visits: int = 0
     value_sum: float = 0.0
+    state_value: float = 0.0
+    global_state_value: float = 0.0
+    q_value: float = 0.0
 
     @property
     def is_leaf(self) -> bool:
@@ -62,6 +68,13 @@ class Node:
             node.visits += 1
             node.value_sum += reward
             node.reward = reward
+            node = node.parent
+
+    # outcome-based deterministic value (used after correctness backprop)
+    def backpropagate_value(self, value: float) -> None:
+        node: Optional[Node] = self
+        while node is not None:
+            node.state_value = value
             node = node.parent
 
 
@@ -133,6 +146,8 @@ class TreeManager:
         self.step_scorer = self._random_step_scorer
         # records of all responses generated for the current batch (including branches)
         self.response_records: list[ResponseRecord] = []
+        # store per-prompt ground truth for correctness scoring
+        self.prompt_ground_truth: Dict[str, Optional[str]] = {}
 
     def _random_step_scorer(self, step_text: str) -> float:
         """Placeholder step scoring: randomly returns 0 or 1.
@@ -151,10 +166,28 @@ class TreeManager:
         data = prompt_tensor.detach().cpu().numpy().tobytes()
         return hashlib.md5(data).hexdigest()
 
-    def ensure_tree(self, prompt_tensor: torch.Tensor, prompt_text: Optional[str] = None) -> SearchTree:
+    def _extract_ground_truth(self, gen_batch: DataProto, idx: int) -> Optional[str]:
+        """Try to fetch ground truth for the i-th sample from non-tensor batch."""
+        gt: Optional[str] = None
+        rm_info = gen_batch.non_tensor_batch.get("reward_model") if gen_batch.non_tensor_batch is not None else None
+        if isinstance(rm_info, dict):
+            candidate = rm_info.get("ground_truth")
+            if isinstance(candidate, (list, tuple)):
+                if idx < len(candidate):
+                    gt = candidate[idx]
+            elif isinstance(candidate, str):
+                gt = candidate
+        elif isinstance(rm_info, (list, tuple)):
+            if idx < len(rm_info) and isinstance(rm_info[idx], dict):
+                gt = rm_info[idx].get("ground_truth")
+        return gt
+
+    def ensure_tree(self, prompt_tensor: torch.Tensor, prompt_text: Optional[str] = None, ground_truth: Optional[str] = None) -> SearchTree:
         prompt_id = self._get_prompt_id(prompt_tensor)
         if prompt_id not in self.trees:
             self.trees[prompt_id] = SearchTree(prompt_id=prompt_id, prompt_text=prompt_text)
+        if ground_truth is not None:
+            self.prompt_ground_truth[prompt_id] = ground_truth
         return self.trees[prompt_id]
 
     def register_batch(self, gen_batch: DataProto) -> None:
@@ -173,7 +206,8 @@ class TreeManager:
             prompt_text = None
             if self.tokenizer is not None:
                 prompt_text = self.tokenizer.decode(prompt_tensor, skip_special_tokens=True)
-            self.ensure_tree(prompt_tensor, prompt_text=prompt_text)
+            ground_truth = self._extract_ground_truth(gen_batch, idx=i)
+            self.ensure_tree(prompt_tensor, prompt_text=prompt_text, ground_truth=ground_truth)
 
     def prepare_branches(
         self,
@@ -191,12 +225,12 @@ class TreeManager:
         if gen_batch_output is None or gen_batch_output.batch is None:
             return None
 
-        log_prob_output = compute_log_prob_fn(gen_batch_output)
+        log_prob_output = compute_log_prob_fn(gen_batch_output)# 计算熵
         entropies = log_prob_output.batch.get("entropys") if log_prob_output is not None else None
         if entropies is None:
             return None
 
-        response_mask = _compute_response_mask(gen_batch_output)
+        response_mask = _compute_response_mask(gen_batch_output)# Response mask
         prompts_source = gen_batch.batch["input_ids"] if "input_ids" in gen_batch.batch.keys() else None
         if prompts_source is None and "prompts" in gen_batch.batch.keys():
             prompts_source = gen_batch.batch["prompts"]
@@ -221,7 +255,7 @@ class TreeManager:
                 step_token_spans = [(0, response_tensor.size(0))]
             else:
                 resp_text = self.tokenizer.decode(response_tensor, skip_special_tokens=True)
-                segments = resp_text.split("\n\n") if resp_text else [""]
+                segments = resp_text.split("\n\n") if resp_text else [""]# 分 step
                 step_token_spans = []
                 cursor = 0
                 for seg in segments:
@@ -245,14 +279,15 @@ class TreeManager:
             prompt_text = None
             if self.tokenizer is not None:
                 prompt_text = self.tokenizer.decode(prompt_tensor, skip_special_tokens=True)
-            tree = self.ensure_tree(prompt_tensor, prompt_text=prompt_text)
+            prompt_id = self._get_prompt_id(prompt_tensor)
+            ground_truth = self.prompt_ground_truth.get(prompt_id)
+            tree = self.ensure_tree(prompt_tensor, prompt_text=prompt_text, ground_truth=ground_truth)
 
             parent = tree.root
             node_chain: list[Node] = []
             step_rewards: list[float] = []
             step_content: list[str] = []
             for (s, e), seg_text, seg_ent in zip(step_token_spans, segments, step_entropies):
-                import pdb;pdb.set_trace()
                 # use stub scorer to assign reward (random 0/1 by default)
                 seg_reward = self.step_scorer(seg_text)
                 if seg_reward == 1:
@@ -272,6 +307,9 @@ class TreeManager:
                 position_ids=pos_ids[i] if pos_ids is not None else None,
                 step_rewards=step_rewards,
                 step_spans=step_token_spans,
+                nodes=node_chain,
+                leaf_node=node_chain[-1] if node_chain else None,
+                ground_truth=ground_truth,
             )
 
             # select top-k steps by entropy (per sample)
@@ -348,14 +386,107 @@ class TreeManager:
             else:
                 step_spans = [(0, response.size(0))]
 
+            prompt_tensor = prompt_source[idx].clone() if prompt_source is not None else None
+            prompt_id = self._get_prompt_id(prompt_tensor) if prompt_tensor is not None else None
+            ground_truth = self.prompt_ground_truth.get(prompt_id) if prompt_id is not None else None
+
             self._record_response(
-                prompt_tensor=prompt_source[idx].clone() if prompt_source is not None else None,
+                prompt_tensor=prompt_tensor,
                 response_tensor=response,
                 attention_mask=attn_mask[idx] if attn_mask is not None else None,
                 position_ids=pos_ids[idx] if pos_ids is not None else None,
                 step_rewards=step_rewards,
                 step_spans=step_spans,
+                nodes=[node],
+                leaf_node=node,
+                ground_truth=ground_truth,
             )
+
+    # ------------------------------------------------------------------
+    # MCTS-style correctness backpropagation
+
+    def _compute_state_value(self, node: Node) -> float:
+        if not node.children:
+            return node.state_value
+        child_values = [self._compute_state_value(child) for child in node.children]
+        if len(child_values) > 0:
+            node.state_value = float(np.mean(child_values))
+        return node.state_value
+
+    def _assign_global_state_value(self, root: Node) -> None:
+        """Compute mean state_value of all non-root nodes and store on every node."""
+        nodes: list[Node] = []
+
+        def _collect(n: Node):
+            nodes.append(n)
+            for c in n.children:
+                _collect(c)
+
+        _collect(root)
+        non_root = [n for n in nodes if n is not root]
+        if len(non_root) == 0:
+            mean_val = 0.0
+        else:
+            mean_val = float(np.mean([n.state_value for n in non_root]))
+        for n in nodes:
+            n.global_state_value = mean_val
+
+    # ------------------------------------------------------------------
+    # Q/Return computation per step
+
+    def compute_q_values(self, gamma: float = 0.99) -> None:
+        """Compute discounted returns (Q values) for each recorded trajectory.
+
+        Q_t = r_t + gamma * r_{t+1} + gamma^2 * r_{t+2} + ...
+        Stored on nodes (q_value) and ResponseRecord.step_q_values.
+        """
+        for record in self.response_records:
+            rewards = record.step_rewards or []
+            if not rewards:
+                record.step_q_values = []
+                continue
+            q_vals = [0.0 for _ in rewards]
+            running = 0.0
+            for i in reversed(range(len(rewards))):
+                running = rewards[i] + gamma * running
+                q_vals[i] = running
+            record.step_q_values = q_vals
+
+            # attach to nodes if provided
+            if record.nodes:
+                for n, q in zip(record.nodes, q_vals):
+                    n.q_value = q
+            elif record.leaf_node is not None and q_vals:
+                record.leaf_node.q_value = q_vals[0]
+
+    def backpropagate_correctness(self) -> None:
+        """Compute outcome correctness for leaves and backpropagate averaged values."""
+        if self.tokenizer is None:
+            return
+
+        # 1) assign leaf values using compute_score
+        for record in self.response_records:
+            if record.leaf_node is None:
+                continue
+            response_str = self.tokenizer.decode(record.response_tensor, skip_special_tokens=True)
+            gt = record.ground_truth
+            try:
+                score, _ = compute_score(response_str, gt) if gt is not None else (0.0, None)
+            except Exception:
+                score = 0.0
+            record.leaf_node.state_value = float(score)
+
+        # 2) bottom-up averaging for each tree
+        for tree in self.trees.values():
+            self._compute_state_value(tree.root)
+            self._assign_global_state_value(tree.root)
+
+        # 3) cache per-step state values on each recorded response
+        for record in self.response_records:
+            if record.nodes:
+                record.step_state_values = [node.state_value for node in record.nodes]
+            elif record.leaf_node is not None:
+                record.step_state_values = [record.leaf_node.state_value]
 
     # Convenience method to inspect tree state for debugging
     def summary(self) -> Dict[str, int]:
@@ -372,6 +503,9 @@ class TreeManager:
         position_ids: Optional[torch.Tensor],
         step_rewards: List[float],
         step_spans: Optional[List[tuple[int, int]]] = None,
+        nodes: Optional[List[Node]] = None,
+        leaf_node: Optional[Node] = None,
+        ground_truth: Optional[str] = None,
     ) -> None:
         """Store a response sample for later batching.
 
@@ -401,11 +535,21 @@ class TreeManager:
             position_ids=position_ids,
             step_rewards=step_rewards,
             step_spans=spans,
+            nodes=nodes or [],
+            leaf_node=leaf_node,
+            ground_truth=ground_truth,
+            step_q_values=None,
         )
         self.response_records.append(record)
 
-    def build_response_batch(self) -> Optional[DataProto]:
-        """Aggregate all recorded responses into a DataProto with rewards for GRPO."""
+    def build_response_batch(self, use_state_values: bool = True) -> Optional[DataProto]:
+        """Aggregate all recorded responses into a DataProto with rewards for GRPO.
+
+        If use_state_values is True, the returned reward_fn_scores will use the
+        correctness-propagated state values; otherwise it will use random step rewards.
+        In both cases, random step rewards are preserved in `step_reward_scores` and
+        state values in `state_value_scores`.
+        """
         if not self.response_records:
             return None
 
@@ -414,7 +558,10 @@ class TreeManager:
         responses = []
         step_spans_list: list[List[tuple[int, int]]] = []
         step_rewards_list: list[List[float]] = []
+        step_state_values_list: list[List[float]] = []
+        step_q_values_list: list[List[float]] = []
         response_lens: list[int] = []
+        step_end_indices_list: list[List[int]] = []
 
         for rec in self.response_records:
             p = rec.prompt_tensor if rec.prompt_tensor is not None else torch.empty((0,), device=device, dtype=rec.response_tensor.dtype)
@@ -422,7 +569,21 @@ class TreeManager:
             responses.append(rec.response_tensor)
             step_spans_list.append(rec.step_spans)
             step_rewards_list.append(rec.step_rewards)
+            if rec.step_state_values is not None:
+                step_state_values_list.append(rec.step_state_values)
+            else:
+                step_state_values_list.append(rec.step_rewards)
+            if rec.step_q_values is not None:
+                step_q_values_list.append(rec.step_q_values)
+            else:
+                step_q_values_list.append(rec.step_rewards)
             response_lens.append(rec.response_tensor.size(0))
+            # collect step end indices (inclusive)
+            step_end_indices = []
+            for _, end in rec.step_spans:
+                end_pos = max(0, min(end - 1, rec.response_tensor.size(0) - 1))
+                step_end_indices.append(end_pos)
+            step_end_indices_list.append(step_end_indices)
 
         # concat prompt+response for full input ids
         full_sequences = [torch.cat([p, r], dim=-1) if p.numel() > 0 else r for p, r in zip(prompts, responses)]
@@ -437,7 +598,30 @@ class TreeManager:
             all_step_spans=step_spans_list,
             all_step_rewards=step_rewards_list,
         )
-        verifiable_rewards = token_level_scores.sum(dim=-1)
+        state_value_scores = _build_token_level_scores(
+            responses=responses_padded,
+            response_lens=response_lens,
+            all_step_spans=step_spans_list,
+            all_step_rewards=step_state_values_list,
+        )
+        q_value_scores = _build_token_level_scores(
+            responses=responses_padded,
+            response_lens=response_lens,
+            all_step_spans=step_spans_list,
+            all_step_rewards=step_q_values_list,
+        )
+
+        chosen_scores = state_value_scores if use_state_values else token_level_scores
+        verifiable_rewards = chosen_scores.sum(dim=-1)
+
+        # build score_ids (step end positions) and reward_mask
+        max_steps = max((len(x) for x in step_end_indices_list), default=0)
+        score_ids = torch.full((len(self.response_records), max_steps), -1, device=device, dtype=torch.long)
+        reward_mask = torch.zeros_like(score_ids, dtype=torch.float32)
+        for i, ends in enumerate(step_end_indices_list):
+            for j, end_pos in enumerate(ends[:max_steps]):
+                score_ids[i, j] = end_pos
+                reward_mask[i, j] = 1.0
 
         reward_proto = DataProto.from_dict(
             tensors={
@@ -446,8 +630,13 @@ class TreeManager:
                 "position_ids": position_ids,
                 "prompts": prompts_padded,
                 "responses": responses_padded,
-                "reward_fn_scores": token_level_scores,
+                "reward_fn_scores": chosen_scores,
                 "verifiable_rewards": verifiable_rewards,
+                "step_reward_scores": token_level_scores,
+                "state_value_scores": state_value_scores,
+                "step_q_scores": q_value_scores,
+                "score_ids": score_ids,
+                "reward_mask": reward_mask,
             },
             non_tensors={},
             meta_info={},
@@ -466,6 +655,11 @@ class ResponseRecord:
     position_ids: Optional[torch.Tensor]
     step_rewards: List[float]
     step_spans: List[tuple[int, int]]
+    nodes: List[Node]
+    leaf_node: Optional[Node]
+    ground_truth: Optional[str]
+    step_state_values: Optional[List[float]] = None
+    step_q_values: Optional[List[float]] = None
 
 
 def _pad_sequences(seqs: Sequence[torch.Tensor], pad_token_id: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

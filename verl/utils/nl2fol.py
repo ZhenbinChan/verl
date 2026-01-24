@@ -294,6 +294,7 @@ def _build_cli() -> argparse.Namespace:
 	return parser.parse_args()
 
 
+
 def main():
 	context = """ A law firm has eight partners, namely Gregg, Hodges, Ivan, James, King, MacNeil, Nader and Owens. From 1961 to 1968, a partner joined the firm each year. Hodges joined the firm before Nader. King joined the firm before James. Nader and James joined the firm before Gregg. Nader joined the firm before Owens.James joined the firm before MacNeil. Gregg joined the firm before Ivan. """
 	question = "Which of the following cannot be true?"
@@ -374,7 +375,7 @@ def main():
 			print(f"  {line}")
 	else:
 		print(f"Execute Failed: {error}")
-		
+
 __all__ = [
 	"load_prompt",
 	"call_gpt_api",

@@ -92,6 +92,7 @@ class AdvantageEstimator(str, Enum):
     REMAX = "remax"
     RLOO = "rloo"
     STEP_GRPO = "step_grpo"
+    Tree_GRPO = "tree_grpo"
 
 
 @dataclass
@@ -264,6 +265,22 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+    elif adv_estimator == AdvantageEstimator.Tree_GRPO:
+        grpo_calculation_mask = data.batch["response_mask"]
+        advantages, returns = core_algos.compute_tree_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=grpo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            score_idx=data.batch.get("score_ids"),
+            reward_mask=data.batch.get("reward_mask"),
+            token_level_values=data.batch.get("state_value_scores", data.batch["token_level_rewards"]),
+            token_level_q_values=data.batch.get("step_q_scores", data.batch["token_level_rewards"]),
+            gamma=gamma,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -339,6 +356,7 @@ class RayPPOTrainer:
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.STEP_GRPO,
+            AdvantageEstimator.Tree_GRPO,
         ]:
             self.use_critic = False
         else:
@@ -990,11 +1008,13 @@ class RayPPOTrainer:
                             self.tree_manager.commit_branch_outputs(branch_gen_output, branch_plan)
 
                     # 将树中所有路径整理成 DataProto，作为训练使用的响应集合
+                    # 在整理前，对每棵树做一次 MCTS 式的正确性回传，得到状态价值
+                    self.tree_manager.backpropagate_correctness()
+                    # 计算每个步骤的折扣回报（Q 值）
+                    self.tree_manager.compute_q_values(gamma=self.config.algorithm.get("gamma", 0.99))
                     tree_batch_output = self.tree_manager.build_response_batch()
                     if tree_batch_output is not None:
                         gen_batch_output = tree_batch_output
-
-
                     # --------------------------------------------------------------------------- #
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
@@ -1054,17 +1074,16 @@ class RayPPOTrainer:
                         # reward_dict = self.reward_fn(batch, return_dict=True)
                         # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
 
-                        # compute reward model score
+                        # compute reward model score 使用 Reward Model
                         if self.use_rm and not using_tree_rewards:
                             import time
                             start = time.perf_counter()
-
                             reward_tensor = self.rm_wg.compute_rm_score(batch)# Process Reward
                             batch = batch.union(reward_tensor)
-
                             end = time.perf_counter()
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples in total!!")
                         
+                        # 使用 Tree Structure 里面的 Reward
                         if using_tree_rewards:
                             reward_fn_tensor = batch.batch.get("reward_fn_scores")
                             if reward_fn_tensor is None:

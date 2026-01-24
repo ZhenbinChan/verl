@@ -5,7 +5,7 @@ HOME=/home/chenzhb/Workspaces/verl
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=tree_grpo \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/test.parquet \
     data.train_batch_size=4 \
