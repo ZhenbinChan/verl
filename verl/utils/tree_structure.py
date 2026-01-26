@@ -278,7 +278,16 @@ class TreeManager:
             # Build chain of nodes: root -> step1 -> step2 ...
             prompt_text = None
             if self.tokenizer is not None:
+                import re
+                from verl.utils.nl2fol import fol_prepocessing
                 prompt_text = self.tokenizer.decode(prompt_tensor, skip_special_tokens=True)
+                context_match = re.search(r"<Context>(.*?)</Context>", prompt_text, re.DOTALL)
+                context = context_match.group(1).strip() if context_match else None
+                question_match = re.search(r"<Question>(.*?)</Question>", prompt_text, re.DOTALL)
+                question = question_match.group(1).strip() if question_match else None
+                options_match = re.search(r"<Options>(.*?)</Options>", prompt_text, re.DOTALL)
+                options = options_match.group(1).strip() if options_match else None
+                declaration = fol_prepocessing(context, question, options)
             prompt_id = self._get_prompt_id(prompt_tensor)
             ground_truth = self.prompt_ground_truth.get(prompt_id)
             tree = self.ensure_tree(prompt_tensor, prompt_text=prompt_text, ground_truth=ground_truth)
@@ -289,7 +298,13 @@ class TreeManager:
             step_content: list[str] = []
             for (s, e), seg_text, seg_ent in zip(step_token_spans, segments, step_entropies):
                 # use stub scorer to assign reward (random 0/1 by default)
-                seg_reward = self.step_scorer(seg_text)
+                step_content.append(seg_text)
+                sentences = "\n\n".join(step_content)
+                from verl.utils.nl2fol import translate_and_execute_fol
+                fol_reward = translate_and_execute_fol(declaration=declaration, sentences=sentences)
+                import pdb;pdb.set_trace()
+                # seg_reward = self.step_scorer(seg_text)
+                seg_reward = fol_reward
                 if seg_reward == 1:
                     step_content.append(seg_text)
                 node = tree.add_step(step_idx=e - 1 if e > 0 else -1, entropy=seg_ent, reward=seg_reward, text=seg_text, parent=parent)

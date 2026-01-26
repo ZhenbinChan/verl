@@ -293,6 +293,90 @@ def _build_cli() -> argparse.Namespace:
 	parser.add_argument("--no-defaults", action="store_true", help="Do not fall back to demo context/question/options")
 	return parser.parse_args()
 
+def fol_prepocessing(context: str, question: str, options: str):
+	model = "qwen-plus"
+	temperature = 0.6
+	max_tokens = 1024
+	api_key = "sk-094e8ca337e14ac690bde26268c06667"
+	base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	system_prompt = None
+	provider = "qwen"
+	client = OpenAI(api_key=api_key, base_url=base_url) if (api_key or base_url) else None
+
+	# Step 1: preprocess (returns premise extraction)
+	premise_text = preprocess_premises(
+		context=context,
+		question=question,
+		options=options,
+		model=model,
+		temperature=temperature,
+		max_tokens=max_tokens,
+		api_key=api_key,
+		base_url=base_url,
+		system_prompt=system_prompt,
+		provider=provider,
+		client=client,
+	)
+	print("[info] FOL Pre-processing Done!")
+	print(premise_text)
+	# Step 2: declaration extraction, using the preprocessed text as context
+	declaration = extract_declaration(
+		context=premise_text,
+		question=question,
+		options=options,
+		model=model,
+		temperature=temperature,
+		max_tokens=max_tokens,
+		api_key=api_key,
+		base_url=base_url,
+		system_prompt=system_prompt,
+		provider=provider,
+		client=client,
+	)
+	declaration = extract_plain_text_block(declaration)
+	print("[info] Declaration Extraction Done!")
+	print(declaration)
+	return declaration
+
+def translate_and_execute_fol(declaration: str, sentences: str):
+	model = "qwen-plus"
+	temperature = 0.6
+	max_tokens = 1024
+	api_key = "sk-094e8ca337e14ac690bde26268c06667"
+	base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	system_prompt = None
+	provider = "qwen"
+	client = OpenAI(api_key=api_key, base_url=base_url) if (api_key or base_url) else None
+	# Step 3: Translate to FOL
+	fol = translate_to_fol(
+		declarations=declaration,
+		# sentences="At no meal does Vladimir eat the same kind of food as Wendy",
+		sentences=sentences,
+		model=model,
+		temperature=temperature,
+		max_tokens=max_tokens,
+		api_key=api_key,
+		base_url=base_url,
+		system_prompt=system_prompt,
+		provider=provider,
+		client=client,
+	)
+	print("[info] FOL Translation Done!")
+
+	constraints = extract_plain_text_block(fol)
+	print(constraints)
+
+	from verl.utils.fol_to_python_converter import convert_and_execute_fol
+	code, result, error = convert_and_execute_fol(declaration, constraints)
+
+	if result:
+		print("[info]Execute successfully!")
+		import pdb;pdb.set_trace()
+
+		return float(result[1])
+	else:
+		return 0.0
+
 
 
 def main():
@@ -367,7 +451,7 @@ def main():
 	constraints = extract_plain_text_block(fol)
 	from verl.utils.fol_to_python_converter import convert_and_execute_fol
 	code, result, error = convert_and_execute_fol(declaration, constraints)
-
+	import pdb;pdb.set_trace()
 	if result:
 		print("Execute successfully!")
 		print("\nExecution result:")
@@ -384,6 +468,7 @@ __all__ = [
 	"extract_declaration",
 	"preprocess_and_extract_declaration",
 	"translate_to_fol",
+	"fol_prepocessing",
 ]
 
 
