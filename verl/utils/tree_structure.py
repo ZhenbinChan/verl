@@ -471,24 +471,50 @@ class TreeManager:
     # ------------------------------------------------------------------
     # MCTS-style correctness backpropagation
 
-    def _compute_state_value(self, node: Node) -> float:
-        if not node.children:
-            return node.state_value
-        child_values = [self._compute_state_value(child) for child in node.children]
-        if len(child_values) > 0:
-            node.state_value = float(np.mean(child_values))
-        return node.state_value
+    def _compute_state_value(self, root: Node) -> float:
+        """Iterative post-order to avoid Python recursion depth issues.
+
+        Assumes leaf nodes的 state_value 已在外部写入（例如 correctness 评分）。
+        """
+
+        stack: list[tuple[Node, bool]] = [(root, False)]
+        visited: set[int] = set()
+
+        while stack:
+            node, processed = stack.pop()
+            if id(node) in visited and not processed:
+                # 避免异常环引用造成死循环
+                continue
+
+            if processed or not node.children:
+                if node.children:
+                    child_values = [child.state_value for child in node.children]
+                    if child_values:
+                        node.state_value = float(np.mean(child_values))
+                continue
+
+            # push node again as processed, then children
+            stack.append((node, True))
+            visited.add(id(node))
+            for child in node.children:
+                stack.append((child, False))
+
+        return root.state_value
 
     def _assign_global_state_value(self, root: Node) -> None:
-        """Compute mean state_value of all non-root nodes and store on every node."""
+        """Compute mean state_value of all non-root nodes and store on every node (iterative)."""
         nodes: list[Node] = []
-
-        def _collect(n: Node):
+        stack = [root]
+        seen: set[int] = set()
+        while stack:
+            n = stack.pop()
+            if id(n) in seen:
+                continue
+            seen.add(id(n))
             nodes.append(n)
             for c in n.children:
-                _collect(c)
+                stack.append(c)
 
-        _collect(root)
         non_root = [n for n in nodes if n is not root]
         if len(non_root) == 0:
             mean_val = 0.0
