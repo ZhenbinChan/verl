@@ -26,6 +26,9 @@ def compute_score(solution_str, ground_truth):
     if not matches:
         # 尝试抽取 Option C 中的 C
         matches = re.findall(r'Option\s*([A-Za-z])\s', solution_str)
+    if not matches:
+        # 尝试抽取**Option (A)** 中的 A
+        matches = re.findall(r'Option\s*\(\s*([A-Za-z])\s*\)', solution_str)
 
 
     if matches:

@@ -118,7 +118,6 @@ The startup script is located at ```bash_script/Step_TreeRL_LogiQA_GAE```:
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \ # TreeRL 的 Value 并不使用 Critic Model，而是直接用 Backpropagation 之后的结点的 Value 作为 Value
     ...
-   reward_model.reward_manager='tree' \ # 使用 Tree Sampling 策略，在生成的时候就计算了每个 Step 的 reward 存储在 Node 的结构中，这样方便后面我们提高效率加入 early stop strategy. 所以这里的 Reward Manage 只是负责将 step reward organize 成 reward tensor.
     trainer.tree_sampling=True \
     trainer.branch_level='step' \ # 'token' 的话就会每个 token 作为一个结点，对于长的推理序列，树会非常大！！！！
     trainer.step_reward_type='treerl' \ # 根据论文里面的公式，使用当前结点和 root 结点及其双亲的 Value 来计算 Reward；如果是 'fol'，则会将每一步翻译成 FOL 并使用 Z3 返回结果（Fragile）！！！！
@@ -127,6 +126,10 @@ python3 -m verl.trainer.main_ppo \
 
 ```
 **TODO**
-- 1、结点选择问题：反复采样 Top-k 仍然是那 k 个结点的问题；
-- 2、FOL Reward 的脆弱性；
-
+1. 结点选择问题：
+  - 使用步骤的平均熵作为扩展结点的选择标准并不 make sense；
+  - 使用 Tree Sampling 的目的：(1) 对于同一个 prompt， 不同的 Tree 我们希望它是不同的思路，然后在同一个 Tree 里面的 node 的 state value 不应该全为 1/0 （使用 GRPO） 的情况下，才能充分学习和比对不同的思路的不同步骤。
+  - 不鼓励使用叶子结点进行扩展（不少的样本使用叶子结点进行 expansion）
+2. FOL Reward 的脆弱性；
+   - 怎么才能使得翻译更加通用并且鲁棒？
+3. 优势估计部分：根据 Tree Sampling 的策略进行指定吧。
