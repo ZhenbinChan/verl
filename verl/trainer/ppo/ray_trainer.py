@@ -1025,26 +1025,25 @@ class RayPPOTrainer:
                 timing_raw = {}
                 reward_extra_infos_dict = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                # capture ordering before popping fields for generation
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+                # keep dataset ordering when doing tree sampling
                 if "multi_modal_inputs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.extend(["multi_modal_data", "multi_modal_inputs"])
                 if "raw_prompt" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
                 if "tools_kwargs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
+                # For Tree Construction
+                if "answer" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("answer")
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
-                )
-
-                # Initialize a search tree for each prompt in the current batch
-                if self.tree_sampling:
-                    self.tree_manager.branch_level = self.branch_level
-                    self.tree_manager.register_batch(gen_batch)
-
+                )# torch.Size([batch size, 2560])
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
@@ -1055,36 +1054,41 @@ class RayPPOTrainer:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             self.async_rollout_manager.wake_up()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)# torch.Size([batch size *n, 2560])
                             self.async_rollout_manager.sleep()
 
+                    # ---------------------- Tree Sampling 相关逻辑 ---------------------- #
                     if self.tree_sampling:
+                        self.tree_manager.branch_level = self.branch_level
+                        # 将初步生成的结果写入 tree manager 中，进行树的初始化
+                        self.tree_manager.initialize_trees(
+                            gen_batch=gen_batch,
+                            gen_batch_output=gen_batch_output,
+                            compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
+                        )
+
                         # 多轮 Top-K 扩展：每轮挑选最高熵的 k 个步骤进行扩展
                         tree_rounds = self.config.trainer.get("tree_rounds", 1)
                         tree_top_k = self.config.trainer.get("tree_top_k", 1)
                         for _ in range(max(1, tree_rounds)):
-                            branch_plan = self.tree_manager.prepare_branches(
-                                gen_batch=gen_batch,
-                                gen_batch_output=gen_batch_output,
-                                compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
-                                top_k=tree_top_k,
-                            )
-
+                            top_k_nodes = self.tree_manager.get_top_k_entropy_nodes(tree_top_k)# 计算 Top k 的熵节点，返回节点信息（包含生成输入等）
+                            branch_plan = self.tree_manager.prepare_branches(target_nodes=top_k_nodes)# 根据节点信息准备生成输入，比如 input_ids、attention_mask 等，并打包成 branch_batch
                             if branch_plan is not None and branch_plan.branch_batch is not None and branch_plan.batch_size > 0:
                                 with _timer("gen_branch", timing_raw):
                                     branch_gen_output = self.actor_rollout_wg.generate_sequences(branch_plan.branch_batch)
-                                self.tree_manager.commit_branch_outputs(branch_gen_output, branch_plan)
+                                self.tree_manager.commit_branch_outputs(branch_gen_output, branch_plan, compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob)
 
-                        # 将树中所有路径整理成 DataProto，作为训练使用的响应集合
-                        # 在整理前，对每棵树做一次 MCTS 式的正确性回传，得到状态价值
-                        self.tree_manager.backpropagate_correctness()
-                        # 计算每个步骤的折扣回报（Q 值）
-                        self.tree_manager.compute_q_values(gamma=self.config.algorithm.get("gamma", 0.99))
-                        # TreeRL: 根据节点 Q 值差分计算奖励
-                        self.tree_manager.apply_treerl_rewards()
-                        tree_batch_output = self.tree_manager.build_response_batch()
+                        self.tree_manager.backpropagate_correctness()# MCTS-style correctness backpropagation / TreeRL Node Value
+                        self.tree_manager.compute_q_values(gamma=self.config.algorithm.get("gamma", 1))# Return / Q Value Calculation
+                        self.tree_manager.apply_treerl_rewards()# TreeRL Reward Calculation
+                        # Bulid response batch from tree, replace gen_batch_output for later reward computation and advantage estimation
+                        tree_batch_output = self.tree_manager.build_response_batch(
+                            batch_index_list=None, 
+                            gen_batch_output=gen_batch_output
+                        )
                         if tree_batch_output is not None:
                             gen_batch_output = tree_batch_output
+     
                     # --------------------------------------------------------------------------- #
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
@@ -1102,31 +1106,21 @@ class RayPPOTrainer:
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    # 为每个 prompt 生成分组 uid，并按响应数量展开（含 rollout.n 和 tree 扩展倍数）
-                    base_bs = int(batch.batch.batch_size[0])
-                    resp_bs = int(gen_batch_output.batch.batch_size[0]) if gen_batch_output.batch is not None else 0
-
-                    prompt_uids = np.array([str(uuid.uuid4()) for _ in range(base_bs)], dtype=object)
-
+                    
+                    # ------------   Repeat batch for Tree Sampling & union the response ------------- #
                     repeat_times = self.config.actor_rollout_ref.rollout.n
-                    if base_bs > 0 and resp_bs > 0:
-                        tree_factor = math.ceil(resp_bs / base_bs)
-                        repeat_times = max(repeat_times, tree_factor)
-
-                    # repeat batch to match expanded responses
+                    if self.tree_sampling:
+                        # 因为进行了 Tree Search，重复的次数要重新计算
+                        repeat_times = int(gen_batch_output.batch.batch_size[0]) // int(gen_batch.batch.batch_size[0])
+                        if not isinstance(repeat_times, int) or repeat_times < 1:
+                            raise ValueError(f"Invalid repeat times calculated from tree sampling: {repeat_times}")
+                        print(f"Tree sampling enabled, repeating batch {repeat_times} times to align with generated responses")
+                    batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+                    # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)
-
-                    # slice to response batch size if oversized
-                    if resp_bs > 0 and int(batch.batch.batch_size[0]) > resp_bs:
-                        keep_idx = torch.arange(resp_bs, device=batch.batch["attention_mask"].device)
-                        batch = batch.index_select(keep_idx)
-
-                    # expand uids to match the current batch size (after slice)
-                    final_bs = int(batch.batch.batch_size[0])
-                    expanded_uids = np.resize(np.repeat(prompt_uids, repeat_times), final_bs)
-                    batch.non_tensor_batch["uid"] = expanded_uids
-
                     batch = batch.union(gen_batch_output)
+                    # --------------------------------------------------------------------------------- #
+
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
@@ -1145,7 +1139,7 @@ class RayPPOTrainer:
                         # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
 
                         # compute reward model score 使用 Reward Model
-                        if self.use_rm and not using_tree_rewards:
+                        if self.use_rm:
                             import time
                             start = time.perf_counter()
                             reward_tensor = self.rm_wg.compute_rm_score(batch)# Process Reward

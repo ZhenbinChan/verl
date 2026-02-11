@@ -282,6 +282,9 @@ class vLLMRollout(BaseRollout):
                 # [BUG:https://github.com/volcengine/verl/issues/2155] Solution:
                 if "raw_prompt" in non_tensor_batch.keys():
                     non_tensor_batch["raw_prompt"] = _repeat_interleave(non_tensor_batch["raw_prompt"], self.sampling_params.n)
+                # TreeRL 改动
+                if "answer" in non_tensor_batch.keys():
+                    non_tensor_batch["answer"] = _repeat_interleave(non_tensor_batch["answer"], self.sampling_params.n)
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -323,7 +326,6 @@ class vLLMRollout(BaseRollout):
             and self.config.free_cache_engine
         ):
             self.inference_engine.free_cache_engine()
-
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
