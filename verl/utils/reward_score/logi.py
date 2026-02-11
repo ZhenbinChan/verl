@@ -7,6 +7,27 @@ def compute_score(solution_str, ground_truth):
     matches = re.findall(r'\\boxed\{\{?([A-Za-z])\}?\}', solution_str)
     # print(f"Ground Truth: {ground_truth}")
     # print(f"Solution String: {solution_str}")
+    if not matches:
+        # 尝试抽取 Option(C) 中的 C
+        matches = re.findall(r'Option\(\s*([A-Za-z])\s*\)', solution_str)
+
+    if not matches:
+        # 尝试抽取 "The answer is C." 中的 C
+        matches = re.findall(r'The answer is\s*([A-Za-z])\s*\.', solution_str)
+    if not matches:
+        # 尝试抽取 "Answer: C" 中的 C
+        matches = re.findall(r'Answer:\s*([A-Za-z])\s*', solution_str)
+    if not matches:
+        # 尝试抽取 "C is the correct answer" 中的 C
+        matches = re.findall(r'([A-Za-z])\s*is the correct answer', solution_str)
+    if not matches:
+        # 尝试抽取 "The correct answer is C" 中的 C
+        matches = re.findall(r'The correct answer is\s*([A-Za-z])\s*', solution_str)
+    if not matches:
+        # 尝试抽取 Option C 中的 C
+        matches = re.findall(r'Option\s*([A-Za-z])\s', solution_str)
+
+
     if matches:
         extracted_answer = [letter.upper() for letter in matches]
         # print(f"Extracted Answer: {extracted_answer[-1]}")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, Set
 
 import hashlib
 import math
@@ -61,6 +61,9 @@ class Node:
     state_value: float = 0.0
     global_state_value: float = 0.0
     q_value: float = 0.0
+    
+    def __hash__(self):
+        return hash(self.node_id)
 
     @property
     def is_leaf(self) -> bool:
@@ -215,7 +218,7 @@ class TreeManager:
         # tree_id corresponds to position in gen_batch_output
         self.trees: List[SearchTree] = []
         # Snapshot of initial leaves per tree (before any branching)
-        self.initial_leaves: List[List[Node]] = []
+        self.tree_leaves: Dict[int, Set[Node]] = {}
         # a stub scorer that can be overridden later
         self.step_scorer = self._random_step_scorer
         # node registries for entropy-based branching
@@ -455,7 +458,7 @@ class TreeManager:
         self.node_map.clear()
         self._node_counter = 0
         self.trees.clear()  # Clear trees list
-        self.initial_leaves.clear()
+        self.tree_leaves.clear()
 
         # ===== Phase 2: Extract data from gen_batch =====
         prompts_source = gen_batch.batch.get("input_ids")
@@ -522,8 +525,12 @@ class TreeManager:
                 ground_truth=ground_truth,
                 index=prompt_idx,  # Track original prompt index
             )
-        # Snapshot initial leaves after first-pass generation (before any branching)
-        self.initial_leaves = [self._get_all_leaves(t.root) for t in self.trees]
+
+        for tree_idx, tree in enumerate(self.trees):
+            self.tree_leaves[tree_idx] = set(self._get_all_leaves(tree.root))
+
+
+            
 
     def get_top_k_entropy_nodes(self, k: int) -> list[Node]:
         """Select top-k entropy nodes per tree, excluding roots.
@@ -548,7 +555,7 @@ class TreeManager:
         for tree in self.trees:
             nodes = _collect_nodes(tree.root)
             # Filter out root and nodes without step info
-            candidates = [n for n in nodes if n.parent is not None and n.step_idx != -1]
+            candidates = [n for n in nodes if n.parent is not None and n.step_idx != -1 and n.children is not None]
             # Sort by entropy
             assert candidates!= [], f"No valid nodes found in tree {tree.prompt_id} for entropy selection"
             candidates.sort(key=lambda n: self.node_entropy.get(n.node_id, float("-inf")), reverse=True)
@@ -641,6 +648,8 @@ class TreeManager:
                 ground_truth=tree.ground_truth,
                 index=None,
             )
+            
+            
 
             if not self.defer_step_backprop:
                 node.backpropagate(node.reward if node.reward is not None else self.default_reward)
@@ -649,6 +658,8 @@ class TreeManager:
             for node in branch_plan.nodes:
                 if node is not None:
                     node.backpropagate(node.reward if node.reward is not None else self.default_reward)
+
+        self._update_leaves()
 
     # ------------------------------------------------------------------
     # MCTS-style correctness backpropagation
@@ -717,10 +728,11 @@ class TreeManager:
 
         for tree_idx, tree in enumerate(self.trees):
             # For each leaf, traverse path from leaf to root and compute Q values
-            leaves = self._get_all_leaves(tree.root)
-            for n in self.initial_leaves[tree_idx]:
-                if n not in leaves:
-                    leaves.append(n)
+            leaves = list(self.tree_leaves[tree_idx])
+            # leaves = self._get_all_leaves(tree.root)
+            # for n in self.initial_leaves[tree_idx]:
+            #     if n not in leaves:
+            #         leaves.append(n)
 
             for leaf in leaves:
                 path = self._get_node_chain(leaf)
@@ -795,7 +807,7 @@ class TreeManager:
             
             # 2) bottom-up averaging for each tree
             self._compute_state_value(tree.root)
-            self._assign_global_state_value(tree.root)
+            self._assign_global_state_value(tree.root)# 总体平均的 state value 存在每个结点的 global_state_value 中
 
     def _assign_leaf_correctness_values(self, node: Node, ground_truth: Optional[str]) -> None:
         """对所有叶子节点分配基于 ground_truth 的正确性得分。"""
@@ -870,7 +882,7 @@ class TreeManager:
         Ensures every non-leaf subtree has at least 1 leaf (guard against malformed trees).
         """
 
-        postorder: list[Node] = []
+        postorder: list[Node] = []# 这是遍历的顺序
         stack: list[Node] = [root]
         while stack:
             n = stack.pop()
@@ -881,10 +893,10 @@ class TreeManager:
         leaf_counts: Dict[int, int] = {}
         for n in reversed(postorder):
             if n.is_leaf:
-                leaf_counts[id(n)] = 1
+                leaf_counts[n.node_id] = 1
             else:
-                count = sum(leaf_counts.get(id(c), 1) for c in n.children)
-                leaf_counts[id(n)] = max(count, 1)
+                count = sum(leaf_counts.get(c.node_id, 1) for c in n.children)
+                leaf_counts[n.node_id] = max(count, 1)
         return leaf_counts
 
     def build_response_batch(self, batch_index_list: Optional[list[Any]] = None, gen_batch_output: Optional[DataProto] = None, use_state_values: bool = True) -> Optional[DataProto]:
@@ -903,11 +915,12 @@ class TreeManager:
         
         for tree_idx, tree in enumerate(self.trees):
             # Combine initial snapshot leaves with current leaves, dedup by node_id
-            leaves = self._get_all_leaves(tree.root)
-            leaves_initial = self.initial_leaves[tree_idx]
-            for n in leaves_initial:
-                if n not in leaves:
-                    leaves.append(n)
+            leaves = list(self.tree_leaves[tree_idx])
+            # leaves = self._get_all_leaves(tree.root)
+            # leaves_initial = self.initial_leaves[tree_idx]
+            # for n in leaves_initial:
+            #     if n not in leaves:
+            #         leaves.append(n)
             ground_truth = tree.ground_truth
             print(f"{len(leaves)} leaves found in tree_idx {tree_idx} with ground_truth: {ground_truth}")
             
@@ -926,7 +939,6 @@ class TreeManager:
                 response_data = self._reconstruct_path_tensors(node_chain, tree.root)
                 response_data["ground_truth"] = ground_truth
                 response_data_list.append(response_data)
-                print(len(response_data_list))
 
         
         if not response_data_list:
@@ -1040,6 +1052,18 @@ class TreeManager:
             meta_info={},
         )
         return reward_proto
+
+    def _update_leaves(self,) -> None:
+        """更新每棵树的叶子节点列表，供后续路径提取使用。"""
+        for tree_idx, tree in enumerate(self.trees):
+            leaves = self._get_all_leaves(tree.root)
+            self.tree_leaves[tree_idx].update(leaves)
+            print("[INFO]: Add {} leaves! Updated leaves for tree_idx {}: {} leaves total".format(len(leaves), tree_idx, len(self.tree_leaves[tree_idx])))
+            for leaf in leaves:
+                print(leaf.node_id)
+            
+
+        self.initial_leaves = [self._get_all_leaves(t.root) for t in self.trees]
     
     def _get_all_leaves(self, root: Node) -> list[Node]:
         """后序遍历获取所有叶子节点。"""

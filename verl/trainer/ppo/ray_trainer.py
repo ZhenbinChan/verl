@@ -284,7 +284,8 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["returns"] = returns
 
     elif adv_estimator == AdvantageEstimator.Tree_GAE:
-        values = organize_values_from_q_values(data.batch)
+        # values = organize_values_from_q_values(data.batch)
+        values = data.batch.get("state_value_scores")
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=values,
@@ -310,7 +311,7 @@ def organize_values_from_q_values(batch):
     The returned tensor matches token_level_rewards in shape so it can be
     consumed by compute_gae_advantage_return.
     """
-
+    import pdb;pdb.set_trace()
     token_level_rewards = batch.get("token_level_rewards")
     if token_level_rewards is None:
         raise ValueError("token_level_rewards missing in batch; cannot align values")
@@ -341,6 +342,8 @@ def organize_values_from_q_values(batch):
 
     batch["values"] = values
     return values
+
+
 
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
@@ -1082,7 +1085,6 @@ class RayPPOTrainer:
                         for i in range(len(self.tree_manager.trees)):
                             self.tree_manager.pretty_print_tree(i)
                         # --------------------------------------- #
-                        
                         self.tree_manager.backpropagate_correctness()# MCTS-style correctness backpropagation / TreeRL Node Value
                         self.tree_manager.compute_q_values(gamma=self.config.algorithm.get("gamma", 1))# Return / Q Value Calculation
                         self.tree_manager.apply_treerl_rewards()# TreeRL Reward Calculation
@@ -1119,7 +1121,7 @@ class RayPPOTrainer:
                         repeat_times = int(gen_batch_output.batch.batch_size[0]) // int(gen_batch.batch.batch_size[0])
                         if not isinstance(repeat_times, int) or repeat_times < 1:
                             raise ValueError(f"Invalid repeat times calculated from tree sampling: {repeat_times}")
-                        print(f"Tree sampling enabled, repeating batch {repeat_times} times to align with generated responses")
+                        # print(f"Tree sampling enabled, repeating batch {repeat_times} times to align with generated responses")
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)

@@ -45,7 +45,7 @@ class TreeRewardManager:
         gt = []
         response = []
         outcome_reward = []
-
+        import pdb;pdb.set_trace()
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
