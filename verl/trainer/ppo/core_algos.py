@@ -468,6 +468,157 @@ def compute_gdpo_outcome_advantage(
     return advantages, advantages
 
 
+@register_adv_est("step_gdpo")
+def compute_step_gdpo_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Step-GDPO: Step-Level Process Reward + GDPO Advantage Estimation.
+
+    Combines DeepSeekMath's "big-pool" process reward normalization with
+    GDPO's per-dimension decoupled normalization.
+
+    Algorithm:
+        1. Outcome reward: standard GRPO normalization (scalar per rollout)
+           A_outcome = GRPO(outcome_scores)  → (bs, seq_len)
+
+        2. Process rewards (per reward type k):
+           - Collect ALL step scores from ALL rollouts in the group into pool R_k
+           - Normalize: r_tilde = (r - mean(R_k)) / (std(R_k) + eps)
+           - Place normalized scores back at the step-end token positions
+
+        3. Weighted sum across dimensions:
+           A_sum[i,t] = w_outcome * A_outcome[i,t] + sum_k(w_k * normalized_process_k[i,t])
+
+        4. Reward-to-go (temporal accumulation):
+           A[i,t] = cumsum_from_right(A_sum[i,:] * mask[i,:])
+
+        5. Batch-level whiten:
+           A_final = masked_whiten(A, response_mask)
+
+    Args:
+        token_level_rewards: (bs, response_length) - outcome rewards (score at last token)
+        response_mask: (bs, response_length)
+        index: (bs,) - group id per sample (from uid)
+        epsilon: Numerical stability constant
+        norm_adv_by_std_in_grpo: Whether to normalize by std in outcome GRPO
+        config: Algorithm configuration containing step_reward_keys, step_reward_weights
+        non_tensor_batch: Dict containing step reward data keyed by "{type}_step_reward"
+        batch: Batch data containing prompts, attention_mask, etc.
+
+    Returns:
+        advantages: (bs, response_length)
+        returns: (bs, response_length) - same as advantages
+    """
+    with torch.no_grad():
+        bs, seq_len = token_level_rewards.shape
+        device = token_level_rewards.device
+
+        # --- Read config ---
+        step_reward_keys = []
+        step_reward_weights = [1.0, 1.0]  # [outcome_weight, process_weight]
+        if config is not None:
+            step_reward_keys = list(config.get("step_reward_keys", []))
+            step_reward_weights = list(config.get("step_reward_weights", [1.0, 1.0]))
+
+        outcome_weight = step_reward_weights[0] if len(step_reward_weights) > 0 else 1.0
+        process_weight = step_reward_weights[1] if len(step_reward_weights) > 1 else 1.0
+
+        # --- Step 1: Outcome advantage (standard GRPO) ---
+        outcome_adv, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+        # --- Step 2: Process reward advantages (big-pool normalization per dimension) ---
+        process_adv_sum = torch.zeros(bs, seq_len, device=device, dtype=torch.float32)
+
+        if non_tensor_batch is not None and step_reward_keys:
+            g = as_torch_index(index, device=device)
+
+            for key in step_reward_keys:
+                assert key in non_tensor_batch, (
+                    f"Step-GDPO: reward key '{key}' not found in non_tensor_batch. "
+                    f"Available keys: {list(non_tensor_batch.keys())}. "
+                    f"Make sure your StepRewardManager returns this key."
+                )
+
+                step_reward_data = non_tensor_batch[key]  # array of lists of (pos, score)
+
+                # Build token-level process reward tensor from (pos, score) lists
+                raw_process_reward = torch.zeros(bs, seq_len, device=device, dtype=torch.float32)
+                for i in range(bs):
+                    item_data = step_reward_data[i]
+                    if isinstance(item_data, (list, tuple)):
+                        for pos, score in item_data:
+                            if 0 <= pos < seq_len:
+                                raw_process_reward[i, pos] = float(score)
+
+                # Big-pool normalization: per group, collect all non-zero scores
+                normalized_process_reward = torch.zeros_like(raw_process_reward)
+
+                # Group by prompt (index)
+                prompt_groups = defaultdict(list)
+                for i in range(bs):
+                    prompt_groups[index[i]].append(i)
+
+                for _, group_indices in prompt_groups.items():
+                    # Collect all step scores in this group into a "big pool"
+                    pool_scores = []
+                    step_info = []  # (sample_idx, token_pos) for each score in pool
+                    for idx in group_indices:
+                        item_data = step_reward_data[idx]
+                        if isinstance(item_data, (list, tuple)):
+                            for pos, score in item_data:
+                                if 0 <= pos < seq_len:
+                                    pool_scores.append(float(score))
+                                    step_info.append((idx, pos))
+
+                    if len(pool_scores) < 2:
+                        # Not enough data to normalize, keep raw scores
+                        for idx, pos in step_info:
+                            normalized_process_reward[idx, pos] = raw_process_reward[idx, pos]
+                        continue
+
+                    pool_tensor = torch.tensor(pool_scores, device=device, dtype=torch.float32)
+                    pool_mean = pool_tensor.mean()
+                    pool_std = pool_tensor.std()
+
+                    # Normalize each step score
+                    for score_idx, (sample_idx, token_pos) in enumerate(step_info):
+                        normalized_score = (pool_scores[score_idx] - pool_mean) / (pool_std + epsilon)
+                        normalized_process_reward[sample_idx, token_pos] = normalized_score
+
+                process_adv_sum += normalized_process_reward
+
+        # --- Step 3: Weighted sum ---
+        # outcome_adv already has values spread across all response tokens (GRPO style)
+        # process_adv_sum has values only at step-end positions
+        # We need to do reward-to-go on the process side: A[i,t] = sum_{j: index(j)>=t} r_sum[i,j]
+        # This is a reverse cumulative sum of the process advantage
+        process_adv_cumsum = (process_adv_sum * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+        process_adv_cumsum = process_adv_cumsum * response_mask
+
+        # Combine
+        combined_advantage = outcome_weight * outcome_adv + process_weight * process_adv_cumsum
+
+        # --- Step 4: Batch-level whiten ---
+        advantages = verl_F.masked_whiten(combined_advantage, response_mask) * response_mask
+
+    return advantages, advantages
+
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
 def compute_grpo_passk_outcome_advantage(
     token_level_rewards: torch.Tensor,

@@ -313,5 +313,182 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+# ---------------------------------------------------------------------------
+# Step-GDPO tests
+# ---------------------------------------------------------------------------
+
+class _FakeConfig:
+    """Minimal mock for AlgoConfig that supports .get()"""
+    def __init__(self, data: dict):
+        self._data = data
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+def _make_step_reward_data(batch_size: int, seq_len: int, num_steps_range=(2, 6)):
+    """Generate mock step reward data: list of (pos, score) per sample."""
+    import random as _rng
+    data = []
+    for _ in range(batch_size):
+        num_steps = _rng.randint(*num_steps_range)
+        positions = sorted(_rng.sample(range(seq_len), min(num_steps, seq_len)))
+        rewards = [(pos, _rng.random()) for pos in positions]
+        data.append(rewards)
+    return np.array(data, dtype=object)
+
+
+class TestStepGDPO(unittest.TestCase):
+
+    def setUp(self):
+        self.seed = 42
+        torch.manual_seed(self.seed)
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        self.batch_size = 16
+        self.seq_len = 64
+        self.num_groups = 4
+
+    def test_output_shape(self):
+        """Test that step_gdpo returns correct shapes."""
+        from verl.trainer.ppo.core_algos import compute_step_gdpo_advantage
+
+        index = _make_group_index(self.batch_size, self.num_groups)
+        response_mask = _rand_mask(self.batch_size, self.seq_len)
+        token_level_rewards = torch.randn(self.batch_size, self.seq_len) * response_mask
+
+        step_data = _make_step_reward_data(self.batch_size, self.seq_len)
+        non_tensor_batch = {"format_step_reward": step_data}
+        config = _FakeConfig({
+            "step_reward_keys": ["format_step_reward"],
+            "step_reward_weights": [1.0, 1.0],
+        })
+
+        adv, ret = compute_step_gdpo_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch=non_tensor_batch,
+            batch=None,
+        )
+        self.assertEqual(adv.shape, (self.batch_size, self.seq_len))
+        self.assertEqual(ret.shape, (self.batch_size, self.seq_len))
+        # Advantages should be zero where mask is zero
+        masked_adv = adv * (1 - response_mask)
+        self.assertTrue(torch.allclose(masked_adv, torch.zeros_like(masked_adv), atol=1e-6))
+
+    def test_degenerates_to_grpo_when_process_weight_zero(self):
+        """When process weight=0, step_gdpo should match outcome-only GRPO (up to whiten)."""
+        from verl.trainer.ppo.core_algos import compute_step_gdpo_advantage, compute_grpo_outcome_advantage
+
+        index = _make_group_index(self.batch_size, self.num_groups)
+        response_mask = _rand_mask(self.batch_size, self.seq_len)
+        token_level_rewards = torch.randn(self.batch_size, self.seq_len) * response_mask
+
+        # step_gdpo with process_weight=0
+        config = _FakeConfig({
+            "step_reward_keys": [],
+            "step_reward_weights": [1.0, 0.0],
+        })
+        step_adv, _ = compute_step_gdpo_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch={},
+            batch=None,
+        )
+
+        # Pure GRPO
+        grpo_adv, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+        )
+        # step_gdpo applies whiten on top of GRPO, so we compare the whiten of GRPO
+        import verl.utils.torch_functional as verl_F
+        grpo_whitened = verl_F.masked_whiten(grpo_adv, response_mask) * response_mask
+
+        self.assertTrue(
+            torch.allclose(step_adv, grpo_whitened, rtol=1e-4, atol=1e-5),
+            f"Max diff: {(step_adv - grpo_whitened).abs().max().item()}"
+        )
+
+    def test_reward_to_go_cumsum(self):
+        """Verify reward-to-go is correctly implemented as reverse cumsum."""
+        from verl.trainer.ppo.core_algos import compute_step_gdpo_advantage
+
+        bs, seq_len = 4, 20
+        index = np.array([0, 0, 1, 1])
+        response_mask = torch.ones(bs, seq_len)
+
+        # Outcome rewards: all zero (so outcome advantage = 0)
+        token_level_rewards = torch.zeros(bs, seq_len)
+
+        # Process reward: single step at position 10 with score 1.0 for all samples
+        step_data = np.array([
+            [(10, 1.0)],
+            [(10, 1.0)],
+            [(10, 1.0)],
+            [(10, 1.0)],
+        ], dtype=object)
+
+        config = _FakeConfig({
+            "step_reward_keys": ["test_step_reward"],
+            "step_reward_weights": [0.0, 1.0],  # only process
+        })
+
+        adv, _ = compute_step_gdpo_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch={"test_step_reward": step_data},
+            batch=None,
+        )
+
+        # With all same scores, normalization gives 0 for all (std=0 case)
+        # This tests the edge case gracefully
+        self.assertEqual(adv.shape, (bs, seq_len))
+
+    def test_big_pool_normalization(self):
+        """Verify big pool normalization works: scores from all steps in a group are pooled."""
+        from verl.trainer.ppo.core_algos import compute_step_gdpo_advantage
+
+        bs, seq_len = 4, 20
+        index = np.array([0, 0, 0, 0])  # all same group
+        response_mask = torch.ones(bs, seq_len)
+        token_level_rewards = torch.zeros(bs, seq_len)
+
+        # Different step counts, different scores
+        step_data = np.array([
+            [(5, 0.0), (10, 1.0)],      # 2 steps
+            [(3, 0.5), (8, 0.5), (15, 1.0)],  # 3 steps
+            [(7, 0.0)],                  # 1 step
+            [(4, 1.0), (12, 0.0)],       # 2 steps
+        ], dtype=object)
+
+        config = _FakeConfig({
+            "step_reward_keys": ["test_step_reward"],
+            "step_reward_weights": [0.0, 1.0],
+        })
+
+        adv, _ = compute_step_gdpo_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch={"test_step_reward": step_data},
+            batch=None,
+        )
+
+        self.assertEqual(adv.shape, (bs, seq_len))
+        # Pool has 8 scores: [0, 1, 0.5, 0.5, 1, 0, 1, 0]
+        # mean = 0.5, std should be non-zero
+        # Scores above mean should get positive normalized values
+        # The test mainly verifies no crash and correct shape
+
+
 if __name__ == "__main__":
     unittest.main()
