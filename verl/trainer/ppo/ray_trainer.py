@@ -1450,18 +1450,24 @@ class RayPPOTrainer:
                                     epoch, self.global_steps, prompts[i], responses[i], str(gts[i]), outcome_rewards[i], str(sr) if sr else "", num_steps
                                 )
 
-                        # Print one sample
+                        # NOTE: Print one sample
                         if self.global_steps % self.config.trainer.get("print_sample_freq", 1) == 0:
-                            print(f"\n" + "=" * 40 + f" Step {self.global_steps} Sample " + "=" * 40)
-                            print(f"Prompt: {prompts[0]}")
-                            print(f"Response: {responses[0]}")
-                            print(f"Outcome Reward: {outcome_rewards[0]}")
+                            print(f"\n" + "=" * 40 + f" Step {self.global_steps} Sample " + "=" * 40 + '\n')
+                            print("[Prompt]\n\n")
+                            print(prompts[0])
+                            # print(f"Response: {responses[0]}")
+                            print("\n\n[Response]\n\n")
+                            print(responses[0])
+                            
+                            print(f"\n\n[Groundtruth]: {gts[0]}")
+                            print("\n\n[Outcome Reward]")
+                            print(f"{outcome_rewards[0]}")
                             sr_sample = []
                             for k, v in reward_extra_infos_dict.items():
                                 if k.endswith("_step_reward") and len(v) > 0:
                                     sr_sample.append({k: v[0]})
                             if sr_sample:
-                                print(f"Step Rewards: {sr_sample}")
+                                print(f"[Step Rewards]: {sr_sample}")
                             print("=" * 90 + "\n")
                     # --- End of Custom Logging ---
 
