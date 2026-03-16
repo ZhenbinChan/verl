@@ -510,7 +510,7 @@ def compute_step_gdpo_advantage(
         index: (bs,) - group id per sample (from uid)
         epsilon: Numerical stability constant
         norm_adv_by_std_in_grpo: Whether to normalize by std in outcome GRPO
-        config: Algorithm configuration containing step_reward_keys, step_reward_weights
+        config: Algorithm configuration containing step_reward_type, step_reward_weights
         non_tensor_batch: Dict containing step reward data keyed by "{type}_step_reward"
         batch: Batch data containing prompts, attention_mask, etc.
 
@@ -523,11 +523,17 @@ def compute_step_gdpo_advantage(
         device = token_level_rewards.device
 
         # --- Read config ---
-        step_reward_keys = []
         step_reward_weights = [1.0, 1.0]  # [outcome_weight, process_weight]
+        step_reward_keys = []  # auto-derived from step_reward_type
         if config is not None:
-            step_reward_keys = list(config.get("step_reward_keys", []))
             step_reward_weights = list(config.get("step_reward_weights", [1.0, 1.0]))
+            # Auto-derive keys: step_reward_type="random" -> key="random_step_reward"
+            srt = config.get("step_reward_type", None)
+            if srt is not None:
+                if isinstance(srt, str):
+                    step_reward_keys = [f"{srt}_step_reward"]
+                else:
+                    step_reward_keys = [f"{t}_step_reward" for t in srt]
 
         outcome_weight = step_reward_weights[0] if len(step_reward_weights) > 0 else 1.0
         process_weight = step_reward_weights[1] if len(step_reward_weights) > 1 else 1.0

@@ -67,6 +67,7 @@ class StepRewardManager(RewardManagerBase):
         reward_router_address=None,
         reward_model_tokenizer=None,
         split_fn: Optional[Callable[[str], list[str]]] = None,
+        step_reward_type: Optional[str | list[str]] = None,
     ):
         super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
@@ -77,14 +78,19 @@ class StepRewardManager(RewardManagerBase):
         # Pluggable step splitter
         self.split_fn = split_fn or default_split_fn
 
-        # Read step reward config
-        reward_cfg = config.reward if hasattr(config, "reward") else config
-        self.step_reward_types = []
-        step_reward_type = reward_cfg.get("step_reward_type", "random") if hasattr(reward_cfg, "get") else "random"
-        if isinstance(step_reward_type, str):
-            self.step_reward_types = [step_reward_type]
+        # Step reward type: explicit parameter > config > default "random"
+        if step_reward_type is not None:
+            if isinstance(step_reward_type, str):
+                self.step_reward_types = [step_reward_type]
+            else:
+                self.step_reward_types = list(step_reward_type)
         else:
-            self.step_reward_types = list(step_reward_type)
+            reward_cfg = config.reward if hasattr(config, "reward") else config
+            srt = reward_cfg.get("step_reward_type", "random") if hasattr(reward_cfg, "get") else "random"
+            if isinstance(srt, str):
+                self.step_reward_types = [srt]
+            else:
+                self.step_reward_types = list(srt)
 
     def _split_response_into_steps(self, response_text: str) -> list[tuple[str, int, int]]:
         """Split response text into steps and return (step_text, char_start, char_end).

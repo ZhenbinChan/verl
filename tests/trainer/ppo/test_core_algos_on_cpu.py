@@ -360,7 +360,7 @@ class TestStepGDPO(unittest.TestCase):
         step_data = _make_step_reward_data(self.batch_size, self.seq_len)
         non_tensor_batch = {"format_step_reward": step_data}
         config = _FakeConfig({
-            "step_reward_keys": ["format_step_reward"],
+            "step_reward_type": "format",
             "step_reward_weights": [1.0, 1.0],
         })
 
@@ -388,7 +388,6 @@ class TestStepGDPO(unittest.TestCase):
 
         # step_gdpo with process_weight=0
         config = _FakeConfig({
-            "step_reward_keys": [],
             "step_reward_weights": [1.0, 0.0],
         })
         step_adv, _ = compute_step_gdpo_advantage(
@@ -435,7 +434,7 @@ class TestStepGDPO(unittest.TestCase):
         ], dtype=object)
 
         config = _FakeConfig({
-            "step_reward_keys": ["test_step_reward"],
+            "step_reward_type": "test",
             "step_reward_weights": [0.0, 1.0],  # only process
         })
 
@@ -470,7 +469,7 @@ class TestStepGDPO(unittest.TestCase):
         ], dtype=object)
 
         config = _FakeConfig({
-            "step_reward_keys": ["test_step_reward"],
+            "step_reward_type": "test",
             "step_reward_weights": [0.0, 1.0],
         })
 

@@ -1672,20 +1672,22 @@ class RayPPOTrainer:
                             metrics[f"gdpo/{key}/std"] = float(np.std(vals))
                             metrics[f"gdpo/{key}/max"] = float(np.max(vals))
                             metrics[f"gdpo/{key}/min"] = float(np.min(vals))
-                # Step-GDPO per-step reward metrics
-                step_reward_keys = self.config.algorithm.get("step_reward_keys", None)
-                if step_reward_keys and self.config.algorithm.adv_estimator == "step_gdpo":
-                    for key in step_reward_keys:
-                        if key in batch.non_tensor_batch:
-                            # Each item is a list of (pos, score) tuples
-                            all_scores = []
-                            for item_data in batch.non_tensor_batch[key]:
-                                if isinstance(item_data, (list, tuple)):
-                                    all_scores.extend([s for _, s in item_data])
-                            if all_scores:
-                                arr = np.array(all_scores, dtype=np.float32)
-                                metrics[f"step_gdpo/{key}/mean"] = float(np.mean(arr))
-                                metrics[f"step_gdpo/{key}/std"] = float(np.std(arr))
+                # Step-GDPO per-step reward metrics (auto-derive keys from step_reward_type)
+                if self.config.algorithm.adv_estimator == "step_gdpo":
+                    srt = self.config.algorithm.get("step_reward_type", None)
+                    if srt is not None:
+                        step_reward_keys = [f"{srt}_step_reward"] if isinstance(srt, str) else [f"{t}_step_reward" for t in srt]
+                        for key in step_reward_keys:
+                            if key in batch.non_tensor_batch:
+                                # Each item is a list of (pos, score) tuples
+                                all_scores = []
+                                for item_data in batch.non_tensor_batch[key]:
+                                    if isinstance(item_data, (list, tuple)):
+                                        all_scores.extend([s for _, s in item_data])
+                                if all_scores:
+                                    arr = np.array(all_scores, dtype=np.float32)
+                                    metrics[f"step_gdpo/{key}/mean"] = float(np.mean(arr))
+                                    metrics[f"step_gdpo/{key}/std"] = float(np.std(arr))
                     # Also log num_steps if available
                     if "num_steps" in batch.non_tensor_batch:
                         ns = np.asarray(batch.non_tensor_batch["num_steps"], dtype=np.float32)
