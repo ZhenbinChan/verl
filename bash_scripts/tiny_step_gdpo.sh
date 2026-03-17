@@ -1,6 +1,5 @@
 set -x
 
-# 1. 基础路径设置
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_DIR="$HOME/run/work/verl/data/logiqa2k"
@@ -13,12 +12,6 @@ unset HIP_VISIBLE_DEVICES
 echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# Step-GDPO sanity check (对标 sanity_check_dapo.sh)
-# 变化点 vs DAPO:
-#   algorithm.adv_estimator: grpo -> step_gdpo
-#   reward_model.reward_manager: dapo -> step
-#   新增: step_reward_type, step_reward_weights (在 algorithm 里)
-#   删除: overlong_buffer_cfg (DAPO特有)
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=random \

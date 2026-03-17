@@ -1,1 +1,1 @@
-srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/sanity_check_dapo.sh" 2>&1 | tee run.log # _$(date +%Y%m%d_%H%M%S)
+srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/one_epoch_dapo.sh" 2>&1 | tee run.log # _$(date +%Y%m%d_%H%M%S)
