@@ -74,7 +74,7 @@ if __name__ == "__main__":
     val_dataset = dataset[val_key]
     test_dataset = dataset["test"]
 
-    if args.num_samples is not None and arg.num_samples != -1:
+    if args.num_samples is not None and args.num_samples != -1:
         train_dataset = train_dataset.shuffle(seed=42)
         train_dataset = train_dataset.select(range(min(len(train_dataset), args.num_samples)))
 
