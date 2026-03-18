@@ -16,7 +16,6 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=random \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
-    +reward.step_reward_type=random \
     reward_model.reward_manager=step \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \

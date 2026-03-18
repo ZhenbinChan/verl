@@ -78,15 +78,20 @@ class StepRewardManager(RewardManagerBase):
         # Pluggable step splitter
         self.split_fn = split_fn or default_split_fn
 
-        # Step reward type: explicit parameter > config > default "random"
-        if step_reward_type is not None:
+        # Step reward type: explicit parameter > reward config > algorithm config > default "random"
+        if step_reward_type is not None: # explicit parameter only exists @ unit tests
             if isinstance(step_reward_type, str):
                 self.step_reward_types = [step_reward_type]
             else:
                 self.step_reward_types = list(step_reward_type)
-        else:
-            reward_cfg = config.reward if hasattr(config, "reward") else config
-            srt = reward_cfg.get("step_reward_type", "random") if hasattr(reward_cfg, "get") else "random"
+        else: # all training scripts follow this branch
+            reward_cfg = config.get("reward", {})
+            algo_cfg = config.get("algorithm", {})
+            
+            srt = reward_cfg.get("step_reward_type", None)
+            if srt is None:
+                srt = algo_cfg.get("step_reward_type", "random")
+                
             if isinstance(srt, str):
                 self.step_reward_types = [srt]
             else:

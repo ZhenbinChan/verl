@@ -297,6 +297,17 @@ class RayPPOTrainer:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
+        # Synchronize step_reward_type between algorithm and reward configs
+        if self.config.algorithm.get("adv_estimator") == "step_gdpo":
+            algo_srt = self.config.algorithm.get("step_reward_type")
+            reward_srt = self.config.reward.get("step_reward_type")
+            
+            with open_dict(self.config):
+                if algo_srt is not None and reward_srt is None:
+                    self.config.reward.step_reward_type = self.config.algorithm.step_reward_type
+                elif reward_srt is not None and algo_srt is None:
+                    self.config.algorithm.step_reward_type = self.config.reward.step_reward_type
+
         # define in-reward KL control
         # kl loss control currently not suppoorted
         if self.config.algorithm.use_kl_in_reward:
