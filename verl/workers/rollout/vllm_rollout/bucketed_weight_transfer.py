@@ -155,7 +155,41 @@ class BucketedWeightSender:
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
+        
+        # --- NEW FIX: Clear internal ZMQ Context-level bindings ---
+        # Keep a class-level dictionary to track and close dangling sockets
+        if not hasattr(self.__class__, '_active_sockets'):
+            self.__class__._active_sockets = {}
+            
+        if self.zmq_handle in self.__class__._active_sockets:
+            try:
+                old_socket = self.__class__._active_sockets[self.zmq_handle]
+                # Force immediate close of the lingering socket (drops pending messages)
+                old_socket.setsockopt(zmq.LINGER, 0)
+                old_socket.close()
+                del self.__class__._active_sockets[self.zmq_handle]
+                logger.warning(f"Closed lingering ZMQ context socket for {self.zmq_handle}")
+            except Exception as e:
+                logger.error(f"Failed to close lingering ZMQ socket: {e}")
+        # ----------------------------------------------------------
+        
         self.socket = self.zmq_context.socket(zmq.REQ)
+        self.__class__._active_sockets[self.zmq_handle] = self.socket
+        
+        # --- Original patch: File-system level cleanup ---
+        if self.zmq_handle.startswith("ipc://"):
+            ipc_path = self.zmq_handle[len("ipc://") :]
+            # Ensure the IPC socket file does not already exist
+            if os.path.exists(ipc_path):
+                try:
+                    os.remove(ipc_path)
+                    logger.warning(f"Removed existing IPC socket file at {ipc_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove existing IPC socket file at {ipc_path}: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error when removing existing IPC socket file at {ipc_path}: {e}")
+        # --------------------------------------------------
+        
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):

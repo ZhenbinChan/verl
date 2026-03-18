@@ -47,11 +47,11 @@ def make_map_fn(split, format='flat'):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_save_dir", default="~/data/logiqa", help="The save directory for the preprocessed dataset.")
+    parser.add_argument("--local_save_dir", default="./data/logiqa2k", help="The save directory for the preprocessed dataset.")
     parser.add_argument("--subset", default="en", help="The subset (en/zh for v2, default for v1).")
     parser.add_argument("--version", type=int, default=1, choices=[1, 2], help="LogiQA version (1 or 2).")
     parser.add_argument("--format", default="flat", choices=["flat", "tree"], help="Prompt format.")
-    parser.add_argument("--num_samples", type=int, default=-1, help="The number of training samples to keep.")
+    parser.add_argument("--num_samples", type=int, default=2000, help="The number of training samples to keep.")
 
     args = parser.parse_args()
     
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     test_dataset = dataset["test"]
 
     if args.num_samples is not None and args.num_samples != -1:
-        train_dataset = train_dataset.shuffle(seed=42)
+        # train_dataset = train_dataset.shuffle(seed=42)
         train_dataset = train_dataset.select(range(min(len(train_dataset), args.num_samples)))
 
     # Transform datasets

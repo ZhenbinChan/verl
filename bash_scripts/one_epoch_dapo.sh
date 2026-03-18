@@ -15,7 +15,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$DATA_DIR/train.parquet \
-    data.val_files=$DATA_DIR/test.parquet \
+    data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
     data.val_batch_size=8 \
     data.max_prompt_length=512 \
@@ -44,7 +44,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=True \
+    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=False \
     +reward_model.reward_kwargs.overlong_buffer_cfg.len=512 \
     +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0 \
     +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
