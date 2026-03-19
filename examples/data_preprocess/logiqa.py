@@ -39,6 +39,9 @@ def make_map_fn(split, format='flat'):
                 "split": split,
                 "index": idx,
                 "answer": ground_truth,
+                "fol_context": context,
+                "fol_question": question_text,
+                "fol_options": options_str,
             },
         }
         return data

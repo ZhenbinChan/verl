@@ -13,6 +13,12 @@ unset HIP_VISIBLE_DEVICES
 # Sanity check
 echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+# FOL API configuration (for _compute_step_reward_fol LLM calls)
+# These env vars are the default fallback; can also be overridden via
+# +reward.fol_api_config.model=... +reward.fol_api_config.base_url=... in the CLI.
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
+export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 
 # Step-GDPO normal training (对标 one_epoch_dapo.sh)
 # 变化点 vs DAPO:
@@ -22,7 +28,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 #   删除: overlong_buffer_cfg (DAPO特有)
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
-    +algorithm.step_reward_type=random \
+    +algorithm.step_reward_type=fol \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \
     data.train_files=$DATA_DIR/train.parquet \

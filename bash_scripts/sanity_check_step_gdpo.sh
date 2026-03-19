@@ -13,9 +13,14 @@ unset HIP_VISIBLE_DEVICES
 echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
+# FOL API configuration (for _compute_step_reward_fol LLM calls)
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
+export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
+
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
-    +algorithm.step_reward_type=random \
+    +algorithm.step_reward_type=fol \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \
     data.train_files=$DATA_DIR/train.parquet \
