@@ -29,7 +29,7 @@ Atlas 800T A3
 DockerFile镜像构建 & 获取 & 使用 
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-如需要通过 DockerFile 构建镜像，或希望使用基于 verl 构建的镜像，请参考 `文档 <https://github.com/volcengine/verl/tree/main/docs/ascend_tutorial/dockerfile_build_guidance.rst>`_ 
+如需要通过 DockerFile 构建镜像，或希望使用基于 verl 构建的镜像，请参考 `文档 <https://github.com/volcengine/verl/tree/main/docs/ascend_tutorial/quick_start/dockerfile_build_guidance.rst>`_ 
 如果想直接获取镜像，请前往`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 进行获取，镜像中已包含基础环境和依赖软件包。
 
 安装基础环境
@@ -147,6 +147,8 @@ MindSpeed 对应 Megatron-LM 后端使用场景，使用方式如下：
     git clone --recursive https://github.com/volcengine/verl.git
     cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd ..
 
+    # （可选）提示：为了更佳的使用体验，最好将recipe子模块更新至最新commit
+    cd recipe && git checkout main && cd ..
 
 昇腾暂不支持生态库说明
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
