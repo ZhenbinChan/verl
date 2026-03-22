@@ -36,7 +36,7 @@ def make_map_fn(split, format='flat', system_prompt=None, user_prompt_suffix=Non
         
         instruction_following = 'Please reason step by step with steps separated by "\n\n", and put the index of the correct answer within \\boxed{{}}.'
         
-        if format == 'tree':
+        if format == 'xml':
             prompt_content = f"<Context>\n{context}\n</Context>\n\n<Question>\n{question_text}\n</Question>\n\n<Options>\n{options_str}\n</Options>\n\n{instruction_following}"
         else:
             prompt_content = f"Context: {context}\n\nQuestion: {question_text}\n\nOptions:\n{options_str}\n\n{instruction_following}"
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     parser.add_argument("--local_save_dir", default="./data/logiqa2k", help="The save directory for the preprocessed dataset.")
     parser.add_argument("--subset", default="en", help="The subset (en/zh for v2, default for v1).")
     parser.add_argument("--version", type=int, default=1, choices=[1, 2], help="LogiQA version (1 or 2).")
-    parser.add_argument("--format", default="flat", choices=["flat", "tree"], help="Prompt format.")
+    parser.add_argument("--format", default="flat", choices=["flat", "xml"], help="Prompt format.")
     parser.add_argument("--num_samples", type=int, default=2000, help="The number of training samples to keep.")
     parser.add_argument(
         "--system_prompt_file",
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     # Load dataset based on version
     if args.version == 1:
         data_source = "lucasmccabe/logiqa"
-        dataset = datasets.load_dataset(data_source, "default", trust_remote_code=True)
+        dataset = datasets.load_dataset(data_source, "default")
         # 1.0 uses 'validation' as the dev set
         val_key = "validation"
     else:

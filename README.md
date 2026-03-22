@@ -19,7 +19,7 @@ You can customize the LogiQA dataset loading and preprocessing by configuring a 
 - `--local_save_dir`: The directory to save the output `.parquet` files. Default is `./data/logiqa2k`.
 - `--format`: Prompt formatting style. Default is `flat`.
   - `flat`: Regular plain text format (`Context: ...\n\nQuestion: ...\n\nOptions: ...`).
-  - `tree`: XML tag format (`<Context>...\n</Context>\n<Question>...`).
+  - `xml`: XML tag format (`<Context>...\n</Context>\n<Question>...`).
 
 **Example:**
 
@@ -29,7 +29,18 @@ Version 1, 2000 samples, plain text format:
 python examples/data_preprocess/logiqa.py \
     --version 1 \
     --num_samples 2000 \
-    --local_save_dir ./data/logiqa2k
+    --local_save_dir ./data/logiqa2k \
+    --user_prompt_file logical_reasoning.txt
+```
+
+Version 1, all samples, plain text format:
+
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 1 \
+    --num_samples -1 \
+    --local_save_dir ./data/logiqa \
+    --user_prompt_file logical_reasoning.txt
 ```
 
 Version 2, 5000 samples, XML format:
@@ -38,8 +49,9 @@ Version 2, 5000 samples, XML format:
 python examples/data_preprocess/logiqa.py \
     --version 2 \
     --num_samples 5000 \
-    --format tree \
-    --local_save_dir ./data/logiqa5k_v2_tree
+    --format xml \
+    --local_save_dir ./data/logiqa5k_v2_xml \
+    --user_prompt_file logical_reasoning.txt
 ```
 
 ### Prompting
