@@ -33,73 +33,6 @@ def _compute_step_reward_random(step_text: str, prompt_text: str, step_history: 
     return float(random.randint(0, 1))
 
 
-def _compute_step_reward_format(step_text: str, prompt_text: str, step_history: list[str], **kwargs) -> float:
-    """Format-check process reward (e.g., must contain action tags)."""
-    score = 0.0
-    if re.search(r"<Action>.*</Action>", step_text, re.DOTALL):
-        score += 1.0
-    return score
-
-
-def _compute_step_reward_fol(
-    step_text: str,
-    prompt_text: str,
-    step_history: list[str],
-    *,
-    api_config: dict | None = None,
-    extra_info: dict | None = None,
-) -> float:
-    """FOL-based process reward.
-
-    Uses an external LLM to translate the problem premises into Z3 FOL
-    constraints, then checks satisfiability of the current step.
-
-    Extraction priority for context/question/options:
-      1. Structured fields in extra_info (fol_context, fol_question, fol_options)
-      2. Fallback: regex on prompt_text for <Context>/<Question>/<Options> XML tags
-      3. If neither found: return 0.0 (not a logic problem)
-    """
-    extra_info = extra_info or {}
-
-    # Priority 1: structured fields from extra_info
-    context = extra_info.get("fol_context")
-    question = extra_info.get("fol_question")
-    options = extra_info.get("fol_options")
-
-    # Priority 2: fallback to XML tag parsing from prompt text
-    if not context:
-        m = re.search(r"<Context>(.*?)</Context>", prompt_text, re.DOTALL)
-        context = m.group(1).strip() if m else None
-    if not question:
-        m = re.search(r"<Question>(.*?)</Question>", prompt_text, re.DOTALL)
-        question = m.group(1).strip() if m else None
-    if not options:
-        m = re.search(r"<Options>(.*?)</Options>", prompt_text, re.DOTALL)
-        options = m.group(1).strip() if m else None
-
-    # If we still can't extract context/question, not a logic problem
-    if not context or not question:
-        return 0.0
-
-    try:
-        from .fol_utils.nl2fol import fol_preprocessing, translate_and_execute_fol
-
-        declaration = fol_preprocessing(context, question, options, api_config=api_config)
-        reward = translate_and_execute_fol(declaration, step_text, api_config=api_config)
-        return float(reward)
-    except Exception as e:
-        logging.getLogger(__name__).warning("FOL reward computation failed: %s", e)
-        return 0.0
-
-
-# Registry of step reward scoring functions
-STEP_REWARD_FN_REGISTRY = {
-    "random": _compute_step_reward_random,
-    "format": _compute_step_reward_format,
-    "fol": _compute_step_reward_fol,
-}
-
-
 @register("step")
 class StepRewardManager(RewardManagerBase):
     """
@@ -124,6 +57,7 @@ class StepRewardManager(RewardManagerBase):
         reward_model_tokenizer=None,
         split_fn: Optional[Callable[[str], list[str]]] = None,
         step_reward_type: Optional[str | list[str]] = None,
+        step_reward_fns: Optional[dict] = None,
     ):
         super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
@@ -158,12 +92,36 @@ class StepRewardManager(RewardManagerBase):
             
             srt = reward_cfg.get("step_reward_type", None)
             if srt is None:
-                srt = algo_cfg.get("step_reward_type", "random")
+                srt = algo_cfg.get("step_reward_type", None)
+            if srt is None:
+                raise ValueError("step_reward_type is not specified")
                 
             if isinstance(srt, str):
                 self.step_reward_types = [srt]
             else:
                 self.step_reward_types = list(srt)
+                
+        # Initialize pluggable reward functions registry
+        self.step_reward_fns = {
+            "random": _compute_step_reward_random
+        }
+        
+        # Built-in extra reward types if requested (Lazy loading)
+        # Process Reward
+        # COMMONLY USED FUNCTIONS GO HERE
+        if any(rt in ["fol", "format"] for rt in self.step_reward_types):
+            try:
+                from verl.utils.reward_score.fol import compute_step_reward_format_fol, compute_step_reward_fol
+                if "format" not in self.step_reward_fns:
+                    self.step_reward_fns["format"] = compute_step_reward_format_fol
+                if "fol" not in self.step_reward_fns:
+                    self.step_reward_fns["fol"] = compute_step_reward_fol
+            except ImportError as e:
+                logging.getLogger(__name__).warning("Failed to lazily load built-in FOL reward functions: %s", e)
+                
+        # Override with any user-provided step_reward_fns
+        if step_reward_fns:
+            self.step_reward_fns.update(step_reward_fns)
 
     def _split_response_into_steps(self, response_text: str) -> list[tuple[str, int, int]]:
         """Split response text into steps and return (step_text, char_start, char_end).
@@ -174,12 +132,14 @@ class StepRewardManager(RewardManagerBase):
         segments = self.split_fn(response_text)
         steps = []
         cursor = 0
-        delimiter = "\n\n"
-        for idx, seg in enumerate(segments):
-            start = cursor
-            end = cursor + len(seg)
+        for seg in segments:
+            # Dynamically lock the position matching the split substring
+            start = response_text.find(seg, cursor)
+            if start == -1:
+                start = cursor
+            end = start + len(seg)
             steps.append((seg, start, end))
-            cursor = end + len(delimiter)  # skip delimiter
+            cursor = end
         return steps
 
     def _get_step_token_positions(self, response_text: str, valid_response_ids, valid_response_length: int):
@@ -189,7 +149,18 @@ class StepRewardManager(RewardManagerBase):
             List of (step_text, token_end_pos) where token_end_pos is the
             index of the last token in this step (within response_ids).
         """
-        steps = self._split_response_into_steps(response_text)
+        use_xml_extract = any(rt in ["fol", "format"] for rt in self.step_reward_types)
+        
+        steps = []
+        if use_xml_extract:
+            pattern = r'<step>.*?(?:</step>|$)'
+            matches = list(re.finditer(pattern, response_text, flags=re.DOTALL))
+            for match in matches:
+                steps.append((match.group(0), match.start(), match.end()))
+                
+        if not steps:
+            steps = self._split_response_into_steps(response_text)
+            
         result = []
         for step_text, char_start, char_end in steps:
             # Encode the text up to the end of this step to find token position
@@ -274,7 +245,9 @@ class StepRewardManager(RewardManagerBase):
         # 2.3 Compute process rewards for each step_reward_type
         for reward_type in self.step_reward_types:
             # NOTE: Process reward fn
-            reward_fn = STEP_REWARD_FN_REGISTRY.get(reward_type, _compute_step_reward_random)
+            reward_fn = self.step_reward_fns.get(reward_type)
+            if reward_fn is None:
+                raise ValueError(f"Unknown step reward type: {reward_type}")
             step_rewards = []  # list of (token_position, score)
             step_history = []
             for step_text, token_end_pos in step_positions:
