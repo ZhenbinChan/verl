@@ -1,1 +1,1 @@
-srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/sanity_check_step_gdpo.sh" 2>&1 | tee run_$(date +%Y%m%d_%H%M%S).log
+srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/format_step_gdpo.sh" 2>&1 | tee run_$(date +%Y%m%d_%H%M%S).log

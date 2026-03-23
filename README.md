@@ -54,6 +54,17 @@ python examples/data_preprocess/logiqa.py \
     --user_prompt_file logical_reasoning.txt
 ```
 
+Injection of Logic Reasoning Prompt:
+
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 2 \
+    --num_samples 5000 \
+    --format xml \
+    --local_save_dir ./data/logiqa5k_v2_xml \
+    --user_prompt_file logical_reasoning.txt
+```
+
 ### Prompting
 
 ```bash
