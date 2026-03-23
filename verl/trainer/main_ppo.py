@@ -25,14 +25,14 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
 # Vscode debug 使用
-#import debugpy
-#try:
-#    # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-#    debugpy.listen(("localhost", 9501))
-#    print("Waiting for debugger attach")
-#    debugpy.wait_for_client()
-#except Exception as e:
-#    pass
+import debugpy
+try:
+   # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+   debugpy.listen(("localhost", 9501))
+   print("Waiting for debugger attach")
+   debugpy.wait_for_client()
+except Exception as e:
+   print(f"Debugpy failed to start: {e}")   
 # 同时在vscode debuger 加入：
 #{
 #            "name": "sh_file_debug",
@@ -244,6 +244,7 @@ class TaskRunner:
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
+
 
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)

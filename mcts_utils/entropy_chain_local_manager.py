@@ -54,6 +54,8 @@ class EntropyGuidedChainLocalManager:
             "time_use": 0,
             "tree_structures": []
         }
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(args['tokenizer_path'], trust_remote_code=True)
 
     def serialize_tree(self, node: TreeNode) -> Dict[str, Any]:
         """
@@ -200,6 +202,7 @@ class EntropyGuidedChainLocalManager:
             # )
             initial_results = query_openai_api_with_logprobs(
                 messages,
+                model='qwen2.5-3b', # default: gpt-4o-mini-2024-07-18
                 n=1,
                 max_tokens=max_length,
                 temperature=self.args["temperature"],
@@ -212,13 +215,14 @@ class EntropyGuidedChainLocalManager:
             if initial_results is None or initial_results[0] is None:
                 continue
             break
-        
+        # import pdb;pdb.set_trace()
         for idx, (content_token_ids, _, finish_reason, _, log_probs) in enumerate(zip(*initial_results)):
             root_node = TreeNode(
                 tree_idx=idx,
                 node_idx=0,
                 decode_fn=self.decode_fn,
-                token_id_list=content_token_ids,
+                # token_id_list=content_token_ids,
+                token_id_list=content_token_ids[0],
                 log_prob_list=log_probs,
                 is_end=True,
                 finish_reason=finish_reason,

@@ -51,8 +51,7 @@ class TreeNode:
 
         # --- 节点包含的文本信息 ---
         self.token_id_list: List[int] = token_id_list
-        self.token_str_list: List[str] = [
-            decode_fn([token_id]) for token_id in token_id_list]
+        self.token_str_list: List[str] = [decode_fn([token_id]) for token_id in token_id_list]
 
         self.log_prob_list: List[float] = log_prob_list
         self.token_num: int = len(token_id_list)  # token 数量
@@ -279,14 +278,22 @@ def build_into_tree_format(
             else:
                 first_child_split_idx = child_split_indices[0]
 
+            # import pdb;pdb.set_trace()
             # 初始节点段，从0到第一个孩子的分割位置
+            answer_list = []
+            for token_id in tree_node.token_id_list[:first_child_split_idx]:
+                token_str = decode_fn([token_id])
+                answer_list.append(token_str)
+            answer_str = ''.join(answer_list)
+
+            # import pdb;pdb.set_trace()
             root_node = MCTSNode(
-                answer=''.join([decode_fn([token_id]) for token_id in tree_node.token_id_list[:first_child_split_idx]]),
+                answer=answer_str,
                 answer_token=tree_node.token_id_list[:first_child_split_idx],
                 parent=parent_mcts_node,
                 depth=(parent_mcts_node.depth + 1) if parent_mcts_node else 0,
                 terminal=is_terminal,
-                R = R,
+                R = float(R),
                 main_chain = main_chain,
                 finish_reason=tree_node.finish_reason
             )

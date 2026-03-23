@@ -1,39 +1,68 @@
-To accurately translate the context into a first-order logical expression, please analyze and extract the Declaration from the context. Please refer to the following example:
+## Instruction
+To accurately translate the context into a first-order logical expression, please analyze and extract the Declaration from the context. Please DO NOT translate the constraints;
+
+## Principle
+1. Type Definition: For all entities of the same type, use the EnumSort() method to define a new type.
+````code
+NewType, (Entity_1, Entity_2, Entity_3, ... ) = EnumSort(TypeName, ('Entity_1', 'Entity_2', 'Entity_3', ... ))
+````
+- Entity_* : Entities of the same type mentioned in the text
+- NewType: The name of the newly defined Z3 entity type
+2. Constant
+Constants are ordinary Python variables; they can also be of List type, where elements in the List are entity objects;
+3. Function Definition: Functions generally represent predicate logic relationships in the text, so the number of inputs is one or more, and there is only one output type.
+````code
+FunctionName = Function(function_name , InputSort_1, InputSort_2,..., OutputSort)
+````
+Defining a function requires three formal parameters:
+- function_name: The name of the function (predicate)
+- **InputSort: One or more Z3 data types (including new types defined by us). If the function has multiple inputs, separate the multiple input types with commas;
+- OutputSort: The output Z3 data type (including new types defined by us);
+4. Please DO NOT Translate or Write the constraints or conditions! Just need to Extract the Declaration (Constant, Function, Type).
+
+
+## Example
+Please refer to the following example:
 
 ---
 
-Example 1:
+## Example 1:
 
-[Context]
+### Input Text
 Four boys—Fred, Juan, Marc, and Paul—and three girls—Nita, Rachel, and Trisha—will be assigned to a row of five adjacent lockers, numbered consecutively 1 through 5, arranged along a straight wall. The following conditions govern the assignment of lockers to the seven children: Each locker must be assigned to either one or two children, and each child must be assigned to exactly one locker. Each shared locker must be assigned to one girl and one boy. Juan must share a locker, but Rachel cannot share a locker. Nita's locker cannot be adjacent to Trisha's locker. Fred must be assigned to locker 3.",
 
-[Question]
 "Which one of the following is a complete and accurate list of the children who must be among those assigned to shared lockers?
 
+### Declaration
+#### Type Definition
+ChildrenSort, (Fred, Juan, Marc, Paul, Nita, Rachel, Trisha) = EnumSort('Children', ['Fred', 'Juan', 'Marc', 'Paul', 'Nita', 'Rachel', 'Trisha'])
+LockerSort, (locker_1, locker_2, locker_3, locker_4, locker_5) = EnumSort('Locker', [1, 2, 3, 4, 5])
 
-Output of Example 1:
-children = EnumSort([Fred, Juan, Marc, Paul, Nita, Rachel, Trisha])
-lockers = EnumSort([1, 2, 3, 4, 5])
-assigned = Function([children] -> [lockers])
+#### Constant
+children = [Fred, Juan, Marc, Paul, Nita, Rachel, Trisha]
+lockers = [locker_1, locker_2, locker_3, locker_4, locker_5]
 
+#### Function Deifinition
+assigned = Function('assigned', children, lockers) # means that [children]--assigned--> [lockers]
+multi_assigned = Function('multi_assigned', children, children,  lockers) # means that [[children1], [children2]] --assigned--> [lockers]
 ---
-Example 2:
+## Example 2:
 
-[Context]
+### Input Text
 A music store carries exactly ten types of CDs—both new and used of each of jazz, opera, pop, rap, and soul. The store is having a sale on some of these types of CDs. The following conditions must apply: Used pop is on sale; new opera is not. If both types of pop are on sale, then all soul is. If both types of jazz are on sale, then no rap is. If neither type of jazz is on sale, then new pop is. If either type of rap is on sale, then no soul is.
 
-[Question]
 If new soul is not on sale, then which one of the following must be true?
 
-Output of Example 2:
-types = EnumSort([new_jazz, used_jazz, new_opera, used_opera, new_pop, used_pop, new_rap, used_rap, new_soul, used_soul])
-on_sale = Function([types] -> [bool])
+### Declaration
+#### Type Definition
+MusicSort, (new_jazz, used_jazz, new_opera, used_opera, new_pop, used_pop, new_rap, used_rap, new_soul, used_soul) = EnumSort('Type', [new_jazz, used_jazz, new_opera, used_opera, new_pop, used_pop, new_rap, used_rap, new_soul, used_soul])
+#### Function
+on_sale = Function('on_sale', MusicSort, BoolSort())
+#### Constant
+music = [new_jazz, used_jazz, new_opera, used_opera, new_pop, used_pop, new_rap, used_rap, new_soul, used_soul]
+
 
 ---
-Now, please extract the Declaration from the following problem  and put the Declaration into ```plain_text``` block:
+Now, please extract the Declaration from the given text  and put the Declaration python code into ```python``` block:
 
-[Context]
-{{Context}}
-
-[Question]
-{{Question}}
+### Input Text

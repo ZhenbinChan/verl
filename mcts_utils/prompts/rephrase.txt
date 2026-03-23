@@ -1,0 +1,26 @@
+## Instruction
+You are a professional linguist, adept at rephrasing various structured or unstructured information using clear, fluent, and concise natural language. I will now provide you with an answer to a logical reasoning question. These answers follow the structure below:
+1. Each response contains multiple reasoning steps, and each step is enclosed within <step>...</step>;
+2. The reasoning text in each step includes two parts: premises and intermediate conclusions. Premises are enclosed within <premise>...</premise> tags, while conclusions are enclosed within <conclusion>...</conclusion> tags;
+
+## Task Specification
+1. Remove tags like <premise> and <conclusion> in each step, and rephrase the reasoning using natural language; please note that the text for each step needs to clarify which premises were used to deduce the current intermediate conclusion.
+2. Deduplication: If repetitive or redundant reasoning steps are detected, please remove them; we define repetition as using the same premises and obtaining almost identical intermediate conclusions;
+3. After rephrasing the text of different steps, output a consistent and logically rigorous response paragraph;
+4. Coreference Resolution: The rephrased response should avoid using demonstrative pronouns as much as possible, such as He, It, or The second premise; you should specifically point out what these entities or premises are;
+5. Try not to use overly long compound sentences;
+
+## Example
+### Original Response
+<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Based on the given information, we know the relative positions of the cultural area, leisure area, and administrative service area. </conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>From the first premise, the administrative service area is located to the southwest of the cultural area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>From the second premise, the leisure area is located to the northeast of the cultural area.</conclusion>\n</step>\n\n<step>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<premise>The leisure area is northeast of the cultural area.</premise>\n<conclusion>Combining the two premises, we can deduce that the administrative service area, located to the southwest of the cultural area, is northeast of the leisure area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is northeast of the leisure area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Given that the administrative service area is northeast of the leisure area, and the cultural area is southeast of the leisure area, we can infer that the cultural area must be located to the northeast of the administrative service area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is northeast of the leisure area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Therefore, the business district (commercial area) is located southwest of the administrative service area, and the leisure area is located southwest of the cultural area, which matches option D.</conclusion>\n</step>\n\n\\boxed{D}
+
+### Rephrased Response
+From the premise that the administrative service area is southwest of the cultural area and the premise that the cultural area is southeast of the leisure area, the relative positions of the three areas can be determined step by step.
+First, the statement that the administrative service area is southwest of the cultural area establishes that the administrative service area lies both south and west of the cultural area.
+Second, the statement that the cultural area is southeast of the leisure area means that the cultural area lies south and east of the leisure area, which also implies that the leisure area is northwest of the cultural area.
+Combining these two premises, place the leisure area as a reference point. Since the cultural area is southeast of the leisure area, the cultural area must be located down and to the right of the leisure area. Because the administrative service area is southwest of the cultural area, the administrative service area must be located down and to the left of the cultural area. This positioning makes the administrative service area farther south than the leisure area and also west of the cultural area, which fixes the relative layout among the three regions.
+Under this arrangement, the only option consistent with the established directions is the one stating that the commercial area lies southwest of the administrative service area and the leisure area lies southwest of the cultural area, which corresponds to option D.
+
+---
+
+Now, Please rephrase the following response and put the program into ```plain_text``` block:

@@ -1371,7 +1371,7 @@ def query_openai_api_with_logprobs(
             for message in messages:
                 response = client.chat.completions.create(
                     model=model,
-                    messages=message,
+                    messages=[message],
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
@@ -1379,6 +1379,7 @@ def query_openai_api_with_logprobs(
                     stop=stops if stops else None,
                     logprobs=True,
                 )
+
                 # completion.choices[0].logprobs.content[0].logprob
                 for choice in response.choices:
                     generated_text = choice.message.content

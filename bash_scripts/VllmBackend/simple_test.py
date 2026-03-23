@@ -6,7 +6,7 @@ Simple vLLM server test script
 import requests
 import json
 
-def test_vllm_server(url="http://127.0.0.1:8000"):
+def test_vllm_server(url="http://127.0.0.1:4869"):
     print(f"Testing vLLM server at: {url}")
     
     # 1. Check if server is running

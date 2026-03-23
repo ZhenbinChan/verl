@@ -118,6 +118,9 @@ def process_single_data_for_each_gpu(
         "eos_tokens": eos_tokens,
         "use_pure_binary": True, # 是否只使用二分类奖励，若为 False 则使用 rm 评分作为奖励
         "entropy_rm_urls": ["http://172.18.80.30:8000/encode"],
+        "evaluator_urls": ["http://127.0.0.1:4869/v1"],
+        "extractor_urls": ["http://127.0.0.1:4869/v1"],
+        "tokenizer_path": tokenizer_path,
         "num_traces": 30, # 每轮迭代的轨迹数量
         "use_pure_RM" : True, # 是否只使用 rm 评分作为奖励，若为 False 则使用综合评分（可能包含 rm 评分、链路奖励等）作为奖励
         "use_orm_reward" : False, # 是否使用 openrm 评分作为奖励的一部分
@@ -147,13 +150,15 @@ def process_single_data_for_each_gpu(
         encode_fn=tokenize_fn,
         decode_fn=decode_fn,
         eos_tokens_set=args['eos_tokens'],
+        evaluator_urls=args['evaluator_urls'],
+        extractor_urls=args['extractor_urls'],
     )
 
     score_list = []
     for data in tqdm(data_batch, desc=f"GPU {gpu_id} progress"):
         item = {
-            "problem": data["Question"],
-            "golden_answer": data["Answer"],
+            "problem": data["query"],
+            "golden_answer": data["answer"],
         }
         result = manager.process_single_item(item, args)
         score = result['raw_avg_reward']
@@ -225,10 +230,10 @@ def process_single_data_for_each_gpu_mcts(
         llm = None
     
     score_list = []
+    f = open("/home/chenzhb/Workspaces/verl/mcts_utils/data/qwen2.5-3b_mcts_responses.jsonl", "w", encoding="utf-8")
     for data in tqdm(data_batch, desc=f"GPU {gpu_id} progress"):
-        problem = data["Question"]
-        answer = data["Answer"]
-
+        problem = data["question"]
+        answer = data["answer"]
         mcts = MCTSr(
             temperature=args["temperature"],
             top_p=args["top_p"],
@@ -292,17 +297,30 @@ def process_single_data_for_each_gpu_mcts(
             advantage_mix_allancestor=args["advantage_mix_allancestor"]
         )
         print(f"Gathered {len(paths)} paths.")
+
+        # ------- Save responses to jsonl file for later analysis ------
+        # with open("/home/chenzhb/Workspaces/verl/mcts_utils/data/qwen2.5-3b_mcts_responses.jsonl", "w", encoding="utf-8") as f:
+        # Gather the responses for fol test
+        for i, path in tqdm(enumerate(paths), total=len(paths)):
+            responese_str = ""
+            for node in path:
+                responese_str += node['answer']
+            # import pdb;pdb.set_trace()
+            f.write(json.dumps({"id": data["id"], "question":problem,  "response": responese_str}) + "\n")
+        # ----------------------------------------------------------------
+
         score = pass_rate(paths)
         score_list.append(score)
         avg_score = sum(score_list) / len(score_list)
         print(f"score: {score:.4f}, avg_score: {avg_score:.4f}, sample_num: {len(score_list)}")
         # visualize_tree(mcts.root)
         # print_tree(mcts.root)
+    f.close()
     print(f"GPU {gpu_id} finished processing. Scores: {avg_score:.4f}")
 
 
 if __name__ == '__main__':
-    MODEL_PATH = "/home/linziyong/Desktop/Model/Qwen2.5-3B-Instruct"
+    MODEL_PATH = "/home/chenzhb/Workspaces/LLMs/Qwen2.5-3B-Instruct"
     EOS_TOKENS = [151643]
     system_prompt_1 = 'please reason step by step with steps separated by "\n\n", and put the index of the correct answer within \\boxed{{}}.'
     system_prompt_2 = r"""
@@ -414,7 +432,7 @@ Your output should have this exact structure:
 
 Now, solve the following problem.
 """.strip()
-    eval_path = "/home/linziyong/Desktop/Program/TreeRL/TreeRL/datasets/eval/logiqa.jsonl"
+    eval_path = "/home/chenzhb/Workspaces/verl/mcts_utils/data/logiqa.jsonl"
     num_gpus = 1
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -466,7 +484,11 @@ Now, solve the following problem.
 
     # Create a process for each GPU
     processes = []
+    
     # process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, evaluator_urls, extractor_urls, tokenize_fn, system_prompt=system_prompt_2)
+
+    # process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, EOS_TOKENS, tokenize_fn, system_prompt=system_prompt_2)
+
     process_single_data_for_each_gpu_mcts(data_batches[0][:], 0, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, system_prompt=system_prompt_2)
     
     # for gpu_id, data_batch in enumerate(data_batches):

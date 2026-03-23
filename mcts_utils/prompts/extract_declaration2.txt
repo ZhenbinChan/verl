@@ -1,0 +1,76 @@
+## Task Goal
+Given a natural language logic puzzle, extract all required object types (EnumSort) and relations / properties (Function),
+and write them in Python Z3 declaration format.
+- You do NOT need to write constraints.
+- You only need to write the Declaration.
+
+## What is a Declaration
+A Declaration defines:
+- what objects exist (people / items / types / positions / categories)
+- what relations exist between objects
+
+## Basic Procedure
+### Step 1 — Find all object categories
+Find all different kinds of entities mentioned in the text.
+Rules:
+1. One EnumSort per category
+2. Use English names
+3. No spaces
+4. No Chinese
+Example:
+| Text                | Category |
+| ------------------- | -------- |
+| Fred, Juan, Marc    | children |
+| lockers 1–5         | lockers  |
+| new jazz, used jazz | types    |
+| Monday, Tuesday     | days     |
+| rooms A B C         | rooms    |
+Then we can extract the declaration:
+```python
+children = EnumSort(['Fred', 'Juan', 'Marc', ...])
+```
+### Step 2 — Find assignment / membership / relation
+Here is an example:
+```plain_text
+Each child is assigned to a locker
+```
+Look for words like:
+| Text        | Function |
+| ----------- | -------- |
+| assigned to | Function |
+| in          | Function |
+| on          | Function |
+| works on    | Function |
+| is in       | Function |
+| is assigned | Function |
+| on sale     | Function |
+| selected    | Function |
+Then we can write:
+```python
+assigned = Function([children], [lockers])# The input of the function should not be Specific entities, it should be the type defined by EnumSort.
+```
+### Step 3 — If it is Yes/No → use bool
+Example:
+- is on sale
+Write:
+```python
+on_sale = Function([types], [bool])
+```
+### Step 4 — If relation involves two objects → multiple inputs
+Example: two children share a locker
+Code: ```python
+assigned = Function([children, children], [lockers])
+```
+
+## NOTE
+1. **Keep original names**: Fred -> Fred, new pop -> new_pop
+2. The same type entity should be include in one EnumSort defintion, example:
+```
+children = EnumSort(['Fred', 'Juan', 'Marc', ...])
+```
+DO NOT Translation into:
+```
+Fred = EnumSort(['Fred])
+Fuan = EnumSort(['Juan'])
+```
+3. Do NOT write constraints;
