@@ -1,3 +1,6 @@
+# self-defined
+binlp-impl
+binlp-impl/*
 
 **/*.pt
 **/checkpoints
@@ -8,6 +11,8 @@
 **/*.tar.gz
 **/playground
 **/wandb
+
+/pyrightconfig.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -21,7 +26,7 @@ tensorflow/my_graph/*
 
 # Distribution / packaging
 .Python
-env/
+# env/
 build/
 develop-eggs/
 dist/
@@ -58,6 +63,8 @@ nosetests.xml
 coverage.xml
 *,cover
 .hypothesis/
+pytest.ini
+output.txt
 
 # Translations
 *.mo
@@ -112,6 +119,9 @@ ENV/
 # vim
 *.swp
 
+# emacs
+*~
+
 # ckpt
 *.lock
 
@@ -123,15 +133,4 @@ ENV/
 logs
 log
 outputs
-
-
-.config/
-.netrc/
-.triton/
-.netrc
-
-eval_output/
-eval/
-
-output_models/
-results/
+.history

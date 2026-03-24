@@ -11,117 +11,149 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
-import os
-
-import ray
+import inspect
+import multiprocessing
+from functools import partial
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from verl import DataProto
+from verl.utils.reward_score import default_compute_score
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+
+    from verl.experimental.reward_loop.reward_manager.base import RawRewardFn, RewardManagerBase
+    from verl.trainer.config.config import ModuleConfig
+    from verl.workers.config.reward import RewardManagerConfig
 
 
-def get_custom_reward_fn(config):
-    import importlib.util
-    import sys
+def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
+    """Calls `raw_fn` by merging `extra_kwargs` into call-time `kwargs`, with `extra_kwargs` taking precedence.
 
-    reward_fn_config = config.get("custom_reward_function") or {}
-    file_path = reward_fn_config.get("path")
-    if not file_path:
+    This function is used to merge additional keyword arguments with the original function's arguments.
+    """
+    merged_kwargs = {**kwargs, **extra_kwargs}
+    return raw_fn(*args, **merged_kwargs)
+
+
+async def _call_with_kwargs_async(raw_fn, extra_kwargs, *args, **kwargs):
+    """Calls `raw_fn` by merging `extra_kwargs` into call-time `kwargs`, with `extra_kwargs` taking precedence.
+
+    This function is used to merge additional keyword arguments with the original function's arguments.
+    """
+    merged_kwargs = {**kwargs, **extra_kwargs}
+    return await raw_fn(*args, **merged_kwargs)
+
+
+def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
+    """Load and return a custom reward function from external file.
+
+    Dynamically imports a reward function from a specified file path and wraps
+    it with additional keyword arguments from the configuration.
+
+    Args:
+        config (dict): Configuration dictionary containing custom_reward_function
+                      settings with 'path', 'name', and 'reward_kwargs' fields.
+
+    Returns:
+        callable or None: Wrapped reward function with merged kwargs, or None
+                         if no custom reward function is configured.
+
+    Raises:
+        FileNotFoundError: If the specified reward function file doesn't exist.
+        RuntimeError: If there's an error loading the module from file.
+        AttributeError: If the specified function name isn't found in the module.
+    """
+
+    reward_fn_config = config.reward.get("custom_reward_function") or {}
+    module_path = reward_fn_config.get("path")
+    if not module_path:
         return None
 
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
+    fn_name = reward_fn_config.get("name")
+    assert fn_name is not None
 
-    spec = importlib.util.spec_from_file_location("custom_module", file_path)
-    module = importlib.util.module_from_spec(spec)
-    try:
-        sys.modules["custom_module"] = module
-        spec.loader.exec_module(module)
-    except Exception as e:
-        raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
+    from verl.utils.import_utils import load_extern_object
 
-    function_name = reward_fn_config.get("name")
-    if not hasattr(module, function_name):
-        raise AttributeError(f"Reward function '{function_name}' not found in '{file_path}'.")
-
-    print(f"using customized reward function '{function_name}' from '{file_path}'")
-    raw_fn = getattr(module, function_name)
+    raw_fn = load_extern_object(module_path=module_path, object_name=fn_name)
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
-
-    def wrapped_fn(*args, **kwargs):
-        return raw_fn(*args, **kwargs, **reward_kwargs)
-
-    return wrapped_fn
-
-
-# def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
-#     reward_manager_name = config.reward_model.get("reward_manager", "naive")
-#     if reward_manager_name == "naive":
-#         from verl.workers.reward_manager import NaiveRewardManager
-#         reward_manager_cls = NaiveRewardManager
-
-#     elif reward_manager_name == "prime":
-#         from verl.workers.reward_manager import PrimeRewardManager
-#         reward_manager_cls = PrimeRewardManager
-
-#     elif reward_manager_name == "batch":
-#         from verl.workers.reward_manager import BatchRewardManager
-#         reward_manager_cls = BatchRewardManager
-
-#     elif reward_manager_name == "dapo":
-#         from verl.workers.reward_manager import DAPORewardManager
-#         reward_manager_cls = DAPORewardManager
-
-#     elif reward_manager_name == "naive_plus":
-#         from verl.workers.reward_manager import NaivePlusRewardManager
-#         reward_manager_cls = NaivePlusRewardManager
-#     elif reward_manager_name == "naive_math220k":
-#         from verl.workers.reward_manager import NaiveMath220KRewardManager
-#         reward_manager_cls = NaiveMath220KRewardManager
-#     else:
-#         raise NotImplementedError
-
-#     compute_score = get_custom_reward_fn(config)
-#     return reward_manager_cls(
-#         tokenizer=tokenizer,
-#         num_examine=num_examine,
-#         compute_score=compute_score,
-#         reward_fn_key=config.data.reward_fn_key,
-#         **reward_kwargs,
-#     )
+    if not inspect.iscoroutinefunction(raw_fn):
+        return partial(_call_with_kwargs, raw_fn, reward_kwargs)
+    else:
+        return partial(_call_with_kwargs_async, raw_fn, reward_kwargs)
 
 
-def compute_reward(data: DataProto, reward_fn):
+def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any) -> RewardManagerBase:
     """
-    Compute reward for a batch of data.
+    Load and initialize a reward manager based on the configuration.
+
     Args:
-        data: DataProto object containing the input data.
-        reward_fn: Reward function to compute the reward.
+        config: PPO trainer configuration object containing reward_model fields.
+        tokenizer: Tokenizer object used for processing text.
+        **reward_kwargs: Additional keyword arguments for the reward manager.
+
     Returns:
-        Tuple of reward tensor and extra info dictionary.
+        An instance of the specified reward manager class.
     """
-    try:
-        reward_result = reward_fn(data, return_dict=True)
-        reward_tensor = reward_result["reward_tensor"]
-        reward_extra_infos_dict = reward_result["reward_extra_info"]
-    except Exception as e:
-        print(f"Error in reward_fn: {e}")
-        reward_tensor = reward_fn(data)
-        reward_extra_infos_dict = {}
-    
-    reward_logging_info = {}
-    for k,v in reward_result.items():
-        if k not in ["reward_tensor", "reward_extra_info"]:
-            reward_logging_info[k] = v
 
-    return reward_tensor, reward_extra_infos_dict, reward_logging_info
+    # Try to get a custom reward function based on the configuration
+    # user defined reward manager can be registered in custom_reward_fn
+    compute_score = get_custom_reward_fn(config)
+    final_compute_score = compute_score
+
+    reward_manager_cfg: RewardManagerConfig = config.reward.reward_manager
+    reward_manager_cls: type[RewardManagerBase]
+    if reward_manager_cfg.source == "register":
+        from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
+
+        reward_manager_cls = get_reward_manager_cls(reward_manager_cfg.name)
+    elif reward_manager_cfg.source == "importlib":
+        from verl.utils.import_utils import load_extern_object
+
+        module_cfg: ModuleConfig | None = reward_manager_cfg.module
+        assert module_cfg is not None and module_cfg.path is not None, (
+            f"Module path is required when {reward_manager_cfg.source=}, but got {module_cfg=}"
+        )
+        reward_manager_cls_name = reward_manager_cfg.name
+        reward_manager_cls = cast(
+            "type[RewardManagerBase]",
+            load_extern_object(module_path=module_cfg.path, object_name=reward_manager_cls_name),
+        )
+
+    if compute_score is None:
+        sandbox_config = config.reward.get("sandbox_fusion")
+        sandbox_url = sandbox_config.get("url") if sandbox_config else None
+        memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
+        if sandbox_url:
+            sandbox_manager = multiprocessing.Manager()
+            # Create a semaphore to control concurrent access to the sandbox
+            _concurrent_semaphore = sandbox_manager.Semaphore(sandbox_config.get("max_concurrent", 64))
+            final_compute_score = partial(
+                default_compute_score,
+                sandbox_fusion_url=sandbox_url,
+                concurrent_semaphore=_concurrent_semaphore,
+                memory_limit_mb=memory_limit_mb,
+            )
+        else:
+            final_compute_score = default_compute_score
+
+    # Instantiate and return the reward manager with the specified parameters
+    return reward_manager_cls(
+        config=config,
+        tokenizer=tokenizer,
+        compute_score=final_compute_score,
+        **reward_kwargs,
+    )
 
 
-@ray.remote(num_cpus=1)
-def compute_reward_async(data: DataProto, config, tokenizer):
+def extract_reward(batch: DataProto):
     """
-    Load the reward manager and compute the reward for a batch of data.
-    This is meant to be run in a separate Ray worker.
+    Extract reward tensor and extra info from batch data.
     """
-    reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-    return compute_reward(data, reward_fn)
+    reward_tensor = batch.batch["rm_scores"]
+    reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+    reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+    return reward_tensor, reward_extra_infos_dict

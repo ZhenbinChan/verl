@@ -1,251 +1,139 @@
-data:
-  tokenizer: null
-  train_files: ~/data/rlhf/gsm8k/train.parquet
-  val_files: ~/data/rlhf/gsm8k/test.parquet
-  prompt_key: prompt
-  reward_fn_key: data_source
-  max_prompt_length: 512
-  max_response_length: 512
-  train_batch_size: 1024
-  val_batch_size: null # DEPRECATED: Validation datasets are sent to inference engines as a whole batch, which will schedule the memory themselves
-  return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
-  return_raw_chat: False
-  shuffle: True
-  filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You cat set the filter_overlong_prompts_workers to use multiprocessing to speed up.
-  filter_overlong_prompts_workers: 1
-  truncation: error
-  custom_cls:
-      path: null
-      name: null
+# specify the default per-component configs
+defaults:
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  # actor_rollout_ref.actor: trainer/config/actor/megatron_actor.yaml
+  - actor@actor_rollout_ref.actor: megatron_actor
+  # data: trainer/config/data/legacy_data.yaml
+  - data@data: legacy_data
+  # load the reference default config, then apply the fields in the current yaml
+  # Reference model config.
+  # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
+  - ref@actor_rollout_ref.ref: megatron_ref
+  # Rollout model config.
+  - rollout@actor_rollout_ref.rollout: rollout
+  # Model config.
+  - model@actor_rollout_ref.model: hf_model
+  # Critic model config.
+  - critic@critic: megatron_critic
+  # legacy reward impl config, for backward compatibility
+  - legacy_reward_impl
+  # Reward model config.
+  - reward@reward: reward
+  # Rollout correction config.
+  - algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
 
 actor_rollout_ref:
   hybrid_engine: True
+
+  nccl_timeout: 600 # seconds, default is 10 minutes for torch, you can set it to a larger value if you have long-running operations like 32B or 72B model using megatron
+
   model:
-    path: ~/models/deepseek-llm-7b-chat
-    external_lib: null
-    override_config: {}
-    enable_gradient_checkpointing: False
-    gradient_checkpointing_kwargs:
-      ## Activation Checkpointing
-      activations_checkpoint_method: null # 'uniform', 'block'; not used with 'selective'
-      # 'uniform' divides the total number of transformer layers and checkpoints the input activation of each chunk
-      # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
-      activations_checkpoint_granularity: null # 'selective' or 'full'
-      # 'full' will checkpoint the entire transformer layer and 'selective' only checkpoints memory intensive part of attention
-      activations_checkpoint_num_layers: null # not used with 'selective'
-  actor:
-    strategy: megatron  # This is for backward-compatibility
-    ppo_mini_batch_size: 256
-    ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
-    ppo_micro_batch_size_per_gpu: null
-    use_dynamic_bsz: False
-    use_torch_compile: True # False to disable torch compile
-    # pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
-    clip_ratio: 0.2 # default value if clip_ratio_low and clip_ratio_high are not specified
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
-    clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
-    loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
-    # NOTE: "token-mean" is the default behavior
-    entropy_coeff: 0
-    use_kl_loss: False # True for GRPO
-    kl_loss_coef: 0.001 # for grpo
-    kl_loss_type: low_var_kl # for grpo
-    ppo_epochs: 1
-    data_loader_seed: null
-    shuffle: False
-    optim:
-      lr: 1e-6
-      clip_grad: 1.0
-      lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
-      lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
-      min_lr_ratio: null   # only useful for warmup with cosine
-      warmup_style: constant  # select from constant/cosine
-      total_training_steps: -1  # must be override by program
-      weight_decay: 0.01
-    megatron:
-      param_offload: False
-      grad_offload: False
-      optimizer_offload: False
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      virtual_pipeline_model_parallel_size: null # change VPP interface for parallelism tests
-      context_parallel_size: 1
-      sequence_parallel: True
-      use_distributed_optimizer: True
-      use_dist_checkpointing: False
-      dist_checkpointing_path: null
-      seed: 1
-    profile: # profile the actor model in `update_policy` 
-      use_profile: False # open it when you want to profile the actor model
-      profile_ranks: null # list, you can specify the ranks to profile
-      step_start: -1 # start step in update_policy 
-      step_end: -1 # end step 
-      save_path: null # the path to save the profile result
-    load_weight: True
-    checkpoint:
-      contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
-  ref:
-    strategy: megatron
-    use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
-    megatron:
-      param_offload: False
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      virtual_pipeline_model_parallel_size: null # change VPP interface for parallelism tests
-      context_parallel_size: 1
-      sequence_parallel: True
-      use_distributed_optimizer: False
-      use_dist_checkpointing: False
-      dist_checkpointing_path: null
-      seed: 1
-    profile:
-      use_profile: False
-      profile_ranks: null
-      step_start: -1
-      step_end: -1
-      save_path: null
-    load_weight: True
-    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
-    log_prob_micro_batch_size_per_gpu: null
+    override_config:
+      model_config: {}
+      moe_config:
+        freeze_moe_router: False
+
+    use_fused_kernels: False # Whether to use custom fused kernels (PostProcessing, for memory efficiency)
+
+    trust_remote_code: False
+
+    # Whether to remove padding tokens in inputs during training
+    use_remove_padding: false
+
+    # LoRA (Low-Rank Adaptation) configuration for parameter-efficient fine-tuning
+    lora:
+      # LoRA type: "lora", "vlm_lora", "canonical_lora", or "dora"
+      type: lora
+
+      # whether to sync weights / refit by either merging LoRA adapters into the base model weights before transferring to vLLM (for better inference speed but more refit time and potential precision loss). If this is False, it will load separate adapters.
+      merge: False
+
+      # LoRA rank (Dimension of the low-rank projection space.). Set to 0 to disable LoRA
+      rank: 0  # typical values: 8, 16, 32, 64
+      
+      #  Weighting factor for the low-rank projection. Defaults to 32
+      alpha: 32
+      
+      # Dropout rate for the low-rank projection. Defaults to 0.0
+      dropout: 0.0
+      
+      # A list of module names to apply LoRA to.
+      # For fused LoRA, Defaults to all linear layers ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2'].
+      # For canonical LoRA: ["linear_q", "linear_k", "linear_v", "linear_proj", "linear_fc1_up", "linear_fc1_gate", "linear_fc2"]
+      # - 'linear_qkv': Apply LoRA to the fused linear layer used for query, key, and value projections in self-attention
+      # - 'linear_proj': Apply LoRA to the linear layer used for projecting the output of self-attention
+      # - 'linear_fc1': Apply LoRA to the first fully-connected layer in MLP
+      # - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP
+      # Target modules can also contain wildcards. For example, you can specify
+      # target_modules=['*.layers.0.*.linear_qkv', '*.layers.1.*.linear_qkv'] to add LoRA to only linear_qkv on the first two layers
+      # 
+      # Note:
+      # For MLA (e.g., DeepSeek), you should use ["linear_kv_down_proj","linear_kv_up_proj","linear_q_down_proj","linear_q_up_proj","linear_q_proj"]
+      # Instead of "linear_qkv" or ["linear_q","linear_k","linear_v"]
+      # By default, MoE routers are excluded from LoRA adaptation, and you will need to specify "router" in target_modules to include them.
+      target_modules:
+        - linear_qkv
+        - linear_proj
+        - linear_fc1
+        - linear_fc2
+      
+      # A list of module names not to apply LoRa to. It will match all nn.Linear & nn.Linear-adjacent modules whose name
+      # does not match any string in exclude_modules. If used, will require target_modules to be empty list or None
+      exclude_modules: []
+
+      # Position for applying dropout, can be 'pre' (before the low-rank projection) or 'post' (after). Defaults to 'pre'
+      dropout_position: pre
+
+      # Initialization method for the low-rank matrix A. Defaults to "xavier".
+      lora_A_init_method: xavier
+
+      # Initialization method for the low-rank matrix B. Defaults to "zero".
+      lora_B_init_method: zero
+
+      # Enables the experimental All-to-All (A2A) communication strategy. Defaults to False
+      a2a_experimental: False
+
+      # Parameter data type for LoRA weights. Default to null, which will use model's dtype.
+      dtype: null
+
+      # Path to pre-trained LoRA adapter weights (null to train from scratch)
+      adapter_path: null
+
+      # VLMLoRA additionally allows the user to specify whether the language or vision models should be frozen.
+      # For example, a common finetuning workload for multimodal models is to apply adapters to language model and fully
+      # finetune the vision model.
+      freeze_vision_model: True
+      freeze_vision_projection: True
+      freeze_language_model: True
+
   rollout:
-    name: vllm
-    mode: sync # sync: LLM, async: AsyncLLM
-    temperature: 1.0
-    top_k: -1 # 0 for hf rollout, -1 for vllm rollout
-    top_p: 1
-    prompt_length: ${data.max_prompt_length}  # for xperf_gpt
-    response_length: ${data.max_response_length}
-    # for vllm rollout
-    dtype: bfloat16 # should align with FSDP
-    gpu_memory_utilization: 0.5
-    ignore_eos: False
-    enforce_eager: True
-    free_cache_engine: True
-    load_format: dummy_megatron
-    tensor_model_parallel_size: 1
-    max_num_batched_tokens: 8192
-    max_model_len: null
-    max_num_seqs: 1024
-    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
-    log_prob_micro_batch_size_per_gpu: null
-    disable_log_stats: True
-    enable_chunked_prefill: False # could get higher throughput
-    # for hf rollout
-    do_sample: True
+    quantization: null
+
     layer_name_map:
       qkv_layer_name: qkv
       gate_proj_layer_name: gate_up
-    # number of responses (i.e. num sample times)
-    n: 1
-    engine_kwargs: # inference engine parameters
-      swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
-    val_kwargs:
-      # sampling parameters for validation
-      top_k: -1 # 0 for hf rollout, -1 for vllm rollout
-      top_p: 1.0
-      temperature: 0
-      n: 1
-      do_sample: False # default eager for validation
-    multi_turn: 
-      enable: False  # should set rollout.name to sglang_async if True
-      max_turns: null  # null for no limit (default max_length // 3)
-      tool_config_path: null  # null for no tool
-      format: chatml  # chatml, more formats will be supported in the future
-
-critic:
-  rollout_n: ${actor_rollout_ref.rollout.n}
-  strategy: megatron
-  optim:
-    lr: 1e-5
-    clip_grad: 1.0
-    lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
-    min_lr_ratio: null   # only useful for warmup with cosine
-    warmup_style: constant  # select from constant/cosine
-    total_training_steps: -1  # must be override by program
-    weight_decay: 0.01
-  model:
-    path: ~/models/deepseek-llm-7b-chat
-    tokenizer_path: ${actor_rollout_ref.model.path}
-    override_config: {}
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    enable_gradient_checkpointing: False
-    gradient_checkpointing_kwargs:
-      ## Activation Checkpointing
-      activations_checkpoint_method: null
-      activations_checkpoint_granularity: null
-      activations_checkpoint_num_layers: null
-  megatron:
-    param_offload: False
-    grad_offload: False
-    optimizer_offload: False
-    tensor_model_parallel_size: 1
-    pipeline_model_parallel_size: 1
-    virtual_pipeline_model_parallel_size: null # change VPP interface for parallelism tests
-    context_parallel_size: 1
-    sequence_parallel: True
-    use_distributed_optimizer: True
-    use_dist_checkpointing: False
-    dist_checkpointing_path: null
-    seed: 1
-  load_weight: True
-  ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
-  ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
-  ppo_micro_batch_size_per_gpu: null
-  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
-  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
-  data_loader_seed: ${actor_rollout_ref.actor.data_loader_seed}
-  shuffle: ${actor_rollout_ref.actor.shuffle}
-  cliprange_value: 0.5
-  kl_ctrl:
-    type: fixed
-    kl_coef: 0.001
-  checkpoint:
-    contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
-
-reward_model:
-  enable: False
-  strategy: megatron
-  megatron:
-    param_offload: False
-    grad_offload: False
-    optimizer_offload: False
-    tensor_model_parallel_size: 1
-    pipeline_model_parallel_size: 1
-    virtual_pipeline_model_parallel_size: null # change VPP interface for parallelism tests
-    context_parallel_size: 1
-    sequence_parallel: True
-    use_distributed_optimizer: False
-    use_dist_checkpointing: False
-    dist_checkpointing_path: null
-    seed: 1
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    external_lib: ${actor_rollout_ref.model.external_lib}
-  load_weight: True
-  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
-  micro_batch_size_per_gpu: null
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  max_length: null
-  launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
-
-custom_reward_function:
-  path: null
-  name: compute_score
 
 algorithm:
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: True
   use_kl_in_reward: False
-  kl_penalty: kl  # how to estimate kl divergence
+  kl_penalty: kl # how to estimate kl divergence
   kl_ctrl:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.KLControlConfig
     type: fixed
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
+  use_pf_ppo: False
+  pf_ppo:
+    reweight_method: pow # ["pow", "max_min", "max_random"]
+    weight_pow: 2.0
 
 trainer:
   balance_batch: True
@@ -253,17 +141,19 @@ trainer:
   total_training_steps: null
   project_name: verl_examples
   experiment_name: gsm8k
-  logger: ['console', 'wandb']
+  logger: ["console", "wandb"]
   log_val_generations: 0
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  esi_redundant_time: 0
+
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
   del_local_ckpt_after_load: False
   val_before_train: True
-  test_freq: 2
+  test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
@@ -271,6 +161,84 @@ trainer:
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
+  device: cuda
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
 
-ray_init:
-  num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  # whether to use legacy worker implementation
+  #  mode: "auto", "enable", or "disable"
+  use_legacy_worker_impl: auto
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null # choose between nsys, npu, torch, torch_memory
+  steps: null # profile steps
+  profile_continuous_steps: False
+  save_path: "outputs/profile" # profiler saving path
+  # Specific tool configs, can use +profiler.tool_config.[tool].xxx to config
+  global_tool_config:
+    # nsys config
+    nsys:
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # controller Nvidia Nsight Systems Options. Must set when profile_steps is not None.
+      ## reference https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+      ## reference https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html
+      controller_nsight_options:
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track the GPU memory usage by CUDA kernels. Must be string type "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole
+        cuda-graph-trace: "graph"
+
+      # worker Nvidia Nsight Systems Options. Must set when profile_steps is not None.
+      worker_nsight_options:
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track the GPU memory usage by CUDA kernels. Must be string type "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop. Do not change this config.
+        capture-range: "cudaProfilerApi"
+
+        # Specify the desired behavior when a capture range ends.
+        # In verl we need the torch.cuda.profiler.start/stop pair to repeats n times.
+        # valid values are "repeat-shutdown:n" or null.
+        # For normal whole step profiling, n = len(profile_steps);
+        # but for discrete profiling, n = len(profile_steps) * Number(subtasks).
+        # Or you can just leave it null and the program will use n = len(profile_steps) * 6;
+        capture-range-end: null
+
+        # Send signal to the target application's process group. We let the program to exit by itself.
+        kill: none
+
+    # enable memory visualization for debugging memory usage
+    torch_memory:
+      #  Maximum number of allocation entries to record
+      trace_alloc_max_entries: 100_000
+      # The depth of the call stack to capture for each allocation
+      stack_depth: 32
+      # 'alloc': records only allocation events || 'state': records memory state changes || 'all': records both.
+      context: "all"
+      # 'python': records Python stacks || 'cpp': records C++ stacks (available in some versions) || 'all': records both.
+      stacks: "all"
+      # devices, record_context etc.
+      kw_args: {}
+
+# configs for TransferQueue
+transfer_queue:
+  # Whether to enable transfer queue
+  enable: False
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  timeline_json_file: null

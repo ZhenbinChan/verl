@@ -9,11 +9,8 @@ train_files="['$gsm8k_train_path', '$math_train_path']"
 test_files="['$gsm8k_test_path', '$math_test_path']"
 
 # For async rollout mode, dataset should return raw chat.
-rollout_mode="sync"
-if [ "$rollout_mode" = "async" ]; then
-    return_raw_chat="True"
-    chat_scheduler=examples.ppo_trainer.naive_chat_scheduler.NaiveChatCompletionScheduler
-fi
+rollout_mode="async"
+return_raw_chat="True"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
@@ -38,7 +35,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=$rollout_mode \
-    actor_rollout_ref.rollout.chat_scheduler=$chat_scheduler \
+    actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=24000 \
     critic.optim.lr=1e-5 \
@@ -50,7 +47,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.fsdp_config.optimizer_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_example_gsm8k' \
     trainer.experiment_name='qwen2-7b_function_rm_bsz8k_p4k_r4k_seq_packing' \
     trainer.n_gpus_per_node=8 \

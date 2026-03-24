@@ -1,140 +1,141 @@
-# verl + Tree Search
-- 2025.06: 新增对于 batch 的可视化 (输入、输出、Reward Score)
-- 2025.08: 新增对于数据集 LogiQA 等的支持
-- 2025.08: 新增 Evaluation 方法
-- 2025.09: 新增对于 PRM 的支持
-- 2025.10: 新增 LLM-as-Judege 作为 Process Reward Model
-- 2024.02: 新增对于 Tree Search 的支持（复现 TreeRL）
+# verl: Volcano Engine Reinforcement Learning for LLMs (Forked)
 
-## Table of Contents
+This is a customized fork of [verl](https://github.com/volcengine/verl) tailored for logical reasoning tasks, process reward-based reinforcement learning methods (Step-GDPO, parallel generation or tree search), and specialized dataset preprocessing pipelines & prompting for LogiQA datasets.
 
-- [Installation](#installation)
-- [Dataset Preparation](#dataset-preparation)
-- [Evaluation](#evaluation)
-- [LLM-as-Judge & PRM](#LLM-as-Judge-&-PRM)
-- [Tree Sampling for RL Training](#Tree-Sampling-for-RL-Training)
+For the original verl library's detailed documentation and features, please refer to [README-bytedance.md](README-bytedance.md).
 
-# Installation
+---
 
-## Prerequisites
-- Python >= 3.11.0 （3.10 may raise some bug in deepseed)
-- PyTorch >= 2.0.0 (2.6.0 is Recommended)
-- CUDA >= 12.4
-- ray==2.48.0
-- vllm==0.8.5.post1
+## LogiQA Dataset Preprocessing & Prompting
 
-## Environment Setup
+The LogiQA dataset preprocessing allows injecting custom reasoning instructions (e.g., `p1 & p2 -> i1` for step-wise logical inferences) via flexible prompt file configurations.
 
-For conda users:
-```bash
-conda create -n verl_plus python=3.11
-conda activate verl_plus
-```
+### Version, Format, # of samples, and Output Directory
 
-## Install from source
+You can customize the LogiQA dataset loading and preprocessing by configuring a few parameters in `logiqa.py`:
+
+- `--version`: Specifies LogiQA dataset version (`1` for `lucasmccabe/logiqa` or `2` for `baber/logiqa2`). Default is `1`.
+- `--num_samples`: The number of training samples to keep. Use `-1` for all samples. Default is `2000`.
+- `--local_save_dir`: The directory to save the output `.parquet` files. Default is `./data/logiqa2k`.
+- `--format`: Prompt formatting style. Default is `flat`.
+  - `flat`: Regular plain text format (`Context: ...\n\nQuestion: ...\n\nOptions: ...`).
+  - `xml`: XML tag format (`<Context>...\n</Context>\n<Question>...`).
+
+**Example:**
+
+Version 1, 2000 samples, plain text format:
 
 ```bash
-git clone https://github.com/BiNLP/verl
-cd verl
-pip install -e .
+python examples/data_preprocess/logiqa.py \
+    --version 1 \
+    --num_samples 2000 \
+    --local_save_dir ./data/logiqa2k \
+    --user_prompt_file logical_reasoning.txt
 ```
 
-## Install dependencies
+Version 1, all samples, plain text format:
 
 ```bash
-pip install vllm==0.8.5
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
-pip install flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
-
-pip install -r requirements.txt
+python examples/data_preprocess/logiqa.py \
+    --version 1 \
+    --num_samples -1 \
+    --local_save_dir ./data/logiqa \
+    --user_prompt_file logical_reasoning.txt
 ```
 
+Version 2, 5000 samples, XML format:
 
-# Dataset Preparation
-
-### GSM8K
-```
-python3 examples/data_preprocess/gsm8k.py --local_dir data/gsm8k
-```
-
-### LogiQA
-```
-python3 examples/data_preprocess/logiqa.py --local_dir data/logiqa
-```
-### LogiQA for Tree Sampling
-```
-python3 examples/data_preprocess/logiqa_tree.py --local_dir data/logiqa_tree
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 2 \
+    --num_samples 5000 \
+    --format xml \
+    --local_save_dir ./data/logiqa5k_v2_xml \
+    --user_prompt_file logical_reasoning.txt
 ```
 
+Injection of Logic Reasoning Prompt:
 
-# Evaluation
-### Method 1:
-[LogiEval](https://github.com/BiNLP/LogiEval) is our developed evaluation framework that makes customization more convenient.
-### Method 2 (Recommended):
-使用 lighteval：
-```
-sh bash_scripts/eval.sh
-```
-
-# LLM-as-Judge & PRM
-If you need to use LLM-as-Judge as a Process Reward Model (Generative PRM), you need to start an LLM service first and then call it via the vllm API.
-
-### Vllm online inference sevice
-```
-sh bash_scripts/VllmBackend/start_vllm_server.sh
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 2 \
+    --num_samples 5000 \
+    --format xml \
+    --local_save_dir ./data/logiqa5k_v2_xml \
+    --user_prompt_file logical_reasoning.txt
 ```
 
+### Prompting
 
-# Reward Manager
-Reward Manager is an interface that uses a reward function. It is recommended to specify a reward function regardless of whether a reward model is used, because when too much validation is performed, the reward model is not supported, and the reward function will still be called for evaluation.
-### Process Reward Model
-```
-PRM_PATH="/path/to/prm/model"
-reward_model.worker_type = 'prm'
-```
-### PRM + LLM-as-a-Judge
-```
-reward_model.worker_type = 'judge'
-```
-### PRM + Async LLM-as-a-Judge
-```
-reward_model.worker_type = 'async_judge'
+```bash
+# 只加 system prompt（读取 verl/prompts/logical_reasoning.txt）
+python examples/data_preprocess/logiqa.py \
+    --system_prompt_file logical_reasoning.txt
+
+# 只加 user prompt（在题目后追加）
+python examples/data_preprocess/logiqa.py \
+    --user_prompt_file logical_reasoning.txt
+
+# 两个都加（system + user 各用不同的 txt）
+python examples/data_preprocess/logiqa.py \
+    --system_prompt_file my_system.txt \
+    --user_prompt_file my_user_instructions.txt
+
+# 传绝对路径也支持
+python examples/data_preprocess/logiqa.py \
+    --system_prompt_file /path/to/any_prompt.txt
 ```
 
+## Training
 
-# Tree Sampling for RL Training
-## Step-level TreeRL
+### DAPO
 
-We use LogiQA as the training set, please pre-processing the dataset before start training.
-The startup script is located at ```bash_script/Step_TreeRL_LogiQA_GAE```, and the key parameters are as following:
+DAPO is the original baseline method explored prior to Step-GDPO. It mitigates mode collapse via an overlong-buffer mechanism.
+
+#### Sanity Check
+
+```bash
+bash bash_scripts/sanity_check_dapo.sh
 ```
-python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=tree_gae \ # TreeRL 的 Value 并不使用 Critic Model，而是直接用 Backpropagation 之后的结点的 Value 作为 Value
-    ...
-    trainer.tree_sampling=True \
-    reward_model.reward_manager='tree' \ # 这个 RewardManager 虽然调用了 Reward Function，但是只是为了记录，我们直接使用 TreeRL 的 Reward
-    trainer.branch_level='step' \ # 'token' 的话就会每个 token 作为一个结点，对于长的推理序列，树会非常大！！！！
-    trainer.step_reward_type='treerl' \ # 根据论文里面的公式，使用当前结点和 root 结点及其双亲的 Value 来计算 Reward；如果是 'fol'，则会将每一步翻译成 FOL 并使用 Z3 返回结果（Fragile）！！！！
-    trainer.tree_rounds=1 \ # 分支轮数
-    trainer.tree_top_k=1 \ # 每次分支出多少条，目前是只在最高熵的 step 进行分支
 
+#### One Epoch Training
+
+```bash
+bash bash_scripts/one_epoch_dapo.sh
 ```
-## FOL as Process Reward
 
+### Step-GDPO + Parallel Sampling
+
+Step-GDPO is the core algorithm currently under development, leveraging First-Order Logic (FOL) API evaluations as step-wise rewards during training.
+
+#### Sanity Check with Random Reward
+
+Useful for validating the local training loop with a dummy random reward provider:
+
+```bash
+bash bash_scripts/sanity_check_step_gdpo.sh
 ```
-trainer.step_reward_type='treerl' 
+
+#### One Epoch Training with FOL Reward
+
+Set up the OpenAI-compatible API details for remote FOL step evaluation:
+
+```bash
+export OPENAI_API_KEY="sk-YOUR-KEY-HERE"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+export FOL_MODEL="gpt-4o-mini-2024-07-18"
+
+bash bash_scripts/fol_step_gdpo.sh
 ```
-- ver/utils/nl2fol.py: Translating natural langugage to First-order-logic formulation。
-- verl/tuils/fol_to_python_converter.py: Translating the FOL formulation into python code with Z3 verifier, and return the result (satify/unsatify).
 
+### Step-GDPO + TreeRL (Entropy-guided Branching Tree Search) Sampling
 
+TODO: Tree search configurations and documentation to be added.
 
-# TODO
-1. 结点选择问题：
-  - 使用步骤的平均熵作为扩展结点的选择标准并不 make sense；
-  - 使用 Tree Sampling 的目的：(1) 对于同一个 prompt， 不同的 Tree 我们希望它是不同的思路，然后在同一个 Tree 里面的 node 的 state value 不应该全为 1/0 （使用 GRPO） 的情况下，才能充分学习和比对不同的思路的不同步骤。
-  - 不鼓励使用叶子结点进行扩展（不少的样本使用叶子结点进行 expansion）
-2. FOL Reward 的脆弱性：在 Response 质量非常差的情况下，外部调用的 LLM 无法翻译成功（由于没有 OpenAI 的key，这里使用的阿里 Qwen-plus 的 API），导致无法提供一个准确的 Reward；
-   - 怎么才能使得翻译更加通用并且鲁棒？
-3. 优势估计部分：根据 Tree Sampling 的策略进行指定吧。
+## Slurm Integration
+
+The repository is built to work flexibly with Slurm workloads. You can use `srun` to submit your jobs. Here is an example of running the GDPO sanity check on a single A800 GPU:
+
+```bash
+srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/sanity_check_step_gdpo.sh" 2>&1 | tee run_$(date +%Y%m%d_%H%M%S).log
+```

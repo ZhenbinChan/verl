@@ -1,16 +1,5 @@
 # Copyright 2023-2024 SGLang Team
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+# Copyright 2025 ModelBest Inc. and/or its affiliates
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,350 +13,212 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
-from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import Generator
 
-import numpy as np
-import torch.distributed
-from omegaconf import DictConfig
-from sglang.srt.entrypoints.verl_engine import VerlEngine
-from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.utils import broadcast_pyobj, get_ip, get_open_port
-from tensordict import TensorDict
-from torch.distributed.device_mesh import init_device_mesh
-from torch.nn.utils.rnn import pad_sequence
+import ray
+import sglang.srt.entrypoints.engine
+import torch
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import (
+    assert_pkg_version,
+    is_cuda,
+    set_prometheus_multiproc_dir,
+    set_ulimit,
+)
+from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from verl import DataProto
-from verl.third_party.sglang import parallel_state as sglang_ps
-from verl.utils.debug import GPUMemoryLogger
-from verl.utils.net_utils import is_ipv6
-from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
+from verl.utils.net_utils import is_valid_ipv6_address
+from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
-
-if TYPE_CHECKING:
-    from torch import nn
+from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
+from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
-def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[int]:
-    # remove the left padding in the prompt token_id
-    # pad_token_id = self.llm_engine.tokenizer.pad_token_id if self.llm_engine.tokenizer.pad_token_id is
-    # not None else self.llm_engine.tokenizer.eos_token_id
-    non_pad_index = torch.nonzero(prompt_token_ids != pad_token_id, as_tuple=False)[0][0]
-    token_ids = prompt_token_ids[non_pad_index:].tolist()
-    return token_ids
+# patch to avoid issue https://github.com/sgl-project/sglang/issues/6723
+def _set_envs_and_config(server_args: ServerArgs):
+    # Set global environments
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["NCCL_CUMEM_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = str(int(server_args.enable_nccl_nvls))
+    os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+    os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "4"
+    os.environ["CUDA_MODULE_LOADING"] = "AUTO"
+    # Enable faulthandler in subprocesses
+    os.environ["PYTHONFAULTHANDLER"] = "1"
+
+    # Set prometheus env vars
+    if server_args.enable_metrics:
+        set_prometheus_multiproc_dir()
+
+    # Set ulimit
+    set_ulimit()
+
+    # Check flashinfer version
+    if server_args.attention_backend == "flashinfer":
+        assert_pkg_version(
+            "flashinfer_python",
+            "0.2.5",
+            "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
+        )
+    if is_cuda():
+        assert_pkg_version(
+            "sgl-kernel",
+            "0.1.1",
+            "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
+        )
+
+    # Set mp start method
+    mp.set_start_method("spawn", force=True)
 
 
-# NOTE(linjunrong): adhoc
-def _post_process_outputs(tokenizer, output):
-    def _map_each_response(resp):
-        log_probs = []
-        output_token_ids = []
-        for log_prob, token_ids, _ in resp["meta_info"]["output_token_logprobs"]:
-            log_probs.append(log_prob)
-            output_token_ids.append(token_ids)
-        log_probs = torch.tensor(log_probs)
-        output_token_ids = torch.tensor(output_token_ids)
-        return output_token_ids, log_probs
-
-    out_map = map(lambda x: _map_each_response(x), output)
-    batched_output_token_ids = []
-    batched_logprobs = []
-    for output_token_ids, log_probs in out_map:
-        batched_output_token_ids.append(output_token_ids)
-        batched_logprobs.append(log_probs)
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    batched_output_token_ids = pad_sequence(batched_output_token_ids, batch_first=True, padding_value=pad_token_id)
-    if len(batched_logprobs) > 0:
-        batched_logprobs = pad_sequence(batched_logprobs, batch_first=True, padding_value=pad_token_id)
-    return batched_output_token_ids, batched_logprobs
+sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
 
 
-class SGLangRollout(BaseRollout):
+# because chatCompletion is an async method, it makes the whole ray actor be an async actor
+# which can not call loop.run_until_complete. So we need to make the engine to be an async class
+class ServerAdapter(BaseRollout):
+    """SGLang server adapter used in native http server mode, serve as http client to request SGLang server
+    to resume/release/update weights and kv_cache.
+
+    - hybrid mode: reside in each hybrid worker to sync weights between training engine and SGLang server.
+    - standalone/colocated mode: just a dummy placeholder to occupy the GPU to prevent ray scheduling new GPU actor.
+    """
+
     def __init__(
         self,
-        actor_module: nn.Module | str,
-        config: DictConfig,
-        tokenizer,
-        model_hf_config,
-        port=None,
-        trust_remote_code: bool = False,
-        **kwargs,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        device_mesh: DeviceMesh,
+        replica_rank: int = -1,
     ):
-        """A SGLang rollout. It requires the module is supported by the SGLang.
+        if config.get("quantization", None) == "fp8":
+            import sglang
+            from packaging import version
+
+            assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
+                "sglang>=0.5.5 is required for FP8 quantization"
+            )
+            FP8_BLOCK_QUANT_KWARGS = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+            fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        super().__init__(config, model_config, device_mesh)
+        self._engine: AsyncHttpServerAdapter = None
+
+        rank = int(os.environ["RANK"])
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        rollout_world_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        if replica_rank == -1:
+            self.replica_rank = rank // rollout_world_size
+        else:
+            self.replica_rank = replica_rank
+        self.rollout_rank = rank % rollout_world_size
+        self.node_rank = self.rollout_rank // local_world_size
+        self.local_rank = self.rollout_rank % local_world_size
+
+    async def _init_server_adapter(self):
+        if self._engine is not None:
+            return
+
+        # device_mesh is needed to gather cuda ipc handle to update weights
+        if self.device_mesh is None:
+            assert torch.distributed.is_initialized(), "torch distributed must be initialized"
+            infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+            infer_pp = self.config.pipeline_model_parallel_size
+            infer_world_size = infer_tp * infer_pp
+            dp = torch.distributed.get_world_size() // infer_world_size
+            self.device_mesh = init_device_mesh(
+                "cpu", mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+            )
+
+        # Only init http server adapter in tp rank 0
+        if self.device_mesh["infer_tp"].get_local_rank() != 0:
+            return
+
+        # Lazy init http server adapter because http server is launched after hybrid engine.
+        self.server_actor = ray.get_actor(f"sglang_server_{self.replica_rank}_{self.node_rank}")
+        server_address, server_port = await self.server_actor.get_server_address.remote()
+        logger.debug(
+            f"replica_rank={self.replica_rank} node_rank={self.node_rank}, "
+            f"server address: {server_address}, port: {server_port}"
+        )
+        host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
+        self._engine = AsyncHttpServerAdapter(
+            model_path=self.model_config.local_path,
+            host=host,
+            port=server_port,
+            launch_server=False,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    async def resume(self, tags: list[str]):
+        """Resume rollout weights or kv cache in GPU memory.
 
         Args:
-            actor_module: module here follows huggingface APIs
-            config: DictConfig
-            tokenizer: the task/model tokenizer
-            model_hf_config: the huggingface config to initiallize the generating model in SGLang
-            **kwargs: train_tp, for Megatron Backend to initialize hybrid engine (zero redundancy) process group
+            tag: weights or kv_cache.
         """
-        super().__init__()
-        self.config = config
-        os.environ.setdefault("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", "true")
+        await self._init_server_adapter()
+        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+            await self._engine.resume_memory_occupation(tags=tags)
 
-        assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
+    async def release(self):
+        """Release weights and kv cache in GPU memory."""
+        await self._init_server_adapter()
+        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.config.free_cache_engine:
+            await self._engine.release_memory_occupation(tags=["kv_cache", "weights"])
 
-        tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
-        assert tensor_parallel_size <= torch.distributed.get_world_size(), "tensor parallel size should be less than or equal to the world size"
+    async def update_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+    ):
+        """
+        Update model weights using tensor buckets, similar to THUDM/slime's implementation.
 
-        if kwargs.get("train_tp") is not None:
-            # deployed with megatron
-            os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
-            os.environ["MEGATRON_IMPORT_TIMERS"] = "0"
-            train_tp = kwargs.get("train_tp")
-            num_tp_per_train_tp = train_tp // tensor_parallel_size
-            sglang_ps.initialize_parallel_state(
-                tensor_model_parallel_size=tensor_parallel_size,
-                num_tp_per_train_tp=num_tp_per_train_tp,
+        Notes:
+          - For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+              1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`.
+              2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+            when using Tensor Parallelism (TP >= 8).
+          - See reference implementations in SLIME:
+            - Main logic: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L452
+            - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
+        """
+        await self._init_server_adapter()
+
+        update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+        if self.config.get("quantization", None) == "fp8":
+            from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
+
+            logger.info("Convert bf16 weights to fp8 format before loading")
+            fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+            weights = fp8_quantizer_helper.quant_weights_by_name(
+                weights,
+                dtype=self.model_config.hf_config.dtype,
             )
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, "model context length should be greater than total sequence length"
-
-        tp_size = tensor_parallel_size
-        world_size = int(os.getenv("WORLD_SIZE", "-1"))
-
-        # init device mesh
-        device_mesh_kwargs = dict(
-            mesh_shape=(world_size // tp_size, tp_size, 1),
-            mesh_dim_names=["dp", "tp", "pp"],
-        )
-
-        device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
-        # device_mesh_device = init_device_mesh("cuda", **device_mesh_kwargs)
-
-        # get tp_rank of this process in this tp group
-        rank = device_mesh_cpu.get_rank()
-        tp_rank = device_mesh_cpu["tp"].get_local_rank()
-        visible_devices = [None] * device_mesh_cpu.size(1)
-
-        torch.distributed.all_gather_object(visible_devices, os.environ["CUDA_VISIBLE_DEVICES"], device_mesh_cpu.get_group("tp"))
-        visible_devices_set = set(",".join(visible_devices).split(","))
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(sorted(list(visible_devices_set)))
-
-        nnodes = -(-tp_size // len(visible_devices_set))
-        if nnodes > 1:
-            ip = get_ip()
-            port = get_open_port() if port is None else port
-            [ip, port] = broadcast_pyobj(
-                [ip, port],
-                rank=tp_rank,
-                dist_group=device_mesh_cpu.get_group("tp"),
-                src=device_mesh_cpu["tp"].mesh[0].item(),
-                force_cpu_device=False,
-            )
-            dist_init_addr = f"[{ip}]:{port}" if is_ipv6(ip) else f"{ip}:{port}"
-
         else:
-            dist_init_addr = None
+            weights = weights
 
-        load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
-        self.inference_engine = VerlEngine(
-            model_path=actor_module,
-            dtype=config.dtype,
-            mem_fraction_static=config.gpu_memory_utilization,
-            device_mesh_cpu=device_mesh_cpu["tp"],
-            enable_memory_saver=True,
-            base_gpu_id=0,
-            gpu_id_step=1,
-            load_format=load_format,
-            dist_init_addr=dist_init_addr,
-            nnodes=nnodes,
-            trust_remote_code=trust_remote_code,
-            # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
-            # when random.seed is being set during training
-            port=30000 + rank,
-            # NOTE(Chenyang): if you want to debug the SGLang engine output
-            # please set the following parameters
-            # Otherwise, it will make the engine run too slow
-            # log_level="INFO",
-            # log_requests=True,
-            # log_requests_level=2,
-            # max_running_requests=1,
-        )
-
-        # offload
-        self.inference_engine.release_memory_occupation()
-
-        kwargs = dict(
-            n=1,
-            max_new_tokens=config.response_length,
-            presence_penalty=0.0,
-            frequency_penalty=0.0,
-            repetition_penalty=1.0,
-        )
-        # supporting adding any sampling params from the config file
-        for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
-                kwargs[k] = config.get(k)
-        print(f"kwargs: {kwargs}")
-        self.sampling_params = kwargs
-
-        self.tokenizer = tokenizer
-        self.pad_token_id = tokenizer.pad_token_id
-
-    @contextmanager
-    def update_sampling_params(self, **kwargs):
-        # update sampling params
-        old_sampling_params_args = {}
-        if kwargs:
-            for key, value in kwargs.items():
-                if key in self.sampling_params:
-                    old_value = self.sampling_params[key]
-                    old_sampling_params_args[key] = old_value
-                    self.sampling_params[key] = value
-        yield
-        # roll back to previous sampling params
-        # if len(old_sampling_params_args):
-        for key, value in old_sampling_params_args.items():
-            self.sampling_params[key] = value
-
-    @GPUMemoryLogger(role="sglang rollout", logger=logger)
-    @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # if self.config.free_cache_engine:
-
-        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
-        # left-padded attention_mask
-        attention_mask = prompts.batch["attention_mask"]
-        position_ids = prompts.batch["position_ids"]
-
-        # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
-
-        batch_size = idx.size(0)
-
-        # Extract non-tensor data
-        non_tensor_batch = prompts.non_tensor_batch
-        if "raw_prompt_ids" not in non_tensor_batch:
-            non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
-
-        if "multi_modal_data" in non_tensor_batch:
-            sglang_inputs = []
-            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")):
-                sglang_inputs.append(
-                    {
-                        "prompt_token_ids": raw_prompt_ids,
-                        "multi_modal_data": multi_modal_data,
-                        "image_data": multi_modal_data.get("image", None) if isinstance(multi_modal_data, dict) else None,
-                    }
-                )
-        else:
-            sglang_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")]
-
-        # Ensure token IDs are lists
-        for input_data in sglang_inputs:
-            if isinstance(input_data["prompt_token_ids"], np.ndarray):
-                input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
-            elif not isinstance(input_data["prompt_token_ids"], list):
-                raise TypeError(f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
-
-        # Extract token IDs and image data for SGLang Engine
-        idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
-        image_list = [input_data.get("image_data", None) for input_data in sglang_inputs]
-
-        do_sample = prompts.meta_info.get("do_sample", True)
-        is_validate = prompts.meta_info.get("validate", False)
-        if not do_sample:
-            kwargs = dict(
-                n=1,
-                presence_penalty=0.0,
-                frequency_penalty=0.0,
-                repetition_penalty=1.0,
-                temperature=0,
-                top_p=1,
-                top_k=-1,
-                ignore_eos=False,
-                min_new_tokens=0,
-                max_new_tokens=self.config.response_length,
-                skip_special_tokens=True,
-                spaces_between_special_tokens=True,
-            )
-        elif is_validate:
-            kwargs = dict(
-                top_k=self.config.val_kwargs.top_k,
-                top_p=self.config.val_kwargs.top_p,
-                temperature=self.config.val_kwargs.temperature,
-                n=1,  # if validate, already repeat in ray_trainer
+        async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+            await sgl_update_weights(
+                engine=self._engine,
+                params_batch=params_batch,
+                device_mesh_key="infer_tp",
+                device_mesh=self.device_mesh,
             )
 
-        # users can customize different sampling_params at different run
-        with self.update_sampling_params(**kwargs):
-            print(f"{self.sampling_params=}")
-            output = self.inference_engine.generate(
-                prompt=None,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                return_logprob=True,
-                input_ids=idx_list,
-                image_data=image_list,
-            )
-
-            out = _post_process_outputs(self.tokenizer, output)
-
-            response = out[0].to(idx.device)
-            # log_probs = out[1].to(idx.device)
-
-            if response.shape[1] < self.config.response_length:
-                response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-                # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
-
-            # utilize current sampling params
-            if self.sampling_params.get("n", 1) > 1 and do_sample:
-                idx = idx.repeat_interleave(self.sampling_params["n"], dim=0)
-                attention_mask = attention_mask.repeat_interleave(self.sampling_params["n"], dim=0)
-                position_ids = position_ids.repeat_interleave(self.sampling_params["n"], dim=0)
-                batch_size = batch_size * self.sampling_params["n"]
-                if "multi_modal_inputs" in non_tensor_batch.keys():
-                    non_tensor_batch["multi_modal_inputs"] = np.repeat(non_tensor_batch["multi_modal_inputs"], self.sampling_params["n"], axis=0)
-                if "tools_kwargs" in non_tensor_batch.keys():
-                    non_tensor_batch["tools_kwargs"] = np.repeat(non_tensor_batch["tools_kwargs"], self.sampling_params["n"], axis=0)
-            seq = torch.cat([idx, response], dim=-1)
-
-        response_length = response.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
-
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-        response_position_ids = position_ids[:, -1:] + delta_position_id
-        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-
-        # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = TensorDict(
-            {
-                "prompts": idx,
-                "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-            },
-            batch_size=batch_size,
-        )
-
-        # free cache engine
-        if self.config.free_cache_engine and self.inference_engine._engine is not None and self.inference_engine._engine.tokenizer_manager is not None:
-            self.inference_engine._engine.flush_cache()
-
-        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
-
-    # this function is left for uniform train-inference resharding
-    def update_weights(self, params_iter):
-        self.inference_engine.resume_memory_occupation()
-        self.inference_engine.update_weights_from_tensor(params_iter, load_format=None)
-
-    # this function is left for uniform train-inference resharding
-    def offload(self):
-        self.inference_engine.release_memory_occupation()
+        if self.device_mesh["infer_tp"].get_local_rank() == 0:
+            await self._engine.flush_cache()
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
