@@ -19,6 +19,7 @@ from .naive import NaiveRewardManager
 from .limited import RateLimitedRewardManager
 from .remote import RemoteRewardManager
 from .step import StepRewardManager
+from .visual import VisualRewardManager
 
 __all__ = [
     "DAPORewardManager",
@@ -27,6 +28,7 @@ __all__ = [
     "RateLimitedRewardManager",
     "RemoteRewardManager",
     "StepRewardManager",
+    "VisualRewardManager",
     "register",
     "get_reward_manager_cls",
 ]
