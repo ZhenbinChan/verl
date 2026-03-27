@@ -625,6 +625,144 @@ def compute_step_gdpo_advantage(
 
     return advantages, advantages
 
+
+@register_adv_est("tree_gae")
+def compute_tree_gae_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """TreeRL advantage: tree-derived + optional external PRM process rewards.
+
+    Implements the TreeRL advantage estimation (arXiv:2506.11902):
+        R(sn) = [GA(sn) + LA(sn)] / sqrt(|L(sn)|)
+
+    ORM (outcome reward) is NOT used as a separate advantage dimension here —
+    it is already dissolved into the tree topology via TreeManager.backpropagate().
+
+    The step rewards are pre-computed by TreeManager.compute_step_rewards() and stored
+    in non_tensor_batch['treerl_step_reward'] as List[(token_pos, score)] per sample.
+    External PRM scores (e.g., format, fol) are stored as '{type}_step_reward'.
+
+    This function combines (at the advantage level):
+    1. Tree-topology process advantage (treerl_step_reward) — big-pool norm + reward-to-go
+    2. External PRM process advantage ({type}_step_reward) — big-pool norm + reward-to-go
+    Weighted sum: tree_w * tree_adv + ext_w * ext_adv
+
+    Args:
+        token_level_rewards: (bs, response_length) - token-level rewards (used only for shape/device)
+        response_mask: (bs, response_length)
+        index: (bs,) - group id per sample (from uid)
+        epsilon: Numerical stability constant
+        config: Algorithm configuration containing step_reward_weights, step_reward_type
+        non_tensor_batch: Dict containing 'treerl_step_reward' and optional external PRM data
+        batch: Batch data
+
+    Returns:
+        advantages: (bs, response_length)
+        returns: (bs, response_length)
+    """
+    with torch.no_grad():
+        bs, seq_len = token_level_rewards.shape
+        device = token_level_rewards.device
+
+        # --- Assert: treerl_step_reward must exist ---
+        assert non_tensor_batch is not None and "treerl_step_reward" in non_tensor_batch, (
+            "tree_gae requires 'treerl_step_reward' in non_tensor_batch. "
+            "Make sure TreeManager.build_flat_batch() was called before advantage computation."
+        )
+
+        # --- Config ---
+        # step_reward_weights: [tree_w, ext_prm_w, ...]
+        # Default: [1.0, 1.0] if external PRM is configured, [1.0] otherwise
+        step_reward_keys = []  # external PRM keys
+        if config is not None:
+            srt = config.get("step_reward_type", None)
+            if srt is not None:
+                if isinstance(srt, str):
+                    step_reward_keys = [f"{srt}_step_reward"]
+                else:
+                    step_reward_keys = [f"{t}_step_reward" for t in srt]
+
+        default_weights = [1.0] + [1.0] * len(step_reward_keys)
+        step_reward_weights = list(
+            config.get("step_reward_weights", default_weights)
+        ) if config is not None else default_weights
+
+        tree_weight = step_reward_weights[0] if len(step_reward_weights) > 0 else 1.0
+
+        # --- Helper: big-pool normalization for a single reward dimension ---
+        def _bigpool_normalize(reward_data):
+            """Build token-level tensor, big-pool normalize per group, return cumsum."""
+            raw = torch.zeros(bs, seq_len, device=device, dtype=torch.float32)
+            for i in range(bs):
+                item_data = reward_data[i]
+                if isinstance(item_data, (list, tuple)):
+                    for pos, score in item_data:
+                        if 0 <= pos < seq_len:
+                            raw[i, pos] = float(score)
+
+            normalized = torch.zeros_like(raw)
+            prompt_groups = defaultdict(list)
+            for i in range(bs):
+                prompt_groups[index[i]].append(i)
+
+            for _, group_indices in prompt_groups.items():
+                pool_scores = []
+                step_info = []
+                for idx in group_indices:
+                    item_data = reward_data[idx]
+                    if isinstance(item_data, (list, tuple)):
+                        for pos, score in item_data:
+                            if 0 <= pos < seq_len:
+                                pool_scores.append(float(score))
+                                step_info.append((idx, pos))
+
+                if len(pool_scores) < 2:
+                    for idx, pos in step_info:
+                        normalized[idx, pos] = raw[idx, pos]
+                    continue
+
+                pool_tensor = torch.tensor(pool_scores, device=device, dtype=torch.float32)
+                pool_mean = pool_tensor.mean()
+                pool_std = pool_tensor.std()
+
+                for score_idx, (sample_idx, token_pos) in enumerate(step_info):
+                    norm_score = (pool_scores[score_idx] - pool_mean) / (pool_std + epsilon)
+                    normalized[sample_idx, token_pos] = norm_score
+
+            # Reward-to-go (reverse cumsum)
+            cumsum = (normalized * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+            return cumsum * response_mask
+
+        # --- Dimension 1: Tree-topology process reward ---
+        tree_adv = _bigpool_normalize(non_tensor_batch["treerl_step_reward"])
+
+        # --- Dimension 2+: External PRM process rewards ---
+        combined_advantage = tree_weight * tree_adv
+
+        for dim_idx, key in enumerate(step_reward_keys):
+            if key in non_tensor_batch:
+                ext_adv = _bigpool_normalize(non_tensor_batch[key])
+                ext_weight = (
+                    step_reward_weights[1 + dim_idx]
+                    if (1 + dim_idx) < len(step_reward_weights)
+                    else 1.0
+                )
+                combined_advantage = combined_advantage + ext_weight * ext_adv
+
+        # --- Final: Batch-level whiten ---
+        advantages = verl_F.masked_whiten(combined_advantage, response_mask) * response_mask
+
+    return advantages, advantages
+
+
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
 def compute_grpo_passk_outcome_advantage(
     token_level_rewards: torch.Tensor,

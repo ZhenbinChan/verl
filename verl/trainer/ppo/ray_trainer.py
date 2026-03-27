@@ -207,8 +207,8 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-        # GDPO / Step-GDPO: pass raw data for per-dimension reward extraction
-        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo", "step_gdpo"):
+        # GDPO / Step-GDPO / TreeRL: pass raw data for per-dimension reward extraction
+        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo", "step_gdpo", "tree_gae"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
             adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
@@ -309,7 +309,7 @@ class RayPPOTrainer:
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
         # Synchronize step_reward_type between algorithm and reward configs
-        if self.config.algorithm.get("adv_estimator") == "step_gdpo":
+        if self.config.algorithm.get("adv_estimator") in ("step_gdpo", "tree_gae"):
             algo_srt = self.config.algorithm.get("step_reward_type")
             reward_srt = self.config.reward.get("step_reward_type")
             
@@ -1465,8 +1465,59 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
+
+                    # === TreeRL: EPTree Expansion ===
+                    tree_sampling = self.config.trainer.get("tree_sampling", False)
+                    if tree_sampling:
+                        with marked_timer("tree_expansion", timing_raw, color="magenta"):
+                            from verl.utils.tree_structure import TreeManager
+
+                            tree_mgr = TreeManager(
+                                config=self.config.trainer,
+                                tokenizer=self.tokenizer,
+                            )
+
+                            # Get compute_score function for leaf evaluation
+                            from verl.utils.reward_score import get_default_compute_score
+                            reward_mgr_name = self.config.reward.reward_manager.get("name", "naive")
+                            tree_compute_score = get_default_compute_score(reward_mgr_name)
+
+                            # Run full EPTree pipeline
+                            gen_batch_output = tree_mgr.run_full_pipeline(
+                                rollout_output=gen_batch_output,
+                                generate_fn=self.async_rollout_manager.generate_sequences,
+                                compute_score_fn=tree_compute_score,
+                            )
+
+                            # Log tree metrics
+                            total_leaves = sum(t.num_leaves for t in tree_mgr.trees)
+                            total_trees = len(tree_mgr.trees)
+                            metrics["tree/num_trees"] = total_trees
+                            metrics["tree/total_leaves"] = total_leaves
+                            metrics["tree/avg_leaves_per_tree"] = total_leaves / max(total_trees, 1)
+
+                            # Correctness ratio across all leaves
+                            all_leaves = [l for t in tree_mgr.trees for l in t.all_leaves]
+                            if all_leaves:
+                                correct = sum(1 for l in all_leaves if l.correctness and l.correctness > 0.5)
+                                metrics["tree/pass_rate"] = correct / len(all_leaves)
+
+                            print(f"[TreeRL] {total_trees} trees, {total_leaves} total leaves, "
+                                  f"batch size: {gen_batch_output.batch['responses'].shape[0]}")
+
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    if tree_sampling:
+                        # In tree mode, gen_batch_output already contains all leaf paths.
+                        # We need to repeat batch to match the number of leaf paths instead of rollout.n.
+                        num_leaf_paths = gen_batch_output.batch["responses"].shape[0]
+                        num_prompts = batch.batch["prompts"].shape[0]
+                        repeat_factor = num_leaf_paths // num_prompts
+                        if repeat_factor > 0:
+                            batch = batch.repeat(repeat_times=repeat_factor, interleave=True)
+                        else:
+                            batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    else:
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
                     if self._should_compute_teacher_colocate(batch):
                         with marked_timer("teacher", timing_raw, color="cyan"):

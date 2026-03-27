@@ -19,6 +19,7 @@ from .naive import NaiveRewardManager
 from .limited import RateLimitedRewardManager
 from .remote import RemoteRewardManager
 from .step import StepRewardManager
+from .tree import TreeRewardManager
 from .visual import VisualRewardManager
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "RateLimitedRewardManager",
     "RemoteRewardManager",
     "StepRewardManager",
+    "TreeRewardManager",
     "VisualRewardManager",
     "register",
     "get_reward_manager_cls",
