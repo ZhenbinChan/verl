@@ -1502,7 +1502,20 @@ class RayPPOTrainer:
                                 correct = sum(1 for l in all_leaves if l.correctness and l.correctness > 0.5)
                                 metrics["tree/pass_rate"] = correct / len(all_leaves)
 
-                            print(f"[TreeRL] {total_trees} trees, {total_leaves} total leaves, "
+                            # 1. Config summary (printed once, includes estimated path count)
+                            if self.global_steps == 1:
+                                M = self.config.actor_rollout_ref.rollout.n
+                                tree_mgr.log_config_summary(M)
+
+                            # 2. ASCII tree structure (first tree only)
+                            if tree_mgr.trees:
+                                tree_mgr.format_tree_ascii(tree_idx=0)
+
+                            # 3. Sample trajectory (first tree, first leaf)
+                            if tree_mgr.trees:
+                                tree_mgr.log_sample_trajectory(tree_idx=0, leaf_idx=0)
+
+                            print(f"[TreeRL] Step {self.global_steps} | {total_trees} trees, {total_leaves} total leaves, "
                                   f"batch size: {gen_batch_output.batch['responses'].shape[0]}")
 
                     # repeat to align with repeated responses in rollout

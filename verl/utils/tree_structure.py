@@ -855,6 +855,132 @@ class TreeManager:
         return flat_batch
 
     # ------------------------------------------------------------------
+    # Logging & Visualization
+    # ------------------------------------------------------------------
+
+    def log_config_summary(self, M: int) -> str:
+        """Return a summary string of EPTree config and estimated total paths.
+
+        Args:
+            M: Number of initial rollouts (rollout.n).
+        """
+        N = self.tree_top_n
+        T = self.tree_branches
+        L = self.tree_rounds
+        # Each tree: 1 original + N*T new branches per round
+        # (simplified estimate for L=1; deeper rounds compound)
+        leaves_per_tree = 1 + N * T * L
+        total_paths = M * leaves_per_tree
+
+        lines = [
+            "=" * 60,
+            " [TreeRL] EPTree Configuration Summary",
+            "=" * 60,
+            f"  M (initial rollouts)     = {M}",
+            f"  N (top-N fork points)    = {N}",
+            f"  T (branches per fork)    = {T}",
+            f"  L (expansion rounds)     = {L}",
+            f"  mask_tail_ratio          = {self.mask_tail_ratio}",
+            "-" * 60,
+            f"  Expected leaves/tree     = {leaves_per_tree}",
+            f"  Expected total paths     = {total_paths}",
+            "=" * 60,
+        ]
+        summary = "\n".join(lines)
+        print(summary)
+        return summary
+
+    def format_tree_ascii(self, tree_idx: int = 0, max_text_len: int = 40) -> str:
+        """Render a single tree as ASCII art.
+
+        Args:
+            tree_idx: Which tree to visualize (0-indexed).
+            max_text_len: Max characters of step_text to show per node.
+
+        Returns:
+            ASCII string representation.
+        """
+        if tree_idx >= len(self.trees):
+            return f"[TreeRL] Tree {tree_idx} not found (total: {len(self.trees)})"
+
+        tree = self.trees[tree_idx]
+
+        def _fmt_node(node: TreeNode) -> str:
+            text_preview = node.step_text[:max_text_len].replace("\n", "\\n")
+            if len(node.step_text) > max_text_len:
+                text_preview += "..."
+            corr_str = ""
+            if node.correctness is not None:
+                corr_str = f" ✓" if node.correctness > 0.5 else f" ✗"
+            forked_str = " [forked]" if node.is_forked else ""
+            return (
+                f"node_{node.node_id} "
+                f"(V={node.value:.2f}, R={node.reward:.2f}{corr_str}{forked_str}) "
+                f'"{text_preview}"'
+            )
+
+        lines = [f"[TreeRL] Tree {tree_idx} (leaves={tree.num_leaves}):"]
+
+        def _walk(node: TreeNode, prefix: str = "", is_last: bool = True):
+            connector = "└── " if is_last else "├── "
+            lines.append(prefix + connector + _fmt_node(node))
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            for i, child in enumerate(node.children):
+                _walk(child, child_prefix, i == len(node.children) - 1)
+
+        _walk(tree.root)
+        result = "\n".join(lines)
+        print(result)
+        return result
+
+    def log_sample_trajectory(self, tree_idx: int = 0, leaf_idx: int = 0) -> str:
+        """Print one full decoded leaf path for inspection.
+
+        Args:
+            tree_idx: Which tree.
+            leaf_idx: Which leaf within that tree (0-indexed).
+
+        Returns:
+            The trajectory string.
+        """
+        if tree_idx >= len(self.trees):
+            return f"[TreeRL] Tree {tree_idx} not found"
+
+        tree = self.trees[tree_idx]
+        leaves = tree.all_leaves
+        if leaf_idx >= len(leaves):
+            return f"[TreeRL] Leaf {leaf_idx} not found in tree {tree_idx} (total: {len(leaves)})"
+
+        leaf = leaves[leaf_idx]
+        path = leaf.path_from_root()
+
+        lines = [
+            "=" * 60,
+            f" [TreeRL] Sample Trajectory: Tree {tree_idx}, Leaf {leaf_idx}",
+            f" Correctness: {leaf.correctness}",
+            f" Path length: {len(path)} nodes",
+            "=" * 60,
+        ]
+        for i, node in enumerate(path):
+            marker = "→" if not node.is_forked else "⑂"
+            corr_str = ""
+            if node.correctness is not None:
+                corr_str = " ✓" if node.correctness > 0.5 else " ✗"
+            lines.append(
+                f"  {marker} Step {i} (V={node.value:.3f}, R={node.reward:.3f}{corr_str}):"
+            )
+            step_text = node.step_text if node.step_text else "(no text)"
+            for text_line in step_text.split("\n")[:5]:  # limit to 5 lines
+                lines.append(f"    {text_line}")
+            if len(node.step_text.split("\n")) > 5:
+                lines.append(f"    ... ({len(node.step_text.split(chr(10)))} lines total)")
+        lines.append("=" * 60)
+
+        result = "\n".join(lines)
+        print(result)
+        return result
+
+    # ------------------------------------------------------------------
     # Convenience: Full pipeline
     # ------------------------------------------------------------------
 
