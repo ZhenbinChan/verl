@@ -86,7 +86,13 @@ python examples/data_preprocess/logiqa.py \
     --system_prompt_file /path/to/any_prompt.txt
 ```
 
-## Training
+## Training Parameters
+
+### Step / (External) Process Reward
+
+### Tree Search
+
+## Training Scripts
 
 ### DAPO
 
