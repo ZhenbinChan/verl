@@ -28,7 +28,7 @@ python3 -u -m verl.trainer.main_ppo \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
     data.val_batch_size=8 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=2048 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
@@ -56,11 +56,11 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.tree_sampling=True \
-    trainer.tree_rounds=1 \
-    trainer.tree_top_n=2 \
-    trainer.tree_branches=2 \
-    trainer.tree_mask_tail_ratio=0.1 \
+    +trainer.tree_sampling=True \
+    +trainer.tree_rounds=1 \
+    +trainer.tree_top_n=2 \
+    +trainer.tree_branches=2 \
+    +trainer.tree_mask_tail_ratio=0.1 \
     trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_tree_gae_sanity_check_${DATA_NAME}" \
