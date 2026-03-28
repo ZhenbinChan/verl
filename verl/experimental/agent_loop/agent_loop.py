@@ -1143,13 +1143,22 @@ class AgentLoopManager:
         """
         if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.wake_up()
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+
+        # TODO: Will this change crash running?
+        # --- CHANGE: try tackling edge cases when prompts is smaller than worker count or unevenly divisible ---
+        # Use at most len(prompts) workers to avoid chunk errors when
+        # batch is smaller than worker count (e.g. tree branch expansion).
+        num_active = min(len(prompts), len(self.agent_loop_workers))
+        split_size = (len(prompts) + num_active - 1) // num_active  # ceil division
+        chunkes = prompts.split(split_size)
+        active_workers = self.agent_loop_workers[:num_active]
         outputs = await asyncio.gather(
             *[
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(active_workers, chunkes, strict=True)
             ]
         )
+        # -------------------------------------------------------------------------------------------------------
         if self.stream_teacher_with_rollout:
             await self.teacher_model_manager.sleep()
         output = DataProto.concat(outputs)
