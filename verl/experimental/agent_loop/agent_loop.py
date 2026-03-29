@@ -555,10 +555,19 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
-        tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            
+            # --- TreeRL Branch Continuation Mode ---
+            if batch.meta_info.get("continuation_mode", False):
+                input_ids = batch.batch["input_ids"][i]
+                attention_mask = batch.batch["attention_mask"][i]
+                # Extract only valid tokens (unpad)
+                valid_ids = input_ids[attention_mask.bool()]
+                kwargs["continuation_input_ids"] = valid_ids.tolist()
+                kwargs["continuation_prompt_length"] = batch.batch["input_ids"].shape[1]
+            
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
@@ -631,10 +640,14 @@ class AgentLoopWorker:
 
         # TODO(wuxibin): remove padding and use tensordict.
         self.tokenizer.padding_side = "left"
+        prompt_max_length = kwargs.get("continuation_prompt_length", self.rollout_config.prompt_length)
+        # Ensure we don't truncate if the prefix is exceptionally long
+        prompt_max_length = max(prompt_max_length, len(output.prompt_ids))
+        
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",
-            max_length=self.rollout_config.prompt_length,
+            max_length=prompt_max_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
