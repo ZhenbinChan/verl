@@ -570,7 +570,7 @@ def compute_step_gdpo_advantage(
                     if isinstance(item_data, (list, tuple)):
                         for pos, score in item_data:
                             if 0 <= pos < seq_len:
-                                raw_process_reward[i, pos] = float(score)
+                                raw_process_reward[i, int(pos)] = float(score)
 
                 # Big-pool normalization: per group, collect all non-zero scores
                 normalized_process_reward = torch.zeros_like(raw_process_reward)
@@ -706,7 +706,7 @@ def compute_tree_gae_advantage(
                 if isinstance(item_data, (list, tuple)):
                     for pos, score in item_data:
                         if 0 <= pos < seq_len:
-                            raw[i, pos] = float(score)
+                            raw[i, int(pos)] = float(score)
 
             normalized = torch.zeros_like(raw)
             prompt_groups = defaultdict(list)
@@ -2698,7 +2698,8 @@ def compute_policy_loss_bypass_mode(
             loss: Scalar policy loss
             metrics: Dictionary with rollout correction metrics and actor/ppo_kl
     """
-    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
+    from verl.trainer.ppo.rollout_corr_helper import \
+        compute_rollout_correction_and_rejection_mask
 
     assert config is not None, "config is required for bypass_mode loss"
 
