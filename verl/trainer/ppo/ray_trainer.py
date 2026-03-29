@@ -308,16 +308,22 @@ class RayPPOTrainer:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        # Synchronize step_reward_type between algorithm and reward configs
+        # Synchronize step_reward_type and use_xml_steps between algorithm and reward configs
         if self.config.algorithm.get("adv_estimator") in ("step_gdpo", "tree_gae"):
             algo_srt = self.config.algorithm.get("step_reward_type")
             reward_srt = self.config.reward.get("step_reward_type")
-            
+            algo_xml = self.config.algorithm.get("use_xml_steps")
+            reward_xml = self.config.reward.get("use_xml_steps")
+
             with open_dict(self.config):
                 if algo_srt is not None and reward_srt is None:
                     self.config.reward.step_reward_type = self.config.algorithm.step_reward_type
                 elif reward_srt is not None and algo_srt is None:
                     self.config.algorithm.step_reward_type = self.config.reward.step_reward_type
+                if algo_xml is not None and reward_xml is None:
+                    self.config.reward.use_xml_steps = algo_xml
+                elif reward_xml is not None and algo_xml is None:
+                    self.config.algorithm.use_xml_steps = reward_xml
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
@@ -1472,9 +1478,18 @@ class RayPPOTrainer:
                         with marked_timer("tree_expansion", timing_raw, color="magenta"):
                             from verl.utils.tree_structure import TreeManager
 
+                            # Resolve use_xml_steps for branch splitting
+                            reward_cfg = self.config.get("reward", {})
+                            algo_cfg = self.config.get("algorithm", {})
+                            use_xml = bool(
+                                reward_cfg.get("use_xml_steps", False)
+                                or algo_cfg.get("use_xml_steps", False)
+                            )
+
                             tree_mgr = TreeManager(
                                 config=self.config.trainer,
                                 tokenizer=self.tokenizer,
+                                use_xml=use_xml,
                             )
 
                             # Get compute_score function for leaf evaluation
@@ -1521,14 +1536,37 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     if tree_sampling:
                         # In tree mode, gen_batch_output already contains all leaf paths.
-                        # We need to repeat batch to match the number of leaf paths instead of rollout.n.
+                        # Each leaf path carries a tree_idx (via the order in build_flat_batch:
+                        # trees are iterated in original rollout order).  We need to map
+                        # each leaf path back to its prompt so that batch and gen_batch_output
+                        # have the same number of rows.
+                        #
+                        # build_flat_batch iterates: for tree in trees -> for leaf in tree.all_leaves
+                        # tree.tree_idx corresponds to the rollout sample index (0..M-1).
+                        # The original batch has one row per prompt (before rollout.n expansion),
+                        # so the mapping is: prompt_idx = tree_idx // rollout_n.
+                        #
+                        # We index batch per leaf path instead of using repeat, because
+                        # different prompts may have different numbers of leaf paths.
                         num_leaf_paths = gen_batch_output.batch["responses"].shape[0]
+                        rollout_n = self.config.actor_rollout_ref.rollout.n
                         num_prompts = batch.batch["prompts"].shape[0]
-                        repeat_factor = num_leaf_paths // num_prompts
-                        if repeat_factor > 0:
-                            batch = batch.repeat(repeat_times=repeat_factor, interleave=True)
-                        else:
-                            batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+                        # Reconstruct the tree_idx for each leaf path by iterating
+                        # trees in the same order as build_flat_batch.
+                        leaf_to_prompt = []
+                        for tree in tree_mgr.trees:
+                            prompt_idx = tree.tree_idx // rollout_n
+                            prompt_idx = min(prompt_idx, num_prompts - 1)
+                            for _ in tree.all_leaves:
+                                leaf_to_prompt.append(prompt_idx)
+
+                        assert len(leaf_to_prompt) == num_leaf_paths, (
+                            f"leaf_to_prompt length {len(leaf_to_prompt)} != "
+                            f"num_leaf_paths {num_leaf_paths}"
+                        )
+                        indices = torch.tensor(leaf_to_prompt, dtype=torch.long)
+                        batch = batch[indices]
                     else:
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
