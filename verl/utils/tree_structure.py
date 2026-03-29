@@ -16,8 +16,12 @@ TreeRL: Tree structure utilities for EPTree-based tree search in RL training.
 
 Implements the EPTree algorithm (arXiv:2506.11902) for (cross-)entropy-guided tree search.
 The core idea: iteratively expand search trees by forking new branches from the
-top-N most uncertain tokens, then use the tree structure to compute process
-supervision signals (GA + LA) / sqrt(n) for RL training.
+top-N most uncertain steps, then use the tree structure to compute process
+supervision signals via leave-one-out normalization + backprop + step normalization.
+
+Step reward pipeline (aligned with TreeRL reference code):
+    evaluate_leaves → leaf_normalize → backpropagate → normalize_all_steps
+    → reweight_steps (optional) → compute_step_rewards
 
 Reference: Algorithm 1 in "TreeRL: LLM Reinforcement Learning with On-Policy Tree Search"
 """
@@ -31,6 +35,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import torch
 
+from verl.utils.step_splitter import default_split_fn, get_split_fn
 
 # ---------------------------------------------------------------------------
 # Data Structures
@@ -62,9 +67,12 @@ class TreeNode:
     token_end: int = 0
 
     # Value and reward (populated during backpropagation)
-    value: float = 0.0          # V(sn) = correct_leaves / total_leaves
-    reward: float = 0.0         # R(sn) = (GA + LA) / sqrt(|L(sn)|)
+    value: float = 0.0          # V(sn) = A(sn) / |L(sn)|
+    reward: float = 0.0         # step reward: V(sn) - V(parent)
     correctness: Optional[float] = None  # 0/1 for leaf nodes, None for internal
+    accumulated_value: float = 0.0      # A(sn) = sum of normalized leaf scores
+    terminal_in_subtree: int = 0        # |L(sn)| for backprop counting
+    selected_terminal_in_subtree: int = 0  # for optional reweight (compute_weighted_update)
 
     # Metadata
     tree_idx: int = 0           # which tree this node belongs to
@@ -142,17 +150,6 @@ class SearchTree:
 
 
 # ---------------------------------------------------------------------------
-# Default split function (matches StepRewardManager's default)
-# ---------------------------------------------------------------------------
-
-def default_split_fn(response_text: str) -> list[str]:
-    """Default step splitter: split by double newline (same as StepRewardManager)."""
-    if not response_text:
-        return [""]
-    return response_text.split("\n\n")
-
-
-# ---------------------------------------------------------------------------
 # TreeManager: Coordinates the full EPTree pipeline
 # ---------------------------------------------------------------------------
 
@@ -161,30 +158,47 @@ class TreeManager:
 
     This class coordinates:
     1. Initializing trees from rollout responses
-    2. Selecting forking points based on token entropy
+    2. Selecting forking points based on step entropy (per-tree Top-N)
     3. Preparing branch inputs for continuation generation
     4. Committing branch outputs back to the tree
-    5. Evaluating leaves and backpropagating values
-    6. Computing TreeRL step rewards: R(sn) = (GA + LA) / sqrt(|L(sn)|)
+    5. Evaluating leaves (correctness scoring)
+    6. Computing step rewards via the TreeRL reference pipeline:
+       leaf_normalize → backpropagate → normalize_all_steps → reweight (opt) → step_rewards
+       Paper formula: R(sn) = [GA(sn) + LA(sn)] / sqrt(|L(sn)|)
+       Reference code default: R(sn) = V(sn) - V(parent) (LA only)
+       Configurable via tree_step_reward_mode: "la" / "ga_la" / "ga" / "value_only"
     7. Flattening all leaf paths into a standard DataProto batch
     """
 
-    def __init__(self, config, tokenizer, split_fn: Optional[Callable] = None):
+    def __init__(self, config, tokenizer, split_fn: Optional[Callable] = None,
+                 use_xml: bool = False):
         """
         Args:
             config: Trainer config (OmegaConf), needs tree_rounds, tree_top_n, tree_branches, etc.
             tokenizer: HuggingFace tokenizer for encoding/decoding.
-            split_fn: Step splitter function. Defaults to split by "\\n\\n".
+            split_fn: Step splitter function. If None, derived from use_xml.
+            use_xml: If True, attempt XML ``<step>`` tag splitting before falling
+                back to the delimiter splitter.
         """
         self.config = config
         self.tokenizer = tokenizer
-        self.split_fn = split_fn or default_split_fn
+        self.use_xml = use_xml
+
+        # Derive split_fn from use_xml when not explicitly provided
+        if split_fn is not None:
+            self.split_fn = split_fn
+        else:
+            self.split_fn = get_split_fn(use_xml=use_xml)
 
         # EPTree parameters from config
         self.tree_rounds = config.get("tree_rounds", 1)       # L
         self.tree_top_n = config.get("tree_top_n", 2)         # N
         self.tree_branches = config.get("tree_branches", 2)   # T
         self.mask_tail_ratio = config.get("tree_mask_tail_ratio", 0.1)  # mask末尾tokens
+        self.use_weighted_value = config.get("tree_use_weighted_value", False)
+        self.weighted_value_style = config.get("tree_weighted_value_style", "sqrt")
+        self.overall_norm_style = config.get("tree_overall_norm_style", "token")
+        self.step_reward_mode = config.get("tree_step_reward_mode", "la")
 
         self.trees: List[SearchTree] = []
         self._node_counter = 0
@@ -263,27 +277,39 @@ class TreeManager:
             # Decode full response
             response_text = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
 
-            # Split into steps
-            steps = self.split_fn(response_text)
+            # Split into steps.
+            # XML path: character-level split then char→token mapping (same
+            #   approach as StepRewardManager — keeps BPE drift but stays
+            #   aligned with reward computation).
+            # Delimiter path: token-level search — no decode→re-encode drift.
+            from verl.utils.step_splitter import (split_by_xml_step_tags,
+                                                  split_tokens_by_delimiter)
+
+            xml_steps = split_by_xml_step_tags(response_text) if self.use_xml else []
+            if xml_steps:
+                # XML: map char boundaries → token positions via re-encode
+                step_ranges: list[tuple[int, int, str]] = []
+                _prev = 0
+                for step_text, _cs, char_end in xml_steps:
+                    text_up_to_end = response_text[:char_end]
+                    toks_up = self.tokenizer.encode(text_up_to_end, add_special_tokens=False)
+                    tok_end = min(len(toks_up), valid_resp_len)
+                    step_ranges.append((_prev, tok_end, step_text))
+                    _prev = tok_end
+            else:
+                # Delimiter: split directly in token space (no BPE drift)
+                step_ranges = split_tokens_by_delimiter(
+                    valid_resp_ids, self.tokenizer
+                )
 
             # Build chain of TreeNodes
             root = None
             prev_node = None
-            token_cursor = 0
             tree_nodes = []
 
-            for step_idx, step_text in enumerate(steps):
-                if not step_text and step_idx > 0:
+            for step_token_start, step_token_end, step_text in step_ranges:
+                if step_token_start >= step_token_end:
                     continue  # skip empty segments
-
-                # Find token span for this step
-                text_up_to_here = self.split_fn.__name__  # dummy
-                # Encode step to find how many tokens it covers
-                prefix_text = ("\n\n".join(steps[:step_idx + 1])
-                               if step_idx > 0 else steps[0])
-                prefix_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
-                step_token_end = min(len(prefix_tokens), valid_resp_len)
-                step_token_start = token_cursor
 
                 # Get tokens and log_probs for this step
                 step_ids = valid_resp_ids[step_token_start:step_token_end]
@@ -307,7 +333,6 @@ class TreeManager:
 
                 tree_nodes.append(node)
                 prev_node = node
-                token_cursor = step_token_end
 
             if root is None:
                 # Fallback: single node with all tokens
@@ -332,53 +357,55 @@ class TreeManager:
     # ------------------------------------------------------------------
 
     def select_forking_points(self, top_n: Optional[int] = None) -> List[Tuple[SearchTree, TreeNode, int]]:
-        """Select the Top-N highest entropy tokens across all trees as forking points.
+        """Select the Top-N highest entropy steps *per tree* as forking points.
 
-        Returns list of (tree, node, token_offset_within_node) tuples.
-        Masks tokens near the end of sequences (last mask_tail_ratio fraction).
+        Each node (step) is scored by the max token entropy it contains.
+        Selection is done independently per tree so that every tree gets
+        a chance to be expanded (aligned with the original TreeRL impl).
+
+        Returns list of (tree, node, token_idx_of_max_entropy) tuples.
+        The token_idx is informational only; downstream fork uses the full node.
         """
         top_n = top_n or self.tree_top_n
 
-        # Collect all (entropy, tree, node, token_idx) candidates
-        candidates = []
-        for tree in self.trees:
-            for node in tree.all_nodes:
-                if not node.is_leaf:
-                    continue  # only fork from current leaf paths
-                # Walk the path and collect entropy scores
-                path = node.path_from_root()
-                total_tokens = sum(len(n.token_ids) for n in path)
-                mask_threshold = int(total_tokens * (1 - self.mask_tail_ratio))
-
-                token_offset = 0
-                for path_node in path:
-                    for t_idx, lp in enumerate(path_node.log_probs):
-                        global_pos = token_offset + t_idx
-                        if global_pos >= mask_threshold:
-                            continue  # mask tail tokens
-                        if global_pos == 0:
-                            continue  # skip first token
-                        entropy = -lp
-                        candidates.append((entropy, tree, path_node, t_idx))
-                    token_offset += len(path_node.token_ids)
-
-        if not candidates:
-            return []
-
-        # Sort by entropy descending and take top-N
-        candidates.sort(key=lambda x: x[0], reverse=True)
-
-        # Deduplicate: don't fork the same (node, token_idx) twice
-        seen = set()
         selected = []
-        for entropy, tree, node, t_idx in candidates:
-            key = (node.node_id, t_idx)
-            if key in seen:
-                continue
-            seen.add(key)
-            selected.append((tree, node, t_idx))
-            if len(selected) >= top_n:
-                break
+
+        for tree in self.trees:
+            # Collect per-node (step) candidates for this tree
+            # Use max token entropy within each node as the node's score
+            candidates = []  # (max_entropy, node, t_idx_of_max)
+            seen_nodes = set()
+
+            for leaf in tree.all_leaves:
+                path = leaf.path_from_root()
+                num_path_nodes = len(path)
+                # Mask the last mask_tail_ratio fraction of steps
+                mask_threshold = max(1, int(num_path_nodes * (1 - self.mask_tail_ratio)))
+
+                for step_idx, path_node in enumerate(path):
+                    if step_idx == 0:
+                        continue  # skip root node
+                    if step_idx >= mask_threshold:
+                        continue  # mask tail steps
+                    if path_node.node_id in seen_nodes:
+                        continue  # shared ancestor, already considered
+                    if not path_node.log_probs:
+                        continue
+                    seen_nodes.add(path_node.node_id)
+
+                    max_ent = -1.0
+                    max_t_idx = 0
+                    for t_idx, lp in enumerate(path_node.log_probs):
+                        ent = -lp
+                        if ent > max_ent:
+                            max_ent = ent
+                            max_t_idx = t_idx
+                    candidates.append((max_ent, path_node, max_t_idx))
+
+            # Sort by entropy descending and take per-tree top-N
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for entropy, node, t_idx in candidates[:top_n]:
+                selected.append((tree, node, t_idx))
 
         return selected
 
@@ -406,16 +433,14 @@ class TreeManager:
         fork_info_list = []
 
         for tree, node, t_idx in forking_points:
-            # Build prefix: all tokens from root up to (node, t_idx)
+            # FIXME: changed from token-level truncation to step-wise fork.
+            #   Old code: prefix_response_ids.extend(path_node.token_ids[:t_idx + 1])
+            #   If this causes errors, revert to the old line above.
+            # Step-wise: include the full selected node in prefix, branch from its end.
             path = node.path_from_root()
             prefix_response_ids = []
             for path_node in path:
-                if path_node.node_id == node.node_id:
-                    # Include tokens up to and including t_idx
-                    prefix_response_ids.extend(path_node.token_ids[:t_idx + 1])
-                    break
-                else:
-                    prefix_response_ids.extend(path_node.token_ids)
+                prefix_response_ids.extend(path_node.token_ids)
 
             # Full input = prompt + prefix_response
             prompt_ids = self._prompt_ids_list[tree.tree_idx]
@@ -456,22 +481,23 @@ class TreeManager:
             "attention_mask": attention_mask_tensor,
         }
 
-        # Copy non_tensor_batch fields from the first tree's data
+        # Copy ALL non_tensor_batch fields from the template (not just hardcoded keys)
         non_tensor_batch = {}
-        for key in ["data_source", "reward_model", "extra_info", "uid"]:
-            if key in self._non_tensor_batch_template:
-                vals = self._non_tensor_batch_template[key]
-                # Replicate the value from the corresponding tree
-                replicated = []
-                for info in fork_info_list:
-                    tidx = info["tree_idx"]
-                    if isinstance(vals, np.ndarray) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    elif isinstance(vals, list) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    else:
-                        replicated.append(vals[0] if len(vals) > 0 else None)
-                non_tensor_batch[key] = np.array(replicated, dtype=object)
+        for key in self._non_tensor_batch_template:
+            if key.endswith("_step_reward"):
+                continue  # step rewards are tree-specific, not carried over
+            vals = self._non_tensor_batch_template[key]
+            # Replicate the value from the corresponding tree
+            replicated = []
+            for info in fork_info_list:
+                tidx = info["tree_idx"]
+                if isinstance(vals, np.ndarray) and tidx < len(vals):
+                    replicated.append(vals[tidx])
+                elif isinstance(vals, list) and tidx < len(vals):
+                    replicated.append(vals[tidx])
+                else:
+                    replicated.append(vals[0] if len(vals) > 0 else None)
+            non_tensor_batch[key] = np.array(replicated, dtype=object)
 
         from verl import DataProto
         branch_batch = DataProto.from_single_dict(batch_dict)
@@ -481,6 +507,9 @@ class TreeManager:
             "pad_token_id": self._meta_info.get("pad_token_id", self.tokenizer.pad_token_id),
             "recompute_log_prob": False,
             "do_sample": True,
+            # Signal the Agent Loop to use input_ids directly as the prompt
+            # instead of re-tokenizing from raw_prompt (continuation mode)
+            "continuation_mode": True,
         }
 
         return branch_batch, fork_info_list
@@ -547,27 +576,33 @@ class TreeManager:
             if not valid_resp_ids:
                 continue
 
-            # Decode and split into steps
+            # Split branch response into steps.
+            # XML path: char→token mapping; Delimiter path: token-level search.
             response_text = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
-            steps = self.split_fn(response_text)
+            from verl.utils.step_splitter import (split_by_xml_step_tags,
+                                                  split_tokens_by_delimiter)
+
+            xml_steps = split_by_xml_step_tags(response_text) if self.use_xml else []
+            if xml_steps:
+                step_ranges: list[tuple[int, int, str]] = []
+                _prev = 0
+                for step_text, _cs, char_end in xml_steps:
+                    text_up_to_end = response_text[:char_end]
+                    toks_up = self.tokenizer.encode(text_up_to_end, add_special_tokens=False)
+                    tok_end = min(len(toks_up), valid_resp_len)
+                    step_ranges.append((_prev, tok_end, step_text))
+                    _prev = tok_end
+            else:
+                step_ranges = split_tokens_by_delimiter(
+                    valid_resp_ids, self.tokenizer
+                )
 
             # Create a new branch starting from the fork point.
-            # The fork_node's tokens up to fork_token_idx are shared;
-            # we create a "split node" for the remainder + branch tokens.
-            # For simplicity, we create a single new child chain under fork_node.
-
             prev_node = fork_node
-            token_cursor = 0
 
-            for step_idx, step_text in enumerate(steps):
-                if not step_text and step_idx > 0:
+            for step_token_start, step_token_end, step_text in step_ranges:
+                if step_token_start >= step_token_end:
                     continue
-
-                prefix_text = ("\n\n".join(steps[:step_idx + 1])
-                               if step_idx > 0 else steps[0])
-                prefix_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
-                step_token_end = min(len(prefix_tokens), valid_resp_len)
-                step_token_start = token_cursor
 
                 step_ids = valid_resp_ids[step_token_start:step_token_end]
                 step_lps = valid_lps[step_token_start:step_token_end]
@@ -587,7 +622,6 @@ class TreeManager:
                 prev_node.children.append(new_node)
                 tree.all_nodes.append(new_node)
                 prev_node = new_node
-                token_cursor = step_token_end
 
     # ------------------------------------------------------------------
     # Step 5: Evaluate Leaves
@@ -636,59 +670,190 @@ class TreeManager:
                     if isinstance(score, dict):
                         score = score.get("score", 0.0)
                     leaf.correctness = float(score)
-                except Exception:
+                except Exception as e:
+                    import traceback
+                    print(f"[TreeRL] WARNING: evaluate_leaves failed for tree {tree_idx}, "
+                          f"node {leaf.node_id}: {e}\n{traceback.format_exc()}")
                     leaf.correctness = 0.0
 
     # ------------------------------------------------------------------
-    # Step 6: Backpropagate
+    # Step 6a: Leave-one-out normalization
     # ------------------------------------------------------------------
+    # Ref: github/THUNLP/TreeRL tree_node.py:377 (leaf_normalize)
+
+    def leaf_normalize(self) -> None:
+        """Leave-one-out normalization on all leaves across all trees.
+
+        For each leaf i with raw score R(l_i):
+            R_hat(l_i) = R(l_i) - (1/(K-1)) * sum_{j!=i} R(l_j)
+
+        Result stored in leaf.accumulated_value.
+        """
+        all_leaves = []
+        for tree in self.trees:
+            all_leaves.extend(tree.all_leaves)
+
+        if len(all_leaves) <= 1:
+            for leaf in all_leaves:
+                leaf.accumulated_value = 0.0
+            return
+
+        scores = [leaf.correctness if leaf.correctness is not None else 0.0
+                  for leaf in all_leaves]
+        total = sum(scores)
+        K = len(scores)
+
+        for i, leaf in enumerate(all_leaves):
+            mean_others = (total - scores[i]) / (K - 1)
+            leaf.accumulated_value = scores[i] - mean_others
+
+    # ------------------------------------------------------------------
+    # Step 6b: Backpropagate
+    # ------------------------------------------------------------------
+    # Ref: github/THUNLP/TreeRL tree_node.py:401 (leaf_backpropagate)
 
     def backpropagate(self) -> None:
-        """Bottom-up value propagation: V(sn) = correct_leaves(sn) / total_leaves(sn).
+        """Bottom-up accumulation: propagate each leaf's normalized score to ancestors.
 
-        Paper Eq: V(sn) = (1/|L(sn)|) * sum_{l in L(sn)} 1(l is correct)
+        After leaf_normalize, each leaf has accumulated_value = R_hat(l_i).
+        Walk up from each leaf to root:
+            ancestor.accumulated_value += leaf.accumulated_value
+            ancestor.terminal_in_subtree += 1
         """
         for tree in self.trees:
-            # Process nodes bottom-up (reverse topological order)
-            for node in reversed(tree.all_nodes):
-                leaves = node.descendant_leaves()
-                if not leaves:
-                    node.value = 0.0
-                    continue
-                correct_count = sum(
-                    1 for l in leaves
-                    if l.correctness is not None and l.correctness > 0.5
-                )
-                node.value = correct_count / len(leaves)
+            for leaf in tree.all_leaves:
+                leaf.terminal_in_subtree = 1
+                parent = leaf.parent
+                while parent is not None:
+                    parent.accumulated_value += leaf.accumulated_value
+                    parent.terminal_in_subtree += 1
+                    parent = parent.parent
+
+    # ------------------------------------------------------------------
+    # Step 6c: Global step normalization
+    # ------------------------------------------------------------------
+    # Ref: github/THUNLP/TreeRL tree_node.py:421 (normalize_all_steps)
+
+    def normalize_all_steps(self) -> None:
+        """Subtract token-weighted (or step-weighted) global mean from accumulated_value.
+
+        Token mode (default):
+            μ = Σ A(s_n)·|T(s_n)| / Σ |L(s_n)|·|T(s_n)|
+        Step mode:
+            μ = Σ A(s_n) / Σ |L(s_n)|
+        Then: A(s_n) -= μ · |L(s_n)|
+
+        This is baseline subtraction — makes the expected (token-weighted) advantage zero.
+        """
+        if self.overall_norm_style == "none":
+            return
+
+        # Collect all nodes with terminal_in_subtree > 0
+        all_steps = []
+        for tree in self.trees:
+            for node in tree.all_nodes:
+                if node.terminal_in_subtree > 0:
+                    all_steps.append(node)
+
+        if not all_steps:
+            return
+
+        if self.overall_norm_style == "token":
+            num = sum(node.accumulated_value * len(node.token_ids)
+                      for node in all_steps)
+            den = sum(node.terminal_in_subtree * len(node.token_ids)
+                      for node in all_steps)
+        else:  # "step"
+            num = sum(node.accumulated_value for node in all_steps)
+            den = sum(node.terminal_in_subtree for node in all_steps)
+
+        mean = num / den if den != 0 else 0.0
+
+        for node in all_steps:
+            node.accumulated_value -= mean * node.terminal_in_subtree
+
+    # ------------------------------------------------------------------
+    # Step 6d: Reweight (optional)
+    # ------------------------------------------------------------------
+    # Ref: github/THUNLP/TreeRL tree_node.py:545-579
+    #      (selected_backpropagate + compute_weighted_update)
+
+    def reweight_steps(self) -> None:
+        """Optional: divide accumulated_value by sqrt/uniform of selected terminal count.
+
+        Only active when tree_use_weighted_value=True.
+        Styles: "sqrt" -> /sqrt(n), "uniform" -> /n, "original" -> no-op.
+        """
+        if not self.use_weighted_value:
+            return
+
+        # Phase 1: count selected terminals per node (selected_backpropagate)
+        # In our case all leaves are selected, so selected == terminal.
+        for tree in self.trees:
+            for leaf in tree.all_leaves:
+                node = leaf
+                while node is not None:
+                    node.selected_terminal_in_subtree += 1
+                    node = node.parent
+
+        # Phase 2: apply reweight recursively (compute_weighted_update)
+        def _reweight(node):
+            if node.selected_terminal_in_subtree == 0:
+                return
+            if self.weighted_value_style == "sqrt":
+                node.accumulated_value /= math.sqrt(node.selected_terminal_in_subtree)
+            elif self.weighted_value_style == "uniform":
+                node.accumulated_value /= node.selected_terminal_in_subtree
+            # "original" = no-op
+            for child in node.children:
+                _reweight(child)
+
+        for tree in self.trees:
+            _reweight(tree.root)
 
     # ------------------------------------------------------------------
     # Step 7: Compute Step Rewards
     # ------------------------------------------------------------------
+    # Ref: github/THUNLP/TreeRL parallel_mcts.py:1603 (path_from_root_to_node)
 
     def compute_step_rewards(self) -> None:
-        """Compute TreeRL process reward for each node.
+        """Compute per-step reward from accumulated_value.
 
-        Paper formula (Algorithm 1):
-            R(sn) = [GA(sn) + LA(sn)] / sqrt(|L(sn)|)
-
-        where:
-            GA(sn) = V(sn) - V(root)       (Global Advantage)
-            LA(sn) = V(sn) - V(parent(sn)) (Local Advantage)
-            |L(sn)| = number of descendant leaves (reweight factor)
+        Phase 1: V(s_n) = A(s_n) / |L(s_n)|
+        Phase 2: step reward per mode:
+            "la"         (ref code default): V(child) - V(parent)
+            "ga_la"      (paper formula):    [V - V(root)] + [V - V(parent)]
+            "ga":                            V - V(root)
+            "value_only":                    V directly
         """
+        mode = self.step_reward_mode
+
         for tree in self.trees:
+            # Phase 1: compute V(s_n) for all nodes
+            for node in tree.all_nodes:
+                if node.terminal_in_subtree > 0:
+                    node.value = node.accumulated_value / node.terminal_in_subtree
+                else:
+                    node.value = 0.0
+
             root_value = tree.root.value
 
+            # Phase 2: compute step reward
             for node in tree.all_nodes:
                 parent_value = node.parent.value if node.parent is not None else root_value
-                ga = node.value - root_value        # Global Advantage
-                la = node.value - parent_value      # Local Advantage
+                la = node.value - parent_value       # Local Advantage
+                ga = node.value - root_value         # Global Advantage
 
-                # Reweight factor: 1 / sqrt(|L(sn)|)
-                num_descendant_leaves = len(node.descendant_leaves())
-                reweight = 1.0 / math.sqrt(max(num_descendant_leaves, 1))
-
-                node.reward = (ga + la) * reweight
+                if mode == "ga_la":
+                    node.reward = ga + la
+                elif mode == "la":
+                    node.reward = la
+                elif mode == "ga":
+                    node.reward = ga
+                elif mode == "value_only":
+                    node.reward = node.value
+                else:
+                    node.reward = la  # fallback to ref code default
 
     # ------------------------------------------------------------------
     # Step 8: Build Flat Batch
@@ -795,37 +960,25 @@ class TreeManager:
         if prompts is not None:
             batch_dict["prompts"] = prompts
 
-        # Build non_tensor_batch
+        # Build non_tensor_batch — replicate ALL keys from the template
         non_tensor_batch = {}
 
-        # Replicate reward_model, data_source, extra_info, uid from original trees
-        for key in ["data_source", "reward_model", "extra_info"]:
-            if key in self._non_tensor_batch_template:
-                vals = self._non_tensor_batch_template[key]
-                replicated = []
-                for tree, _ in all_paths:
-                    tidx = tree.tree_idx
-                    if isinstance(vals, np.ndarray) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    elif isinstance(vals, list) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    else:
-                        replicated.append(None)
-                non_tensor_batch[key] = np.array(replicated, dtype=object)
-
-        # Assign uid: all paths from same tree share the same uid
-        if "uid" in self._non_tensor_batch_template:
-            orig_uids = self._non_tensor_batch_template["uid"]
-            uids = []
+        for key in self._non_tensor_batch_template:
+            if key.endswith("_step_reward"):
+                continue  # external PRM step rewards handled below
+            vals = self._non_tensor_batch_template[key]
+            replicated = []
             for tree, _ in all_paths:
                 tidx = tree.tree_idx
-                if isinstance(orig_uids, np.ndarray) and tidx < len(orig_uids):
-                    uids.append(orig_uids[tidx])
+                if isinstance(vals, np.ndarray) and tidx < len(vals):
+                    replicated.append(vals[tidx])
+                elif isinstance(vals, list) and tidx < len(vals):
+                    replicated.append(vals[tidx])
                 else:
-                    uids.append(f"tree_{tidx}")
-            non_tensor_batch["uid"] = np.array(uids, dtype=object)
+                    replicated.append(None)
+            non_tensor_batch[key] = np.array(replicated, dtype=object)
 
-        # TreeRL step rewards
+        # TreeRL step rewards (computed by this TreeManager)
         non_tensor_batch["treerl_step_reward"] = np.array(all_step_rewards, dtype=object)
         non_tensor_batch["num_steps"] = np.array(
             [len(sr) for sr in all_step_rewards], dtype=np.int32
@@ -1018,14 +1171,19 @@ class TreeManager:
                 branch_batch = branch_batch.repeat(
                     repeat_times=self.tree_branches, interleave=True
                 )
-                fork_info = fork_info * self.tree_branches  # replicate info
+                # Must match interleave order: [A,A,B,B] not [A,B,A,B]
+                fork_info = [info for info in fork_info for _ in range(self.tree_branches)]
 
             branch_output = generate_fn(branch_batch)
             self.commit_branches(branch_output, fork_info)
 
-        # 3. Evaluate + backpropagate + compute rewards
+        # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
+        #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)
         self.evaluate_leaves(compute_score_fn)
+        self.leaf_normalize()
         self.backpropagate()
+        self.normalize_all_steps()
+        self.reweight_steps()           # no-op if tree_use_weighted_value=False
         self.compute_step_rewards()
 
         # 4. Build flat batch

@@ -640,18 +640,17 @@ def compute_tree_gae_advantage(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """TreeRL advantage: tree-derived + optional external PRM process rewards.
 
-    Implements the TreeRL advantage estimation (arXiv:2506.11902):
-        R(sn) = [GA(sn) + LA(sn)] / sqrt(|L(sn)|)
+    TreeRL (arXiv:2506.11902) paper formula: R(sn) = [GA(sn) + LA(sn)] / sqrt(|L(sn)|)
+    Reference code default: R(sn) = V(sn) - V(parent)  (LA only)
 
-    ORM (outcome reward) is NOT used as a separate advantage dimension here —
-    it is already dissolved into the tree topology via TreeManager.backpropagate().
+    Tree step rewards are pre-computed and already normalized by the TreeManager pipeline
+    (leaf_normalize -> backpropagate -> normalize_all_steps -> optional reweight -> step_rewards).
+    They are stored in non_tensor_batch['treerl_step_reward'] as List[(token_pos, score)].
 
-    The step rewards are pre-computed by TreeManager.compute_step_rewards() and stored
-    in non_tensor_batch['treerl_step_reward'] as List[(token_pos, score)] per sample.
     External PRM scores (e.g., format, fol) are stored as '{type}_step_reward'.
 
     This function combines (at the advantage level):
-    1. Tree-topology process advantage (treerl_step_reward) — big-pool norm + reward-to-go
+    1. Tree-topology process advantage (treerl_step_reward) — scatter + reward-to-go (NO big-pool)
     2. External PRM process advantage ({type}_step_reward) — big-pool norm + reward-to-go
     Weighted sum: tree_w * tree_adv + ext_w * ext_adv
 
@@ -741,8 +740,24 @@ def compute_tree_gae_advantage(
             cumsum = (normalized * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
             return cumsum * response_mask
 
+        # --- Helper: scatter step rewards to token positions + reward-to-go (no normalization) ---
+        def _scatter_and_cumsum(reward_data):
+            """Tree rewards are already normalized by TreeManager pipeline.
+            Just scatter to token positions and compute reward-to-go."""
+            raw = torch.zeros(bs, seq_len, device=device, dtype=torch.float32)
+            for i in range(bs):
+                item_data = reward_data[i]
+                if isinstance(item_data, (list, tuple)):
+                    for pos, score in item_data:
+                        if 0 <= pos < seq_len:
+                            raw[i, int(pos)] = float(score)
+            cumsum = (raw * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+            return cumsum * response_mask
+
         # --- Dimension 1: Tree-topology process reward ---
-        tree_adv = _bigpool_normalize(non_tensor_batch["treerl_step_reward"])
+        # Already normalized by leaf_normalize + backprop + normalize_all_steps in TreeManager.
+        # No big-pool z-score needed here — just scatter and reward-to-go.
+        tree_adv = _scatter_and_cumsum(non_tensor_batch["treerl_step_reward"])
 
         # --- Dimension 2+: External PRM process rewards ---
         combined_advantage = tree_weight * tree_adv
