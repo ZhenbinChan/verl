@@ -28,22 +28,18 @@ import inspect
 import logging
 import os
 import random
-import re
 from typing import Callable, Optional
 
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score
-
-logger = logging.getLogger(__name__)
-
-
-def default_split_fn(response_text: str) -> list[str]:
-    """Default step splitter: split by double newline."""
-    if not response_text:
-        return [""]
-    return response_text.split("\n\n")
+from verl.utils.step_splitter import (
+    default_split_fn,
+    get_step_token_positions,
+    split_by_xml_step_tags,
+    split_response_into_steps,
+)
 
 
 def _compute_step_reward_random(step_text: str, prompt_text: str, step_history: list[str], **kwargs) -> float:
@@ -139,47 +135,30 @@ class TreeRewardManager(RewardManagerBase):
         if step_reward_fns:
             self.step_reward_fns.update(step_reward_fns)
 
-    def _split_response_into_steps(self, response_text: str) -> list[tuple[str, int, int]]:
-        """Split response text into steps and return (step_text, char_start, char_end)."""
-        segments = self.split_fn(response_text)
-        steps = []
-        cursor = 0
-        for seg in segments:
-            start = response_text.find(seg, cursor)
-            if start == -1:
-                start = cursor
-            end = start + len(seg)
-            steps.append((seg, start, end))
-            cursor = end
-        return steps
+        # Resolve use_xml_steps: reward config > algorithm config > False
+        reward_cfg = config.get("reward", {})
+        algo_cfg = config.get("algorithm", {})
+        use_xml_cfg = reward_cfg.get("use_xml_steps", None)
+        if use_xml_cfg is None:
+            use_xml_cfg = algo_cfg.get("use_xml_steps", None)
+        self.use_xml = bool(use_xml_cfg) if use_xml_cfg is not None else False
 
     def _get_step_token_positions(self, response_text: str, valid_response_ids, valid_response_length: int):
         """Map character-level step boundaries to token positions.
+
+        Delegates to the shared ``get_step_token_positions`` utility.
 
         Returns:
             List of (step_text, token_end_pos) where token_end_pos is the
             index of the last token in this step (within response_ids).
         """
-        use_xml_extract = any(rt in ["fol", "format"] for rt in self.step_reward_types)
-
-        steps = []
-        if use_xml_extract:
-            pattern = r'<step>.*?(?:</step>|$)'
-            matches = list(re.finditer(pattern, response_text, flags=re.DOTALL))
-            for match in matches:
-                steps.append((match.group(0), match.start(), match.end()))
-
-        if not steps:
-            steps = self._split_response_into_steps(response_text)
-
-        result = []
-        for step_text, char_start, char_end in steps:
-            text_up_to_end = response_text[:char_end]
-            tokens_up_to_end = self.tokenizer.encode(text_up_to_end, add_special_tokens=False)
-            token_end_pos = min(len(tokens_up_to_end) - 1, valid_response_length - 1)
-            token_end_pos = max(0, token_end_pos)
-            result.append((step_text, token_end_pos))
-        return result
+        return get_step_token_positions(
+            response_text=response_text,
+            valid_response_length=valid_response_length,
+            tokenizer=self.tokenizer,
+            use_xml=self.use_xml,
+            split_fn=self.split_fn,
+        )
 
     async def run_single(self, data: DataProto) -> dict:
         """Compute outcome + optional process rewards for a single data item.
