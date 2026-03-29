@@ -9,7 +9,7 @@
 
 import hanlp
 amr_parser = hanlp.load(hanlp.pretrained.amr.AMR3_GRAPH_PRETRAIN_PARSER)
-amr = amr_parser('The administrative service area is southwest of the cultural area.')
+amr = amr_parser('The boy wants the girl to believe him.')
 print(amr)
 
 
