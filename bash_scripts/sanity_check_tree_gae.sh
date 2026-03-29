@@ -22,7 +22,7 @@ export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=format \
-    +algorithm.use_xml_steps=true \
+    algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
     data.train_files=$DATA_DIR/train.parquet \
@@ -62,6 +62,10 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_top_n=2 \
     +trainer.tree_branches=2 \
     +trainer.tree_mask_tail_ratio=0.1 \
+    +trainer.tree_step_reward_mode=la \
+    +trainer.tree_overall_norm_style=token \
+    +trainer.tree_use_weighted_value=False \
+    +trainer.tree_weighted_value_style=sqrt \
     trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_tree_gae_sanity_check_${DATA_NAME}" \

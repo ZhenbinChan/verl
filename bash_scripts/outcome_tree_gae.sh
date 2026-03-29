@@ -22,7 +22,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # 底层会自动退化为只使用基于叶子正确率推导出来的 (GA+LA)/\sqrt{n} 作为唯一的 advantage 信号。
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
-    +algorithm.use_xml_steps=true \
+    algorithm.use_xml_steps=true \
     reward_model.reward_manager=tree \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
@@ -61,6 +61,10 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_top_n=2 \
     +trainer.tree_branches=2 \
     +trainer.tree_mask_tail_ratio=0.1 \
+    +trainer.tree_step_reward_mode=la \
+    +trainer.tree_overall_norm_style=token \
+    +trainer.tree_use_weighted_value=False \
+    +trainer.tree_weighted_value_style=sqrt \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_outcome_only" \

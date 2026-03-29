@@ -24,10 +24,16 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 #   新增: trainer.tree_sampling, tree_rounds, tree_top_n, tree_branches, tree_mask_tail_ratio
 #   step_reward_weights: [outcome_w, process_w] -> [tree_w, ext_prm_w]
 #   rollout.n: 16 -> 6 (树会分叉扩展，实际评估路径数远大于6)
+#
+# Advantage pipeline params (defaults = TreeRL ref code):
+#   tree_step_reward_mode:      la (ref default) | ga_la (paper: GA+LA) | ga | value_only
+#   tree_overall_norm_style:    token (default) | step | none
+#   tree_use_weighted_value:    False (default) | True
+#   tree_weighted_value_style:  sqrt (default) | uniform | original  (only when use_weighted_value=True)
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=format \
-    +algorithm.use_xml_steps=true \
+    algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
     data.train_files=$DATA_DIR/train.parquet \
@@ -67,6 +73,10 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_top_n=2 \
     +trainer.tree_branches=2 \
     +trainer.tree_mask_tail_ratio=0.1 \
+    +trainer.tree_step_reward_mode=la \
+    +trainer.tree_overall_norm_style=token \
+    +trainer.tree_use_weighted_value=False \
+    +trainer.tree_weighted_value_style=sqrt \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_format" \
