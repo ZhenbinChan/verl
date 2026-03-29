@@ -75,6 +75,11 @@ algorithm:
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
 
+  # Use XML <step>...</step> tags for step boundary splitting.
+  # When false (default), steps are split by the delimiter splitter (e.g. \n\n).
+  # Set to true when using fol/format reward types that produce <step>-tagged responses.
+  use_xml_steps: false
+
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
