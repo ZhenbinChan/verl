@@ -383,8 +383,8 @@ class TreeManager:
                 mask_threshold = max(1, int(num_path_nodes * (1 - self.mask_tail_ratio)))
 
                 for step_idx, path_node in enumerate(path):
-                    if step_idx == 0:
-                        continue  # skip root node
+                    # if step_idx == 0:
+                    #     continue  # skip root node
                     if step_idx >= mask_threshold:
                         continue  # mask tail steps
                     if path_node.node_id in seen_nodes:
