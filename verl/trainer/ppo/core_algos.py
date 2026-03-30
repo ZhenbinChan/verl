@@ -651,7 +651,10 @@ def compute_tree_gae_advantage(
 
     This function combines (at the advantage level):
     1. Tree-topology process advantage (treerl_step_reward) — scatter + reward-to-go (NO big-pool)
-    2. External PRM process advantage ({type}_step_reward) — big-pool norm + reward-to-go
+    2. External PRM process advantage ({type}_step_reward) — dedup bigpool norm + reward-to-go
+       (tree_ext_reward_dedup=True, default): shared-prefix scores are deduplicated by
+       node_id when computing pool mean/std.  build_flat_batch reads per-node
+       ext_prm_scores, so each node contributes its own score (no stale data).
     Weighted sum: tree_w * tree_adv + ext_w * ext_adv
 
     Args:
@@ -754,6 +757,89 @@ def compute_tree_gae_advantage(
             cumsum = (raw * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
             return cumsum * response_mask
 
+        # --- Helper: tree-aware dedup bigpool normalization ---
+        def _tree_dedup_bigpool_normalize(reward_data, reward_key: str = ""):
+            """Like _bigpool_normalize but deduplicates shared-prefix scores.
+
+            Multiple leaf paths from the same tree share prefix nodes whose
+            external PRM scores are identical.  When computing the pool
+            mean/std we count each unique node (by node_id) only once, so
+            shared-prefix scores don't inflate their weight in the statistics.
+            The normalized score is then written to ALL paths that carry
+            that node (so reward-to-go is correct).
+
+            Args:
+                reward_data: per-sample List[(pos, score)]
+                reward_key: the non_tensor_batch key, e.g. "format_step_reward",
+                    used to find the parallel "{prm}_step_node_ids" array.
+            """
+            # Derive the parallel node_ids key:
+            # "format_step_reward" → "format_step_node_ids"
+            nid_key = reward_key.replace("_step_reward", "_step_node_ids") if reward_key else ""
+            node_ids_data = non_tensor_batch.get(nid_key, None) if nid_key else None
+
+            if node_ids_data is None:
+                # Fallback: no node_id info, use plain bigpool
+                return _bigpool_normalize(reward_data)
+
+            raw = torch.zeros(bs, seq_len, device=device, dtype=torch.float32)
+            for i in range(bs):
+                item_data = reward_data[i]
+                if isinstance(item_data, (list, tuple)):
+                    for pos, score in item_data:
+                        if 0 <= pos < seq_len:
+                            raw[i, int(pos)] = float(score)
+
+            normalized = torch.zeros_like(raw)
+            prompt_groups = defaultdict(list)
+            for i in range(bs):
+                prompt_groups[index[i]].append(i)
+
+            for _, group_indices in prompt_groups.items():
+                # Phase 1: collect unique scores keyed by node_id
+                seen_node_ids = {}   # node_id -> score
+                all_entries = []     # [(sample_idx, pos, score)]
+
+                for idx in group_indices:
+                    item_data = reward_data[idx]
+                    nids = node_ids_data[idx]  # parallel list of node_ids
+                    if isinstance(item_data, (list, tuple)):
+                        assert len(nids) == len(item_data), (
+                            f"node_ids length {len(nids)} != reward entries {len(item_data)} "
+                            f"for sample {idx}, key={reward_key}. "
+                            "build_flat_batch should produce parallel lists."
+                        )
+                        for entry_idx, (pos, score) in enumerate(item_data):
+                            if 0 <= pos < seq_len:
+                                all_entries.append((idx, int(pos), float(score)))
+                                nid = int(nids[entry_idx])
+                                if nid not in seen_node_ids:
+                                    seen_node_ids[nid] = float(score)
+
+                unique_scores = list(seen_node_ids.values())
+                if len(unique_scores) < 2:
+                    # Not enough unique scores to normalize
+                    for idx, pos, score in all_entries:
+                        normalized[idx, pos] = score
+                    continue
+
+                pool_tensor = torch.tensor(unique_scores, device=device, dtype=torch.float32)
+                pool_mean = pool_tensor.mean()
+                pool_std = pool_tensor.std()
+
+                # Phase 2: apply normalized score to all entries
+                for idx, pos, score in all_entries:
+                    normalized[idx, pos] = (score - pool_mean) / (pool_std + epsilon)
+
+            # Reward-to-go (reverse cumsum)
+            cumsum = (normalized * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+            return cumsum * response_mask
+
+        # --- Config: external PRM dedup mode ---
+        ext_reward_dedup = bool(
+            config.get("tree_ext_reward_dedup", True)
+        ) if config is not None else True
+
         # --- Dimension 1: Tree-topology process reward ---
         # Already normalized by leaf_normalize + backprop + normalize_all_steps in TreeManager.
         # No big-pool z-score needed here — just scatter and reward-to-go.
@@ -764,7 +850,10 @@ def compute_tree_gae_advantage(
 
         for dim_idx, key in enumerate(step_reward_keys):
             if key in non_tensor_batch:
-                ext_adv = _bigpool_normalize(non_tensor_batch[key])
+                if ext_reward_dedup:
+                    ext_adv = _tree_dedup_bigpool_normalize(non_tensor_batch[key], reward_key=key)
+                else:
+                    ext_adv = _bigpool_normalize(non_tensor_batch[key])
                 ext_weight = (
                     step_reward_weights[1 + dim_idx]
                     if (1 + dim_idx) < len(step_reward_weights)

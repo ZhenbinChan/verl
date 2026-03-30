@@ -66,6 +66,7 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_overall_norm_style=token \
     +trainer.tree_use_weighted_value=False \
     +trainer.tree_weighted_value_style=sqrt \
+    +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_tree_gae_sanity_check_${DATA_NAME}" \

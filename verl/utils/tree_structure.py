@@ -74,6 +74,11 @@ class TreeNode:
     terminal_in_subtree: int = 0        # |L(sn)| for backprop counting
     selected_terminal_in_subtree: int = 0  # for optional reweight (compute_weighted_update)
 
+    # External PRM scores per step, e.g. {"format": 0.8, "fol": 0.6}
+    # Populated by _map_ext_prm_to_nodes (original chain) and
+    # evaluate_branch_ext_prm (forked nodes).
+    ext_prm_scores: dict = field(default_factory=dict)
+
     # Metadata
     tree_idx: int = 0           # which tree this node belongs to
     is_forked: bool = False     # whether this node was created by forking
@@ -350,7 +355,51 @@ class TreeManager:
             tree = SearchTree(tree_idx=i, root=root, all_nodes=tree_nodes)
             self.trees.append(tree)
 
+        # Map external PRM scores from template onto original-chain nodes
+        self._map_ext_prm_to_nodes()
+
         return self.trees
+
+    def _map_ext_prm_to_nodes(self) -> None:
+        """Map external PRM step rewards from the template onto TreeNode.ext_prm_scores.
+
+        The template stores per-rollout ``[(pos, score), ...]`` where ``pos`` is
+        a token position in the original response.  Each ``(pos, score)`` is
+        assigned to the node whose ``[token_start, token_end)`` range contains
+        ``pos``.  Only original-chain nodes (``is_forked=False``) are matched;
+        forked nodes must be evaluated separately via ``evaluate_branch_ext_prm``.
+        """
+        for tree in self.trees:
+            tidx = tree.tree_idx
+            # Collect all external PRM keys
+            for key in self._non_tensor_batch_template:
+                if not key.endswith("_step_reward") or key == "treerl_step_reward":
+                    continue
+
+                # e.g. key="format_step_reward" → prm_name="format"
+                prm_name = key[: -len("_step_reward")]
+
+                vals = self._non_tensor_batch_template[key]
+                raw_scores = None
+                if isinstance(vals, np.ndarray) and tidx < len(vals):
+                    raw_scores = vals[tidx]
+                elif isinstance(vals, list) and tidx < len(vals):
+                    raw_scores = vals[tidx]
+
+                if raw_scores is None or not isinstance(raw_scores, (list, tuple)):
+                    continue
+
+                # Build a lookup: original-chain nodes sorted by token_start
+                orig_nodes = [n for n in tree.all_nodes if not n.is_forked]
+                orig_nodes.sort(key=lambda n: n.token_start)
+
+                for pos, score in raw_scores:
+                    pos = int(pos)
+                    # Find the node containing this position
+                    for node in orig_nodes:
+                        if node.token_start <= pos < node.token_end:
+                            node.ext_prm_scores[prm_name] = float(score)
+                            break
 
     # ------------------------------------------------------------------
     # Step 2: Select Forking Points
@@ -623,6 +672,43 @@ class TreeManager:
                 tree.all_nodes.append(new_node)
                 prev_node = new_node
 
+    def evaluate_branch_ext_prm(
+        self,
+        compute_ext_prm_fn: Optional[Callable] = None,
+    ) -> None:
+        """Evaluate external PRM scores for forked (branch) nodes.
+
+        Original-chain nodes already have ext_prm_scores from
+        ``_map_ext_prm_to_nodes``.  This method fills in scores for
+        forked nodes so that every node on every leaf path has PRM data.
+
+        Args:
+            compute_ext_prm_fn: ``(step_text: str, prm_name: str) -> float``
+                If None, forked nodes get no external PRM scores (backward
+                compatible — they simply won't contribute to the bigpool).
+        """
+        if compute_ext_prm_fn is None:
+            return
+
+        # Collect all PRM names from the original-chain nodes
+        prm_names: set = set()
+        for tree in self.trees:
+            for node in tree.all_nodes:
+                if not node.is_forked:
+                    prm_names.update(node.ext_prm_scores.keys())
+
+        if not prm_names:
+            return
+
+        for tree in self.trees:
+            for node in tree.all_nodes:
+                if not node.is_forked:
+                    continue
+                for prm_name in prm_names:
+                    if prm_name not in node.ext_prm_scores:
+                        score = compute_ext_prm_fn(node.step_text, prm_name)
+                        node.ext_prm_scores[prm_name] = float(score)
+
     # ------------------------------------------------------------------
     # Step 5: Evaluate Leaves
     # ------------------------------------------------------------------
@@ -866,11 +952,15 @@ class TreeManager:
         Step rewards are stored as List[(token_pos, score)] in non_tensor_batch,
         compatible with the step_gdpo advantage estimator format.
 
+        External PRM scores are read from ``TreeNode.ext_prm_scores`` (per-node
+        storage populated by ``_map_ext_prm_to_nodes`` + ``evaluate_branch_ext_prm``).
+        Each node contributes its own score — no cross-path duplication of stale data.
+
         Args:
             original_output: The original rollout DataProto (for shape/format reference).
 
         Returns:
-            flat_batch: DataProto with all leaf paths, ready for training.
+            flat_batch: DataProto with all leaf paths and TreeRL step rewards.
         """
         all_paths = []
         for tree in self.trees:
@@ -885,7 +975,6 @@ class TreeManager:
         all_response_ids = []
         all_response_log_probs = []
         all_step_rewards = []  # List[(pos, score)] per path
-        all_tree_indices = []
 
         for tree, path in all_paths:
             # Concatenate all token_ids and log_probs along the path
@@ -908,7 +997,6 @@ class TreeManager:
             all_response_ids.append(resp_ids)
             all_response_log_probs.append(resp_lps)
             all_step_rewards.append(step_rewards)
-            all_tree_indices.append(tree.tree_idx)
 
         # Determine max response length and pad
         max_resp_len = max(len(ids) for ids in all_response_ids)
@@ -984,20 +1072,39 @@ class TreeManager:
             [len(sr) for sr in all_step_rewards], dtype=np.int32
         )
 
-        # Propagate external PRM step reward keys (e.g., format_step_reward)
-        for key in self._non_tensor_batch_template:
-            if key.endswith("_step_reward") and key != "treerl_step_reward":
-                vals = self._non_tensor_batch_template[key]
-                replicated = []
-                for tree, _ in all_paths:
-                    tidx = tree.tree_idx
-                    if isinstance(vals, np.ndarray) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    elif isinstance(vals, list) and tidx < len(vals):
-                        replicated.append(vals[tidx])
-                    else:
-                        replicated.append([])
-                non_tensor_batch[key] = np.array(replicated, dtype=object)
+        # External PRM step rewards — read from TreeNode.ext_prm_scores.
+        # Each node on the path contributes its score (if it has one) at the
+        # last token position of that node, identical to how treerl_step_reward
+        # is built.  This covers both original-chain nodes (from
+        # _map_ext_prm_to_nodes) and forked nodes (from evaluate_branch_ext_prm).
+        #
+        # Collect all PRM names that appear on any node
+        all_prm_names: set = set()
+        for tree in self.trees:
+            for node in tree.all_nodes:
+                all_prm_names.update(node.ext_prm_scores.keys())
+
+        for prm_name in all_prm_names:
+            key = f"{prm_name}_step_reward"
+            nid_key = f"{prm_name}_step_node_ids"
+            per_path_scores = []
+            per_path_node_ids = []
+            for path_idx, (tree, path) in enumerate(all_paths):
+                scores = []
+                node_ids = []
+                token_offset = 0
+                for node in path:
+                    if node.token_ids and prm_name in node.ext_prm_scores:
+                        step_end_pos = token_offset + len(node.token_ids) - 1
+                        scores.append((step_end_pos, node.ext_prm_scores[prm_name]))
+                        node_ids.append(node.node_id)
+                    token_offset += len(node.token_ids)
+                per_path_scores.append(scores)
+                per_path_node_ids.append(node_ids)
+            non_tensor_batch[key] = np.array(per_path_scores, dtype=object)
+            # Parallel node_id list for dedup in _tree_dedup_bigpool_normalize.
+            # node_id is globally unique within a TreeManager instance.
+            non_tensor_batch[nid_key] = np.array(per_path_node_ids, dtype=object)
 
         # Build DataProto
         from verl import DataProto
@@ -1142,6 +1249,7 @@ class TreeManager:
         rollout_output: DataProto,
         generate_fn: Callable,
         compute_score_fn: Callable,
+        compute_ext_prm_fn: Optional[Callable] = None,
     ) -> DataProto:
         """Run the complete EPTree pipeline.
 
@@ -1149,11 +1257,15 @@ class TreeManager:
             rollout_output: Initial rollout DataProto (M responses).
             generate_fn: Function to generate continuations (e.g., async_rollout_manager.generate_sequences).
             compute_score_fn: Function to evaluate response correctness.
+            compute_ext_prm_fn: Optional ``(step_text, prm_name) -> float``
+                for evaluating external PRM on forked nodes.  If None, forked
+                nodes have no external PRM scores (only original-chain nodes
+                from the initial rollout will contribute).
 
         Returns:
             flat_batch: DataProto with all leaf paths and TreeRL step rewards.
         """
-        # 1. Initialize trees
+        # 1. Initialize trees (also maps external PRM scores to original-chain nodes)
         self.initialize_trees(rollout_output)
 
         # 2. Iterative expansion
@@ -1176,6 +1288,9 @@ class TreeManager:
 
             branch_output = generate_fn(branch_batch)
             self.commit_branches(branch_output, fork_info)
+
+        # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
+        self.evaluate_branch_ext_prm(compute_ext_prm_fn)
 
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)
