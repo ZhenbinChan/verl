@@ -1,6 +1,11 @@
 set -x
 
-# 1. 基础路径设置
+# Self-Evaluate Tree-GAE — Mode B: 2 GPUs (training on GPU 0, vLLM reference on GPU 1)
+#
+# Usage:
+#   export CUDA_VISIBLE_DEVICES=0,1
+#   bash self_eval_tree_gae_local.sh
+
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
@@ -10,29 +15,40 @@ ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
-# Sanity check
-echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# API configuration for LLM-based step rewards (FOL, self_eval, etc.)
-# These env vars are the default fallback; can also be overridden via
-# +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
-export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
-export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
+# Launch vLLM server on GPU 1 with reference model weights
+SELF_EVAL_PORT=${SELF_EVAL_PORT:-8199}
+export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
 
-# Step-GDPO normal training (对标 one_epoch_dapo.sh)
-# 变化点 vs DAPO:
-#   algorithm.adv_estimator: grpo -> step_gdpo
-#   reward_model.reward_manager: dapo -> step
-#   新增: step_reward_type, step_reward_weights (在 algorithm 里)
-#   删除: overlong_buffer_cfg (DAPO特有)
-python3 -u -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=step_gdpo \
-    +algorithm.step_reward_type=fol \
+echo "==> Launching local vLLM server on GPU 1 (port $SELF_EVAL_PORT)..."
+CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
+    --model $MODEL_PATH \
+    --port $SELF_EVAL_PORT \
+    --gpu-memory-utilization 0.85 \
+    --tensor-parallel-size 1 &
+VLLM_PID=$!
+trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
+
+echo "Waiting for vLLM server to start..."
+for i in $(seq 1 60); do
+    if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
+        echo "vLLM server ready after ${i}s"
+        break
+    fi
+    sleep 1
+done
+
+export OPENAI_API_KEY="EMPTY"
+export OPENAI_BASE_URL="http://localhost:${SELF_EVAL_PORT}/v1"
+
+# EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
+CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=tree_gae \
+    +algorithm.step_reward_type=self_eval \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
-    reward_model.reward_manager=step \
+    reward_model.reward_manager=tree \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
@@ -58,19 +74,29 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.rollout.n=16 \
+    actor_rollout_ref.rollout.n=6 \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.top_p=0.95 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    +trainer.tree_sampling=True \
+    +trainer.tree_rounds=1 \
+    +trainer.tree_top_n=2 \
+    +trainer.tree_branches=2 \
+    +trainer.tree_mask_tail_ratio=0.1 \
+    +trainer.tree_step_reward_mode=la \
+    +trainer.tree_overall_norm_style=token \
+    +trainer.tree_use_weighted_value=False \
+    +trainer.tree_weighted_value_style=sqrt \
+    +algorithm.tree_ext_reward_dedup=True \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_self_eval" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
-    trainer.save_total_limit=3 \
+    trainer.save_freq=-1 \
+    trainer.max_actor_ckpt_to_keep=0 \
     trainer.test_freq=100 \
     trainer.total_epochs=1 $@

@@ -1,0 +1,10 @@
+You are a reasoning expert evaluating the quality of a student's intermediate reasoning steps. The provided reasoning may be incomplete - it represents the middle of a reasoning process, not necessarily a full solution. Please analyze the provided steps according to the evaluation rubric below and provide a single overall score from 0 to 10.
+
+Consider:
+1. **Premise Establishment** (0-2 points): Clear statement of given information and assumptions
+2. **Step Validity** (0-2 points): Each intermediate step is logically valid and well-formed
+3. **Justification Quality** (0-2 points): Each step includes proper justification (rule citation, axiom application, logical inference)
+4. **Logical Progression** (0-2 points): Smooth transition between steps without gaps or unjustified leaps
+5. **Conclusion** (0-2 points): The step's conclusion properly follows from its premises
+
+Output format: Overall Score: [float]

@@ -1,6 +1,13 @@
 set -x
 
-# 1. 基础路径设置
+# Self-Evaluate Step-GDPO — Mode A: 1 GPU + remote API
+#
+# Usage:
+#   export OPENAI_BASE_URL="https://your-remote-server/v1"
+#   export OPENAI_API_KEY="your-key"
+#   export SELF_EVAL_MODEL="Qwen2.5-1.5B-Instruct"   # optional
+#   bash self_eval_step_gdpo_remote.sh
+
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
@@ -10,26 +17,15 @@ ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
-# Sanity check
-echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# API configuration for LLM-based step rewards (FOL, self_eval, etc.)
-# These env vars are the default fallback; can also be overridden via
-# +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
-export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
-export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:8000/v1"}
+export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
 
-# Step-GDPO normal training (对标 one_epoch_dapo.sh)
-# 变化点 vs DAPO:
-#   algorithm.adv_estimator: grpo -> step_gdpo
-#   reward_model.reward_manager: dapo -> step
-#   新增: step_reward_type, step_reward_weights (在 algorithm 里)
-#   删除: overlong_buffer_cfg (DAPO特有)
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
-    +algorithm.step_reward_type=fol \
+    +algorithm.step_reward_type=self_eval \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \
@@ -65,12 +61,12 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}_self_eval" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
-    trainer.save_total_limit=3 \
+    trainer.save_freq=-1 \
+    trainer.max_actor_ckpt_to_keep=0 \
     trainer.test_freq=100 \
     trainer.total_epochs=1 $@

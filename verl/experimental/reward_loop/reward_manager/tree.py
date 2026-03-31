@@ -81,17 +81,19 @@ class TreeRewardManager(RewardManagerBase):
         # Pluggable step splitter
         self.split_fn = split_fn or default_split_fn
 
-        # FOL API configuration: config > env vars > defaults
-        self.fol_api_config = {
-            "model": os.environ.get("FOL_MODEL"),
+        # API configuration for LLM-based step rewards (FOL, self_eval, etc.)
+        # Priority: config.reward.api_config > env vars > defaults
+        self.api_config = {
+            "model": os.environ.get("SELF_EVAL_MODEL", os.environ.get("FOL_MODEL")),
             "api_key": os.environ.get("OPENAI_API_KEY"),
             "base_url": os.environ.get("OPENAI_BASE_URL"),
             "temperature": 0.6,
             "max_tokens": 1024,
         }
-        fol_cfg_override = config.get("reward", {}).get("fol_api_config", {})
-        if fol_cfg_override:
-            self.fol_api_config.update({k: v for k, v in fol_cfg_override.items() if v is not None})
+        cfg_override = config.get("reward", {}).get("api_config",
+                       config.get("reward", {}).get("fol_api_config", {}))
+        if cfg_override:
+            self.api_config.update({k: v for k, v in cfg_override.items() if v is not None})
 
         # Step reward type: explicit parameter > reward config > algorithm config > None
         if step_reward_type is not None:
@@ -130,6 +132,11 @@ class TreeRewardManager(RewardManagerBase):
                     self.step_reward_fns["fol"] = compute_step_reward_fol
             except ImportError as e:
                 logger.warning("Failed to lazily load built-in FOL reward functions: %s", e)
+
+        if "self_eval" in self.step_reward_types:
+            from verl.utils.reward_score.self_eval import compute_step_reward_self_eval
+            if "self_eval" not in self.step_reward_fns:
+                self.step_reward_fns["self_eval"] = compute_step_reward_self_eval
 
         # Override with any user-provided step_reward_fns
         if step_reward_fns:
@@ -248,7 +255,7 @@ class TreeRewardManager(RewardManagerBase):
                         step_text,
                         prompt_text,
                         step_history,
-                        api_config=self.fol_api_config,
+                        api_config=self.api_config,
                         extra_info=extra_info,
                     )
                     step_rewards.append((int(token_end_pos), float(step_score)))

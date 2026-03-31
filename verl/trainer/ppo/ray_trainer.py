@@ -1506,32 +1506,38 @@ class RayPPOTrainer:
                             if srt is not None:
                                 step_reward_types = [srt] if isinstance(srt, str) else list(srt)
                                 ext_prm_fns = {}
+
+                                # Build shared api_config for LLM-based rewards
+                                import os
+                                from functools import partial
+                                api_config = {
+                                    "model": os.environ.get("SELF_EVAL_MODEL", os.environ.get("FOL_MODEL")),
+                                    "api_key": os.environ.get("OPENAI_API_KEY"),
+                                    "base_url": os.environ.get("OPENAI_BASE_URL"),
+                                    "temperature": 0.6,
+                                    "max_tokens": 1024,
+                                }
+                                cfg_override = reward_cfg.get("api_config",
+                                               reward_cfg.get("fol_api_config", {}))
+                                if cfg_override:
+                                    api_config.update(
+                                        {k: v for k, v in cfg_override.items() if v is not None}
+                                    )
+
                                 for rt in step_reward_types:
-                                    if rt in ("format", "fol"):
-                                        from verl.utils.reward_score.fol import (
-                                            compute_step_reward_fol,
-                                            compute_step_reward_format_fol)
-                                        if rt == "format":
-                                            ext_prm_fns["format"] = compute_step_reward_format_fol
-                                        elif rt == "fol":
-                                            import os
-                                            from functools import partial
-                                            fol_api_config = {
-                                                "model": os.environ.get("FOL_MODEL"),
-                                                "api_key": os.environ.get("OPENAI_API_KEY"),
-                                                "base_url": os.environ.get("OPENAI_BASE_URL"),
-                                                "temperature": 0.6,
-                                                "max_tokens": 1024,
-                                            }
-                                            # Override from config (same logic as StepRewardManager)
-                                            fol_cfg = reward_cfg.get("fol_api_config", {})
-                                            if fol_cfg:
-                                                fol_api_config.update(
-                                                    {k: v for k, v in fol_cfg.items() if v is not None}
-                                                )
-                                            ext_prm_fns["fol"] = partial(
-                                                compute_step_reward_fol, api_config=fol_api_config
-                                            )
+                                    if rt == "format":
+                                        from verl.utils.reward_score.fol import compute_step_reward_format_fol
+                                        ext_prm_fns["format"] = compute_step_reward_format_fol
+                                    elif rt == "fol":
+                                        from verl.utils.reward_score.fol import compute_step_reward_fol
+                                        ext_prm_fns["fol"] = partial(
+                                            compute_step_reward_fol, api_config=api_config
+                                        )
+                                    elif rt == "self_eval":
+                                        from verl.utils.reward_score.self_eval import compute_step_reward_self_eval
+                                        ext_prm_fns["self_eval"] = partial(
+                                            compute_step_reward_self_eval, api_config=api_config
+                                        )
 
                             # Run full EPTree pipeline
                             gen_batch_output = tree_mgr.run_full_pipeline(
