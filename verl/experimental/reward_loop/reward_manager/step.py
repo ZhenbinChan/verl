@@ -212,7 +212,7 @@ class StepRewardManager(RewardManagerBase):
 
         # 2.2 Extract prompt text for reward functions that need it
         raw_prompt = data_item.non_tensor_batch.get("raw_prompt", [])
-        if raw_prompt:
+        if raw_prompt is not None and len(raw_prompt) > 0:
             # raw_prompt is a list of message dicts; take the last user message content
             prompt_text = raw_prompt[-1]["content"] if isinstance(raw_prompt[-1], dict) else str(raw_prompt[-1])
         else:

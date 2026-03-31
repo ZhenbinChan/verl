@@ -30,7 +30,7 @@ python examples/data_preprocess/logiqa.py \
     --version 1 \
     --num_samples 2000 \
     --local_save_dir ./data/logiqa2k \
-    --user_prompt_file logical_reasoning.txt
+    --system_prompt_file logical_reasoning.txt
 ```
 
 Version 1, all samples, plain text format:
@@ -40,7 +40,7 @@ python examples/data_preprocess/logiqa.py \
     --version 1 \
     --num_samples -1 \
     --local_save_dir ./data/logiqa \
-    --user_prompt_file logical_reasoning.txt
+    --system_prompt_file logical_reasoning.txt
 ```
 
 Version 2, 5000 samples, XML format:
@@ -51,7 +51,7 @@ python examples/data_preprocess/logiqa.py \
     --num_samples 5000 \
     --format xml \
     --local_save_dir ./data/logiqa5k_v2_xml \
-    --user_prompt_file logical_reasoning.txt
+    --system_prompt_file logical_reasoning.txt
 ```
 
 Injection of Logic Reasoning Prompt:
@@ -62,7 +62,7 @@ python examples/data_preprocess/logiqa.py \
     --num_samples 5000 \
     --format xml \
     --local_save_dir ./data/logiqa5k_v2_xml \
-    --user_prompt_file logical_reasoning.txt
+    --system_prompt_file logical_reasoning.txt
 ```
 
 ### Prompting

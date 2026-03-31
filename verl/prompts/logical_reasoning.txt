@@ -103,5 +103,3 @@ Your output should have this exact structure:
 - If a step has multiple premises, list them in separate `<premise>` tags
 - If you need to make an assumption, state it explicitly in a premise
 - If the problem is mathematical, show calculations clearly
-
-Now, solve the following problem.
