@@ -674,7 +674,7 @@ class TreeManager:
 
     def evaluate_branch_ext_prm(
         self,
-        compute_ext_prm_fn: Optional[Callable] = None,
+        ext_prm_fns: Optional[dict] = None,
     ) -> None:
         """Evaluate external PRM scores for forked (branch) nodes.
 
@@ -683,11 +683,14 @@ class TreeManager:
         forked nodes so that every node on every leaf path has PRM data.
 
         Args:
-            compute_ext_prm_fn: ``(step_text: str, prm_name: str) -> float``
+            ext_prm_fns: Dict mapping prm_name → reward_fn.
+                Each reward_fn has signature:
+                ``(step_text: str, prompt_text: str, step_history: list[str], **kwargs) -> float``
+                Same as StepRewardManager reward functions.
                 If None, forked nodes get no external PRM scores (backward
                 compatible — they simply won't contribute to the bigpool).
         """
-        if compute_ext_prm_fn is None:
+        if not ext_prm_fns:
             return
 
         # Collect all PRM names from the original-chain nodes
@@ -700,14 +703,44 @@ class TreeManager:
         if not prm_names:
             return
 
+        # Only evaluate PRM types that we have functions for
+        eval_prms = [p for p in prm_names if p in ext_prm_fns]
+        if not eval_prms:
+            return
+
         for tree in self.trees:
+            tidx = tree.tree_idx
+            # Get prompt text for this tree
+            prompt_text = ""
+            if self._prompt_ids_list and tidx < len(self._prompt_ids_list):
+                prompt_text = self.tokenizer.decode(
+                    self._prompt_ids_list[tidx], skip_special_tokens=True
+                )
+
+            # Get extra_info for this tree (e.g., fol_context/question/options)
+            extra_info = {}
+            if "extra_info" in self._non_tensor_batch_template:
+                ei_vals = self._non_tensor_batch_template["extra_info"]
+                if isinstance(ei_vals, np.ndarray) and tidx < len(ei_vals):
+                    extra_info = ei_vals[tidx] or {}
+                elif isinstance(ei_vals, list) and tidx < len(ei_vals):
+                    extra_info = ei_vals[tidx] or {}
+
             for node in tree.all_nodes:
                 if not node.is_forked:
                     continue
-                for prm_name in prm_names:
-                    if prm_name not in node.ext_prm_scores:
-                        score = compute_ext_prm_fn(node.step_text, prm_name)
-                        node.ext_prm_scores[prm_name] = float(score)
+                for prm_name in eval_prms:
+                    if prm_name in node.ext_prm_scores:
+                        continue
+                    # Build step_history: all ancestor step texts (root → parent)
+                    path = node.path_from_root()
+                    step_history = [n.step_text for n in path[:-1]]
+
+                    score = ext_prm_fns[prm_name](
+                        node.step_text, prompt_text, step_history,
+                        extra_info=extra_info,
+                    )
+                    node.ext_prm_scores[prm_name] = float(score)
 
     # ------------------------------------------------------------------
     # Step 5: Evaluate Leaves
@@ -1249,7 +1282,7 @@ class TreeManager:
         rollout_output: DataProto,
         generate_fn: Callable,
         compute_score_fn: Callable,
-        compute_ext_prm_fn: Optional[Callable] = None,
+        ext_prm_fns: Optional[dict] = None,
     ) -> DataProto:
         """Run the complete EPTree pipeline.
 
@@ -1257,10 +1290,10 @@ class TreeManager:
             rollout_output: Initial rollout DataProto (M responses).
             generate_fn: Function to generate continuations (e.g., async_rollout_manager.generate_sequences).
             compute_score_fn: Function to evaluate response correctness.
-            compute_ext_prm_fn: Optional ``(step_text, prm_name) -> float``
-                for evaluating external PRM on forked nodes.  If None, forked
-                nodes have no external PRM scores (only original-chain nodes
-                from the initial rollout will contribute).
+            ext_prm_fns: Optional dict mapping prm_name → reward_fn for
+                evaluating external PRM on forked nodes.  Each fn has signature
+                ``(step_text, prompt_text, step_history, **kw) -> float``.
+                If None, forked nodes get no external PRM scores.
 
         Returns:
             flat_batch: DataProto with all leaf paths and TreeRL step rewards.
@@ -1290,7 +1323,7 @@ class TreeManager:
             self.commit_branches(branch_output, fork_info)
 
         # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
-        self.evaluate_branch_ext_prm(compute_ext_prm_fn)
+        self.evaluate_branch_ext_prm(ext_prm_fns)
 
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)
