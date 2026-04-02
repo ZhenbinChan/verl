@@ -73,4 +73,10 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.save_freq=100 \
     trainer.save_total_limit=3 \
     trainer.test_freq=100 \
-    trainer.total_epochs=1 $@
+    trainer.total_epochs=1 \
+    ++data.seed=42 \
+    ++actor_rollout_ref.rollout.seed=42 \
+    actor_rollout_ref.model.seed=42 \
+    actor_rollout_ref.actor.data_loader_seed=42 \
+    critic.model.seed=42 \
+    critic.data_loader_seed=42 $@
