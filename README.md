@@ -156,18 +156,18 @@ srun -p gpu_a800 -G1 bash -c "export PYTHONUNBUFFERED=1; bash bash_scripts/sanit
 
 | 类别 | 脚本 | adv_estimator | reward_manager | step_reward_type | rollout.n | 外部依赖 |
 |------|------|---------------|----------------|------------------|-----------|----------|
-| **DAPO** | `one_epoch_dapo.sh` | grpo | dapo | — | 16 | 无 |
-| | `sanity_check_dapo.sh` | grpo | dapo | — | 16 | 无 |
+| **DAPO** | `one_epoch_dapo.sh` | grpo | dapo | 无 (纯 outcome) | 16 | 无 |
+| | `sanity_check_dapo.sh` | grpo | dapo | 无 (纯 outcome) | 16 | 无 |
 | **Step-GDPO** | `fol_step_gdpo.sh` | step_gdpo | step | fol | 16 | OpenAI API |
 | | `format_step_gdpo.sh` | step_gdpo | step | format | 16 | 无 |
-| | `sanity_check_step_gdpo.sh` | step_gdpo | step | fol | 16 | OpenAI API |
-| **Tree-GAE** | `format_tree_gae.sh` | tree_gae | tree | format | 6 | 无 |
-| | `outcome_tree_gae.sh` | tree_gae | tree | —(纯 outcome) | 6 | 无 |
-| | `sanity_check_tree_gae.sh` | tree_gae | tree | — | 6 | 无 |
-| **Self-Eval** | `self_eval_step_gdpo_local.sh` | step_gdpo | step | self_eval | 16 | 本地 vLLM (GPU 1) |
+| | `self_eval_step_gdpo_local.sh` | step_gdpo | step | self_eval | 16 | 本地 vLLM (GPU 1in2) |
 | | `self_eval_step_gdpo_remote.sh` | step_gdpo | step | self_eval | 16 | 远程 API |
-| | `self_eval_tree_gae_local.sh` | tree_gae | tree | self_eval | 6 | 本地 vLLM (GPU 1) |
+| | `sanity_check_step_gdpo.sh` | step_gdpo | step | 可选 | 16 | OpenAI API |
+| **Tree-GAE** | `format_tree_gae.sh` | tree_gae | tree | format | 6 | 无 |
+| | `outcome_tree_gae.sh` | tree_gae | tree | 无 (纯 outcome) | 6 | 无 |
+| | `self_eval_tree_gae_local.sh` | tree_gae | tree | self_eval | 6 | 本地 vLLM (GPU 1in2) |
 | | `self_eval_tree_gae_remote.sh` | tree_gae | tree | self_eval | 6 | 远程 API |
+| | `sanity_check_tree_gae.sh` | tree_gae | tree | 可选 | 6 | 无 |
 
 ---
 

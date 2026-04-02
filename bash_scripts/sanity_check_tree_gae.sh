@@ -5,7 +5,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-ray stop --force
+# ray stop --force  # disabled: kills other Ray instances when running concurrent jobs
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
@@ -19,6 +19,7 @@ export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
 export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 
 # TreeRL Sanity Check: Tree-GAE with step-level rewards
+# step_reward_type is changeable
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=format \

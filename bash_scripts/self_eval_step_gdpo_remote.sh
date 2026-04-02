@@ -13,7 +13,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-ray stop --force
+# ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 

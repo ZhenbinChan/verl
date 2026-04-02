@@ -11,7 +11,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-ray stop --force
+# ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
@@ -31,13 +31,19 @@ VLLM_PID=$!
 trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
 
 echo "Waiting for vLLM server to start..."
+VLLM_READY=0
 for i in $(seq 1 60); do
     if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
         echo "vLLM server ready after ${i}s"
+        VLLM_READY=1
         break
     fi
     sleep 1
 done
+if [ "$VLLM_READY" -eq 0 ]; then
+    echo "ERROR: vLLM server failed to start within 60s"
+    exit 1
+fi
 
 export OPENAI_API_KEY="EMPTY"
 export OPENAI_BASE_URL="http://localhost:${SELF_EVAL_PORT}/v1"
