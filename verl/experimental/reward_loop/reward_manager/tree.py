@@ -238,7 +238,7 @@ class TreeRewardManager(RewardManagerBase):
 
             # Extract prompt text for reward functions that need it
             raw_prompt = data_item.non_tensor_batch.get("raw_prompt", [])
-            if raw_prompt:
+            if len(raw_prompt) > 0:
                 prompt_text = raw_prompt[-1]["content"] if isinstance(raw_prompt[-1], dict) else str(raw_prompt[-1])
             else:
                 prompt_text = ""
