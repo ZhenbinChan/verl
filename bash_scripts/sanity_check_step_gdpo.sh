@@ -5,7 +5,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-ray stop --force
+# ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
@@ -18,6 +18,7 @@ export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
 export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
 export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 
+# step_reward_type is changeable
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=format \
@@ -66,8 +67,5 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.total_epochs=1 \
     trainer.total_training_steps=5 \
     ++data.seed=42 \
-    ++actor_rollout_ref.rollout.seed=42 \
-    actor_rollout_ref.model.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
-    critic.model.seed=42 \
     critic.data_loader_seed=42 $@

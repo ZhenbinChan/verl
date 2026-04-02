@@ -11,7 +11,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-ray stop --force
+# ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
@@ -101,8 +101,5 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     trainer.test_freq=100 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
-    ++actor_rollout_ref.rollout.seed=42 \
-    actor_rollout_ref.model.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
-    critic.model.seed=42 \
     critic.data_loader_seed=42 $@
