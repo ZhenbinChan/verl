@@ -671,7 +671,7 @@ def compute_tree_gae_advantage(
         returns: (bs, response_length)
     """
     with torch.no_grad():
-        bs, seq_len = token_level_rewards.shape
+        bs, seq_len = token_level_rewards.shape # token_level_rewards is a dummy variable, only used for shape and device
         device = token_level_rewards.device
 
         # --- Assert: treerl_step_reward must exist ---

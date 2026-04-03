@@ -1156,11 +1156,24 @@ class TreeManager:
         else:
             attention_mask[:, :max_resp_len] = response_masks.long()
 
+        # Build rm_scores from leaf correctness (outcome reward).
+        # Places the score at the last valid response token for each path,
+        # matching the format that RewardLoopManager.compute_rm_score() produces.
+        rm_scores = torch.zeros(num_paths, max_resp_len, dtype=torch.float32)
+        for i, (tree, path) in enumerate(all_paths):
+            leaf = path[-1]
+            score = leaf.correctness if leaf.correctness is not None else 0.0
+            valid_len = len(all_response_ids[i])
+            if valid_len > 0:
+                pos = min(valid_len - 1, max_resp_len - 1)
+                rm_scores[i, pos] = float(score)
+
         # Build batch dict
         batch_dict = {
             "responses": responses,
             "attention_mask": attention_mask,
             "response_mask": response_masks,
+            "rm_scores": rm_scores,
         }
         if prompts is not None:
             batch_dict["prompts"] = prompts
