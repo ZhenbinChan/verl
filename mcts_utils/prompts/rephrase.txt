@@ -1,0 +1,64 @@
+You are an experienced linguist with strong natural language understanding and reasoning capabilities.
+
+### Task Description
+To make logical reasoning problems easier for solvers to understand and more suitable for verifying solution steps using the Python Z3 API, your goal consists of two steps. Please strictly follow these two steps for analysis and rewriting the problem:
+Step 1: Rewrite the problem context. Follow these principles:
+- Remove questions, as interrogative sentences cannot form propositions in propositional logic;
+- Eliminate irrelevant background or introductory information, keeping only key constraints needed for subsequent reasoning;
+- IMPORTANT: Avoid using colons, dashes, and other punctuation in rewritten sentences, as they can complicate sentence structure. Prefer simple sentence structures when rewriting key sentences related to constraints;
+- IMPORTANT: Ensure the semantic meaning of the rewritten sentences is consistent with the original;
+
+Step 2: Coreference resolution. When referring across sentences, replace pronouns with their specific antecedents to eliminate ambiguity in subsequent sentence splitting.
+
+Step 3: Inject common sense and axioms. We assume solvers lack common sense and axioms. Therefore, based on the context and question description, provide potentially needed common sense and axioms. Examples include:
+- Common sense: "The morning sun is in the east," "If A is west of B, then B is east of A";
+- Axioms: "If x, y, z are real numbers and a > b, b > c, then a > c," "The sum of angles in a triangle is 180 degrees."
+
+## Output Format
+1. IMPORTANT: Output consists of two paragraphs. The first paragraph contains the rewritten context, and the second paragraph contains the common sense and axioms required for solving the problem.
+2. Separate the two paragraphs with\n\n;
+3. Only rewrite the context;
+
+Here is an example:
+
+## Input
+<Context>
+The law firm has eight partners: Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens. From 1961 to 1968, one partner joined the firm each year. Hodges joined the firm earlier than Nader. King joined earlier than James. Both Nader and James joined earlier than Gregg. Nader joined earlier than Owens. James joined earlier than MacNeil. Gregg joined earlier than Ivan.
+</Context>
+<Question>
+Which of the following statements cannot be true? </Question>
+<Options>
+(A) Hodges joined the firm in 1961.
+(B) Hodges joined the firm in 1963.
+(C) Gregg joined the firm in 1964.
+(D) MacNeil joined the firm in 1964.
+(E) Owens joined the firm in 1964.
+</Options>
+
+## Output
+<p1>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens is the partners of the law firm.</p1>
+<p2>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens joined the firm between 1961 to 1968</p2>
+<p3>Each partner joined the firm in different year.</p3>
+<p4> Hodges joined earlier than Nader </p4>
+<p5> King joined earlier than James. </p5>
+<p6> Nader joined earlier than Gregg</p6>
+<p7> James joined earlier than Gregg</p7>
+<p8> Nader joined earlier than Owens</p8>
+<p9> James joined earlier than MacNeil.</p9>
+<p10>Gregg joined earlier than Ivan.</p10>
+
+<axiom_1> If $a$ joined earlier than $b$, and $b$ joined earlier than $c$, then $a$ joined earlier than $c$.</axiom_1>
+---
+Now, Please rephrase the following text and given the axiom related to the problem:
+
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>
