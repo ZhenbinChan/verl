@@ -1437,7 +1437,11 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.async_rollout_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
+                        # Defer sleep_replicas until after tree expansion (if enabled),
+                        # because tree branch generation also needs the vLLM engine alive.
+                        tree_sampling = self.config.trainer.get("tree_sampling", False)
+                        if not tree_sampling:
+                            self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.async_rollout_manager.stop_profile()
 
@@ -1575,6 +1579,10 @@ class RayPPOTrainer:
 
                             print(f"[TreeRL] Step {self.global_steps} | {total_trees} trees, {total_leaves} total leaves, "
                                   f"batch size: {gen_batch_output.batch['responses'].shape[0]}")
+
+                    # Now sleep replicas after tree expansion is done
+                    if tree_sampling:
+                        self.checkpoint_manager.sleep_replicas()
 
                     # repeat to align with repeated responses in rollout
                     if tree_sampling:
