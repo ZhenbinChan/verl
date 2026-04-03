@@ -30,8 +30,9 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 \
-    --disable-log-requests &
+    --no-enable-log-requests > vllm_server.log 2>&1 &
 VLLM_PID=$!
+echo "vLLM server log: vllm_server.log"
 trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
 
 echo "Waiting for vLLM server to start..."
