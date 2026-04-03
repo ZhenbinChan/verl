@@ -1611,7 +1611,7 @@ class RayPPOTrainer:
                         # different prompts may have different numbers of leaf paths.
                         num_leaf_paths = gen_batch_output.batch["responses"].shape[0]
                         rollout_n = self.config.actor_rollout_ref.rollout.n
-                        num_prompts = batch.batch["prompts"].shape[0]
+                        num_prompts = len(batch)
 
                         # Reconstruct the tree_idx for each leaf path by iterating
                         # trees in the same order as build_flat_batch.

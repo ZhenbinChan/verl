@@ -26,12 +26,17 @@ _NON_TERMINAL_PROMPT_PATH = PROMPT_ROOT / "non_terminal.txt"
 _TERMINAL_PROMPT_PATH = PROMPT_ROOT / "terminal.txt"
 
 _prompt_cache: dict[str, str] = {}
+_prompt_logged: set[str] = set()
 
 
 def _load_prompt(path: Path) -> str:
     key = str(path)
     if key not in _prompt_cache:
         _prompt_cache[key] = path.read_text(encoding="utf-8").strip()
+        # Log system prompt once on first load
+    if key not in _prompt_logged:
+        _prompt_logged.add(key)
+        logger.info("=== [Self-Eval System Prompt] %s ===\n%s\n===", path.name, _prompt_cache[key])
     return _prompt_cache[key]
 
 
@@ -39,12 +44,17 @@ def _load_prompt(path: Path) -> str:
 # Score extraction
 # ---------------------------------------------------------------------------
 
-_SCORE_RE = re.compile(r"Overall\s+Score:\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+_SCORE_RE = re.compile(r"\*{0,2}Overall\s+Score:?\*{0,2}\s*\[?([0-9]*\.?[0-9]+)\]?", re.IGNORECASE)
+_BOXED_RE = re.compile(r"\\boxed\{\{?([0-9]*\.?[0-9]+)\}?\}")
 
 
 def _extract_score(text: str) -> Optional[float]:
-    """Extract ``Overall Score: <float>`` from LLM output."""
+    """Extract ``Overall Score: <float>`` from LLM output, fallback to ``\\boxed{<float>}``."""
     match = _SCORE_RE.search(text)
+    if match:
+        return float(match.group(1))
+    # Fallback: model may output \boxed{number} instead of following rubric
+    match = _BOXED_RE.search(text)
     if match:
         return float(match.group(1))
     return None
@@ -127,15 +137,23 @@ def compute_step_reward_self_eval(
     # Build user prompt with accumulated reasoning
     accumulated = "\n\n".join(step_history)
     user_prompt = f"Problem: {prompt_text}\n\nStudent's Reasoning Process: {accumulated}\n\n"
+    logger.info("=== [Self-Eval Started] is_terminal=%s step_length=%d ===", is_terminal, len(step_text))
+    logger.info("--- [Self-Eval User Prompt] ---\n%s\n---", user_prompt)
 
     try:
         response_text = _call_llm(user_prompt, api_config=api_config, system_prompt=sys_prompt)
         score = _extract_score(response_text)
         if score is not None:
-            logger.info("--- [Self-Eval Judge Response] score=%.1f/10 ---\n%s\n---", score, response_text)
+            logger.info("--- [Self-Eval Judge Response] score=%.1f/10 ---")
+            logger.info("--- [Self-Eval Judge Response] ---\n%s\n------------------------------", response_text)
+            logger.info("--- [Self-Eval Finished] reward=%.3f ---", max(0.0, min(10.0, score)) / 10.0)
+
             return max(0.0, min(10.0, score)) / 10.0
-        logger.warning("--- [Self-Eval Judge Response] could not extract score ---\n%s\n---", response_text)
+        logger.info("--- [Self-Eval Judge] could not extract score ---")
+        logger.info("--- [Self-Eval Judge Response]\n%s\n------------------------------", response_text)
+        logger.info("--- [Self-Eval Finished] reward=%.3f ---", 0.0)
         return 0.0
     except Exception as e:
-        logger.warning("self_eval: API call failed: %s", e)
+        logger.warning("[Self-Eval Judge Response] API call failed: %s", e)
+        logger.info("--- [Self-Eval Finished] reward=%.3f ---", 0.0)
         return 0.0
