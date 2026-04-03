@@ -24,6 +24,7 @@ export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
 echo "==> Launching local vLLM server on GPU 1 (port $SELF_EVAL_PORT)..."
 CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --model $MODEL_PATH \
+    --served-model-name $SELF_EVAL_MODEL \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 &
