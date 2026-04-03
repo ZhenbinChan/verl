@@ -1,0 +1,73 @@
+You are an expert in formal logic and automated reasoning. Given a logical reasoning problem about a research hypothesis, you must generate the corresponding Z3 declarations (sorts, constants, predicates/functions) and axioms that capture the essential logical structure of the problem.
+
+Instructions:
+
+1. Analyze the Context and Hypothesis:
+   • Identify the key entities/individuals mentioned (e.g., people, populations, regions).
+
+   • Identify the key properties, relationships, and conditions mentioned (e.g., "black", "westernized", "from a region", "has high blood pressure").
+
+   • Identify the core hypothesis being tested, and any background assumptions that are implied.
+
+2. Design the Z3 Representation:
+   • Declare appropriate sorts (types) for the entities (e.g., Person, Region).
+
+   • Declare constants for any specific individuals or groups mentioned in the options (e.g., descendants_of_Senegalese_Gambians).
+
+   • Declare predicates/functions for each property/relation, with clear, descriptive names.
+
+   • Formulate axioms that encode:
+
+     ◦ The researcher's hypothesis as a logical formula.
+
+     ◦ Any necessary background knowledge or implicit assumptions (e.g., "All westernized individuals have a high-salt diet").
+
+     ◦ Definitions that link concepts (e.g., the relationship between a region's salt history and genetic adaptation).
+
+3. Output Format:
+   • Output only the Z3 Python code block. Do not include any explanation, commentary, or natural language text outside the code block.
+
+   • Use the exact structure and style as shown in the example.
+
+Example Output Template:
+
+from z3 import *
+
+solver = Solver()
+
+# 定义排序
+Person = DeclareSort('Person')
+Region = DeclareSort('Region')
+x = Const('x', Person)
+r = Const('r', Region)
+
+# 公共谓词
+Black = Function('Black', Person, BoolSort())
+Westernized = Function('Westernized', Person, BoolSort())
+FromRegion = Function('FromRegion', Person, Region, BoolSort())
+SaltSufficientHistory = Function('SaltSufficientHistory', Region, BoolSort())
+SaltDeficientHistory = Function('SaltDeficientHistory', Region, BoolSort())
+GeneticAdaptationToLowSalt = Function('GeneticAdaptationToLowSalt', Person, BoolSort())
+HighSaltDiet = Function('HighSaltDiet', Person, BoolSort())
+Hypertension = Function('Hypertension', Person, BoolSort())
+
+# 公共公理
+axioms = [
+    ForAll([x, r], Implies(And(FromRegion(x, r), SaltSufficientHistory(r)), Not(GeneticAdaptationToLowSalt(x)))),
+    ForAll([x, r], Implies(And(Black(x), FromRegion(x, r), SaltDeficientHistory(r)), GeneticAdaptationToLowSalt(x))),
+    ForAll([x], Implies(Westernized(x), HighSaltDiet(x))),
+    ForAll([x], Implies(And(Black(x), Westernized(x)), Hypertension(x) == And(HighSaltDiet(x), GeneticAdaptationToLowSalt(x))))
+]
+
+
+Guidelines for Declarations:
+
+• Use plural or singular forms consistently (e.g., Person not Persons).
+
+• For constants representing specific groups mentioned in options, use clear names like descendants_of_Senegalese_Gambians, yoruba_people.
+
+• Include universally quantified variables (x, r) for axioms that apply to all individuals/regions.
+
+• The axioms should capture the necessary logical relationships to reason about the hypothesis and options. Do not add irrelevant axioms.
+
+Now, given a new problem context, question, and options, generate the corresponding Z3 declarations.

@@ -1,26 +1,64 @@
-## Instruction
-You are a professional linguist, adept at rephrasing various structured or unstructured information using clear, fluent, and concise natural language. I will now provide you with an answer to a logical reasoning question. These answers follow the structure below:
-1. Each response contains multiple reasoning steps, and each step is enclosed within <step>...</step>;
-2. The reasoning text in each step includes two parts: premises and intermediate conclusions. Premises are enclosed within <premise>...</premise> tags, while conclusions are enclosed within <conclusion>...</conclusion> tags;
+You are an experienced linguist with strong natural language understanding and reasoning capabilities.
 
-## Task Specification
-1. Remove tags like <premise> and <conclusion> in each step, and rephrase the reasoning using natural language; please note that the text for each step needs to clarify which premises were used to deduce the current intermediate conclusion.
-2. Deduplication: If repetitive or redundant reasoning steps are detected, please remove them; we define repetition as using the same premises and obtaining almost identical intermediate conclusions;
-3. After rephrasing the text of different steps, output a consistent and logically rigorous response paragraph;
-4. Coreference Resolution: The rephrased response should avoid using demonstrative pronouns as much as possible, such as He, It, or The second premise; you should specifically point out what these entities or premises are;
-5. Try not to use overly long compound sentences;
+### Task Description
+To make logical reasoning problems easier for solvers to understand and more suitable for verifying solution steps using the Python Z3 API, your goal consists of two steps. Please strictly follow these two steps for analysis and rewriting the problem:
+Step 1: Rewrite the problem context. Follow these principles:
+- Remove questions, as interrogative sentences cannot form propositions in propositional logic;
+- Eliminate irrelevant background or introductory information, keeping only key constraints needed for subsequent reasoning;
+- IMPORTANT: Avoid using colons, dashes, and other punctuation in rewritten sentences, as they can complicate sentence structure. Prefer simple sentence structures when rewriting key sentences related to constraints;
+- IMPORTANT: Ensure the semantic meaning of the rewritten sentences is consistent with the original;
 
-## Example
-### Original Response
-<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Based on the given information, we know the relative positions of the cultural area, leisure area, and administrative service area. </conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>From the first premise, the administrative service area is located to the southwest of the cultural area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is southwest of the cultural area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>From the second premise, the leisure area is located to the northeast of the cultural area.</conclusion>\n</step>\n\n<step>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<premise>The leisure area is northeast of the cultural area.</premise>\n<conclusion>Combining the two premises, we can deduce that the administrative service area, located to the southwest of the cultural area, is northeast of the leisure area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is northeast of the leisure area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Given that the administrative service area is northeast of the leisure area, and the cultural area is southeast of the leisure area, we can infer that the cultural area must be located to the northeast of the administrative service area.</conclusion>\n</step>\n\n<step>\n<premise>The administrative service area is northeast of the leisure area.</premise>\n<premise>The cultural area is southeast of the leisure area.</premise>\n<conclusion>Therefore, the business district (commercial area) is located southwest of the administrative service area, and the leisure area is located southwest of the cultural area, which matches option D.</conclusion>\n</step>\n\n\\boxed{D}
+Step 2: Coreference resolution. When referring across sentences, replace pronouns with their specific antecedents to eliminate ambiguity in subsequent sentence splitting.
 
-### Rephrased Response
-From the premise that the administrative service area is southwest of the cultural area and the premise that the cultural area is southeast of the leisure area, the relative positions of the three areas can be determined step by step.
-First, the statement that the administrative service area is southwest of the cultural area establishes that the administrative service area lies both south and west of the cultural area.
-Second, the statement that the cultural area is southeast of the leisure area means that the cultural area lies south and east of the leisure area, which also implies that the leisure area is northwest of the cultural area.
-Combining these two premises, place the leisure area as a reference point. Since the cultural area is southeast of the leisure area, the cultural area must be located down and to the right of the leisure area. Because the administrative service area is southwest of the cultural area, the administrative service area must be located down and to the left of the cultural area. This positioning makes the administrative service area farther south than the leisure area and also west of the cultural area, which fixes the relative layout among the three regions.
-Under this arrangement, the only option consistent with the established directions is the one stating that the commercial area lies southwest of the administrative service area and the leisure area lies southwest of the cultural area, which corresponds to option D.
+Step 3: Inject common sense and axioms. We assume solvers lack common sense and axioms. Therefore, based on the context and question description, provide potentially needed common sense and axioms. Examples include:
+- Common sense: "The morning sun is in the east," "If A is west of B, then B is east of A";
+- Axioms: "If x, y, z are real numbers and a > b, b > c, then a > c," "The sum of angles in a triangle is 180 degrees."
 
+## Output Format
+1. IMPORTANT: Output consists of two paragraphs. The first paragraph contains the rewritten context, and the second paragraph contains the common sense and axioms required for solving the problem.
+2. Separate the two paragraphs with\n\n;
+3. Only rewrite the context;
+
+Here is an example:
+
+## Input
+<Context>
+The law firm has eight partners: Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens. From 1961 to 1968, one partner joined the firm each year. Hodges joined the firm earlier than Nader. King joined earlier than James. Both Nader and James joined earlier than Gregg. Nader joined earlier than Owens. James joined earlier than MacNeil. Gregg joined earlier than Ivan.
+</Context>
+<Question>
+Which of the following statements cannot be true? </Question>
+<Options>
+(A) Hodges joined the firm in 1961.
+(B) Hodges joined the firm in 1963.
+(C) Gregg joined the firm in 1964.
+(D) MacNeil joined the firm in 1964.
+(E) Owens joined the firm in 1964.
+</Options>
+
+## Output
+<p1>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens is the partners of the law firm.</p1>
+<p2>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens joined the firm between 1961 to 1968</p2>
+<p3>Each partner joined the firm in different year.</p3>
+<p4> Hodges joined earlier than Nader </p4>
+<p5> King joined earlier than James. </p5>
+<p6> Nader joined earlier than Gregg</p6>
+<p7> James joined earlier than Gregg</p7>
+<p8> Nader joined earlier than Owens</p8>
+<p9> James joined earlier than MacNeil.</p9>
+<p10>Gregg joined earlier than Ivan.</p10>
+
+<axiom_1> If $a$ joined earlier than $b$, and $b$ joined earlier than $c$, then $a$ joined earlier than $c$.</axiom_1>
 ---
+Now, Please rephrase the following text and given the axiom related to the problem:
 
-Now, Please rephrase the following response and put the program into ```plain_text``` block:
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>
