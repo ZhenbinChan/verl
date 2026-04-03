@@ -144,16 +144,18 @@ def compute_step_reward_self_eval(
         response_text = _call_llm(user_prompt, api_config=api_config, system_prompt=sys_prompt)
         score = _extract_score(response_text)
         if score is not None:
-            logger.info("--- [Self-Eval Judge Response] score=%.1f/10 ---")
-            logger.info("--- [Self-Eval Judge Response] ---\n%s\n------------------------------", response_text)
-            logger.info("--- [Self-Eval Finished] reward=%.3f ---", max(0.0, min(10.0, score)) / 10.0)
+            reward = max(0.0, min(10.0, score)) / 10.0
+            logger.info("--- [Self-Eval Judge Response] score=%.1f/10 ---", score)
+            logger.info("--- [Self-Eval Judge Response] ---\n%s\n----------------------------------", response_text)
+            logger.info("--- [Self-Eval Finished] reward=%.3f ---", reward)
 
-            return max(0.0, min(10.0, score)) / 10.0
+            return reward
         logger.info("--- [Self-Eval Judge] could not extract score ---")
-        logger.info("--- [Self-Eval Judge Response]\n%s\n------------------------------", response_text)
+                     
+        logger.info("--- [Self-Eval Judge Response] ---\n%s\n----------------------------------", response_text)
         logger.info("--- [Self-Eval Finished] reward=%.3f ---", 0.0)
         return 0.0
     except Exception as e:
-        logger.warning("[Self-Eval Judge Response] API call failed: %s", e)
+        logger.warning("--- [Self-Eval Judge Response] API call failed: %s ---", e)
         logger.info("--- [Self-Eval Finished] reward=%.3f ---", 0.0)
         return 0.0
