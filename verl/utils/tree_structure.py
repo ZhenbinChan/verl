@@ -29,6 +29,7 @@ Reference: Algorithm 1 in "TreeRL: LLM Reinforcement Learning with On-Policy Tre
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -36,6 +37,22 @@ import numpy as np
 import torch
 
 from verl.utils.step_splitter import default_split_fn, get_split_fn
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def find_repeated_patterns(s: str, pattern_length: int = 50, threshold: int = 20) -> dict:
+    """Detect degenerate repetition via N-gram frequency. (2nd strategy of repetition penalty)
+
+    Ref: THUNLP/TreeRL parallel_mcts.py:184, remote_reward.py:19
+    """
+    if len(s) < pattern_length:
+        return {}
+    ngrams = [s[i:i + pattern_length] for i in range(len(s) - pattern_length + 1)]
+    ngram_counts = Counter(ngrams)
+    return {gram: count for gram, count in ngram_counts.items() if count > threshold}
+
 
 # ---------------------------------------------------------------------------
 # Data Structures
@@ -82,6 +99,7 @@ class TreeNode:
     # Metadata
     tree_idx: int = 0           # which tree this node belongs to
     is_forked: bool = False     # whether this node was created by forking
+    finish_reason: Optional[str] = None  # "stop" (EOS) / "length" (token/step limit) / "repetition" (loop detected)
 
     @property
     def is_leaf(self) -> bool:
@@ -205,6 +223,15 @@ class TreeManager:
         self.overall_norm_style = config.get("tree_overall_norm_style", "token")
         self.step_reward_mode = config.get("tree_step_reward_mode", "la")
 
+        # Anti-degeneration parameters (ref: THUNLP/TreeRL)
+        # Inner repetition penalty applies a heuristic penalty to nodes whose step text contains repeated patterns,
+        # which are often indicative of degenerate loops. (1st strategy for repetition penalty in TreeRL)
+        self.inner_repetition_penalty = config.get("tree_inner_repetition_penalty", True)
+        # max depth (3rd strategy)
+        self.max_steps_per_path = config.get("tree_max_steps_per_path", 40)
+        self.repetition_pattern_length = config.get("tree_repetition_pattern_length", 50)
+        self.repetition_threshold = config.get("tree_repetition_threshold", 20)
+
         self.trees: List[SearchTree] = []
         self._node_counter = 0
         # Store prompt info for branch construction
@@ -212,6 +239,8 @@ class TreeManager:
         self._prompt_lengths: List[int] = []
         self._meta_info = {}
         self._non_tensor_batch_template = {}
+        
+        # TODO: 1. Diverse Sampling as a new anti-degeneration strategy (ref: THUNLP/TreeRL entropy_chain_local_manager.py:255)
 
     def _new_node_id(self) -> int:
         self._node_counter += 1
@@ -311,10 +340,16 @@ class TreeManager:
             root = None
             prev_node = None
             tree_nodes = []
+            truncated_by_max_steps = False
 
             for step_token_start, step_token_end, step_text in step_ranges:
                 if step_token_start >= step_token_end:
                     continue  # skip empty segments
+
+                # max_steps_per_path truncation
+                if len(tree_nodes) >= self.max_steps_per_path:
+                    truncated_by_max_steps = True
+                    break
 
                 # Get tokens and log_probs for this step
                 step_ids = valid_resp_ids[step_token_start:step_token_end]
@@ -351,6 +386,23 @@ class TreeManager:
                     tree_idx=i,
                 )
                 tree_nodes = [root]
+
+            # Determine finish_reason for the leaf node
+            leaf_node = tree_nodes[-1]
+            eos_token_id = self.tokenizer.eos_token_id
+            if truncated_by_max_steps:
+                leaf_node.finish_reason = "length"
+            elif find_repeated_patterns(
+                response_text,
+                pattern_length=self.repetition_pattern_length,
+                threshold=self.repetition_threshold,
+            ):
+                leaf_node.finish_reason = "repetition"
+            elif eos_token_id is not None and valid_resp_ids and valid_resp_ids[-1] == eos_token_id:
+                leaf_node.finish_reason = "stop"
+            else:
+                # response_length exhausted without EOS
+                leaf_node.finish_reason = "length"
 
             tree = SearchTree(tree_idx=i, root=root, all_nodes=tree_nodes)
             self.trees.append(tree)
@@ -648,10 +700,18 @@ class TreeManager:
 
             # Create a new branch starting from the fork point.
             prev_node = fork_node
+            fork_depth = len(fork_node.path_from_root())
+            branch_step_count = 0
+            truncated_by_max_steps = False
 
             for step_token_start, step_token_end, step_text in step_ranges:
                 if step_token_start >= step_token_end:
                     continue
+
+                # max_steps_per_path truncation (fork depth + new steps)
+                if fork_depth + branch_step_count >= self.max_steps_per_path:
+                    truncated_by_max_steps = True
+                    break
 
                 step_ids = valid_resp_ids[step_token_start:step_token_end]
                 step_lps = valid_lps[step_token_start:step_token_end]
@@ -671,6 +731,23 @@ class TreeManager:
                 prev_node.children.append(new_node)
                 tree.all_nodes.append(new_node)
                 prev_node = new_node
+                branch_step_count += 1
+
+            # Determine finish_reason for the branch leaf
+            if prev_node != fork_node:  # at least one node was added
+                eos_token_id = self.tokenizer.eos_token_id
+                if truncated_by_max_steps:
+                    prev_node.finish_reason = "length"
+                elif find_repeated_patterns(
+                    response_text,
+                    pattern_length=self.repetition_pattern_length,
+                    threshold=self.repetition_threshold,
+                ):
+                    prev_node.finish_reason = "repetition"
+                elif eos_token_id is not None and valid_resp_ids and valid_resp_ids[-1] == eos_token_id:
+                    prev_node.finish_reason = "stop"
+                else:
+                    prev_node.finish_reason = "length"
 
     def evaluate_branch_ext_prm(
         self,
@@ -825,6 +902,13 @@ class TreeManager:
         for i, leaf in enumerate(all_leaves):
             mean_others = (total - scores[i]) / (K - 1)
             leaf.accumulated_value = scores[i] - mean_others
+
+        # inner_repetition_penalty: override degenerate leaves after normalization
+        # Ref: THUNLP/TreeRL tree_node.py:392-395
+        if self.inner_repetition_penalty:
+            for leaf in all_leaves:
+                if leaf.finish_reason != "stop":
+                    leaf.accumulated_value = -1.0
 
     # ------------------------------------------------------------------
     # Step 6b: Backpropagate
@@ -1174,6 +1258,10 @@ class TreeManager:
             f"  T (branches per fork)    = {T}",
             f"  L (expansion rounds)     = {L}",
             f"  mask_tail_ratio          = {self.mask_tail_ratio}",
+            f"  max_steps_per_path       = {self.max_steps_per_path}",
+            f"  inner_repetition_penalty = {self.inner_repetition_penalty}",
+            f"  repetition_pattern_len   = {self.repetition_pattern_length}",
+            f"  repetition_threshold     = {self.repetition_threshold}",
             "-" * 60,
             f"  Expected leaves/tree     = {leaves_per_tree}",
             f"  Expected total paths     = {total_paths}",
@@ -1328,6 +1416,12 @@ class TreeManager:
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)
         self.evaluate_leaves(compute_score_fn)
+
+        # Log finish_reason distribution before normalization
+        reasons = [leaf.finish_reason for tree in self.trees for leaf in tree.all_leaves]
+        reason_counts = Counter(reasons)
+        print(f"[TreeRL] Leaf finish reasons: {dict(reason_counts)}")
+
         self.leaf_normalize()
         self.backpropagate()
         self.normalize_all_steps()
