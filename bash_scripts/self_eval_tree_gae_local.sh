@@ -11,6 +11,8 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
 # ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -28,14 +30,14 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 \
-    --disable-log-requests &
+    --no-enable-log-requests &
 VLLM_PID=$!
 trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
 
 echo "Waiting for vLLM server to start..."
 VLLM_READY=0
 set +x
-for i in $(seq 1 60); do
+for i in $(seq 1 180); do
     if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
         echo "vLLM server ready after ${i}s"
         VLLM_READY=1
@@ -45,7 +47,7 @@ for i in $(seq 1 60); do
 done
 set -x
 if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: vLLM server failed to start within 60s"
+    echo "ERROR: vLLM server failed to start within 180s"
     exit 1
 fi
 
