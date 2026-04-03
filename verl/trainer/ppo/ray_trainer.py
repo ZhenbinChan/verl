@@ -1481,6 +1481,16 @@ class RayPPOTrainer:
                     tree_sampling = self.config.trainer.get("tree_sampling", False)
                     if tree_sampling:
                         with marked_timer("tree_expansion", timing_raw, color="magenta"):
+                            # Re-inject non_tensor_batch fields (data_source, reward_model, etc.)
+                            # that agent_loop._postprocess drops when async reward workers are enabled.
+                            # gen_batch (pre-generation) still has them; repeat to match rollout n.
+                            pre_gen_ntb = gen_batch.repeat(
+                                repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
+                            ).non_tensor_batch
+                            for key, val in pre_gen_ntb.items():
+                                if key not in gen_batch_output.non_tensor_batch:
+                                    gen_batch_output.non_tensor_batch[key] = val
+
                             from verl.utils.tree_structure import TreeManager
 
                             # Resolve use_xml_steps for branch splitting
