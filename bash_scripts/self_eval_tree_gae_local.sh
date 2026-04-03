@@ -27,12 +27,14 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --served-model-name $SELF_EVAL_MODEL \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.85 \
-    --tensor-parallel-size 1 &
+    --tensor-parallel-size 1 \
+    --disable-log-requests &
 VLLM_PID=$!
 trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
 
 echo "Waiting for vLLM server to start..."
 VLLM_READY=0
+set +x
 for i in $(seq 1 60); do
     if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
         echo "vLLM server ready after ${i}s"
@@ -41,6 +43,7 @@ for i in $(seq 1 60); do
     fi
     sleep 1
 done
+set -x
 if [ "$VLLM_READY" -eq 0 ]; then
     echo "ERROR: vLLM server failed to start within 60s"
     exit 1
