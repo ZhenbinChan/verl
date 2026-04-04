@@ -23,6 +23,17 @@ You can customize the LogiQA dataset loading and preprocessing by configuring a 
 
 **Example:**
 
+Version 1, 2000 samples, XML text format (the used version)
+
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 1 \
+    --num_samples 2000 \
+    --local_save_dir ./data/logiqa2k \
+    --format xml \
+    --system_prompt_file logical_reasoning.txt
+```
+
 Version 1, 2000 samples, plain text format:
 
 ```bash
