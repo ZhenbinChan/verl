@@ -184,8 +184,17 @@ def generate_z3_declarations(entities: dict) -> str:
 
     code_lines.append("\n# Constants Definition")
     for entity_type, names in entities.items():
+        # Ensure names is a flat list of strings (LLM may return ints, nested lists, etc.)
+        if not isinstance(names, list):
+            names = [names]
         for name in names:
-            formatted_name = name.replace(" ", "_")
+            if isinstance(name, list):
+                # Flatten nested lists
+                for sub in name:
+                    formatted_name = str(sub).replace(" ", "_")
+                    code_lines.append(f"{formatted_name} = Const('{formatted_name}', {entity_type})")
+                continue
+            formatted_name = str(name).replace(" ", "_")
             code_lines.append(f"{formatted_name} = Const('{formatted_name}', {entity_type})")
 
     code_lines.append("\n# Variable Declarations")
@@ -211,6 +220,11 @@ def generate_z3_functions(predicates: dict) -> str:
     """
     code_lines = ["# Z3 Function/Predicate Declaration"]
     for func_name, types in predicates.items():
+        # Ensure types is a list of strings
+        if not isinstance(types, list):
+            types = [str(types)]
+        else:
+            types = [str(t) for t in types]
         types_str = ", ".join(types)
         code_lines.append(f"{func_name} = Function('{func_name}', {types_str})")
     return "\n".join(code_lines)
