@@ -1168,11 +1168,23 @@ class TreeManager:
                 pos = min(valid_len - 1, max_resp_len - 1)
                 rm_scores[i, pos] = float(score)
 
+        # Build input_ids = cat(prompts, responses) and position_ids from attention_mask,
+        # required by left_right_2_no_padding in the training loop.
+        if prompts is not None:
+            input_ids = torch.cat([prompts, responses], dim=1)
+        else:
+            input_ids = responses
+
+        from verl.utils.model import compute_position_id_with_mask
+        position_ids = compute_position_id_with_mask(attention_mask)
+
         # Build batch dict
         batch_dict = {
             "responses": responses,
             "attention_mask": attention_mask,
             "response_mask": response_masks,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
             "rm_scores": rm_scores,
         }
         if prompts is not None:
