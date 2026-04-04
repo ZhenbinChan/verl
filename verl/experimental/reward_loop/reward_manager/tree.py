@@ -123,7 +123,7 @@ class TreeRewardManager(RewardManagerBase):
         }
 
         # Lazy-load built-in extra reward types
-        if any(rt in ["fol", "format"] for rt in self.step_reward_types):
+        if any(rt in ["fol", "fol_old", "fol_slm", "format"] for rt in self.step_reward_types):
             try:
                 from verl.utils.reward_score.fol import compute_step_reward_format_fol, compute_step_reward_fol
                 if "format" not in self.step_reward_fns:
@@ -132,6 +132,18 @@ class TreeRewardManager(RewardManagerBase):
                     self.step_reward_fns["fol"] = compute_step_reward_fol
             except ImportError as e:
                 logger.warning("Failed to lazily load built-in FOL reward functions: %s", e)
+            try:
+                from verl.utils.reward_score.fol_old import compute_step_reward_fol as compute_step_reward_fol_old
+                if "fol_old" not in self.step_reward_fns:
+                    self.step_reward_fns["fol_old"] = compute_step_reward_fol_old
+            except ImportError:
+                pass
+            try:
+                from verl.utils.reward_score.fol_slm import compute_step_reward_fol_slm
+                if "fol_slm" not in self.step_reward_fns:
+                    self.step_reward_fns["fol_slm"] = compute_step_reward_fol_slm
+            except ImportError:
+                pass
 
         if "self_eval" in self.step_reward_types:
             from verl.utils.reward_score.self_eval import compute_step_reward_self_eval

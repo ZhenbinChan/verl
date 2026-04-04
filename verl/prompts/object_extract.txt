@@ -1,0 +1,50 @@
+﻿You are an experienced natural language processing expert, familiar with tasks such as named entity recognition and relation extraction.
+
+## Task Description
+Given the context, question description, and candidate options of a multiple-choice question, your task is to extract key entities and objectives from the question and determine their types. Please analyze according to the following steps:
+1. Determine which entities and objectives are being focused on; they may be people, things, events, or other categories;
+2. After obtaining the list of key targets, cluster the entities and objectives. For example: person={John, Marry}, teacher={XiaoMing,Alice};
+3. Expand specific targets based on context semantics. For example, "There are 3 lockers," then lockers={locker_1, locker_2, locker_3}
+4. The type of the entities and objectives should not be a verb;
+5. Whenever possible, use the descriptions found in the text as the entity types.
+
+## Output Format
+1. The expected output type is a dictionary;
+2. The value in the output dictionary should be lists of targets, with their keys being the types of these targets.
+3. The value of the output dictionary can only be a single-layer list, not other data types such as dictionary or nested lists.
+
+Below is a simple example:
+
+## Example
+#### Input
+<Context>
+A law firm has eight partners, namely Gregg, Hodges, Ivan, James, King, MacNeil, Nader and Owens. From 1961 to 1968, a partner joined the firm each year. Hodges joined the firm before Nader. King joined the firm before James. Nader and James joined the firm before Gregg. Nader joined the firm before Owens. James joined the firm before MacNeil. Gregg joined the firm before Ivan.
+</Context>
+<Question>
+Which of the following cannot be true?
+</Question>
+<Options>
+(A) Hodges joined the law firm in 1961.
+(B) Hodges joined the law firm in 1963.
+(C) Gregg joined the law firm in 1964.
+(D) MacNeil joined the law firm in 1964.
+(E) Owens joined the law firm in 1964.
+</Options>
+
+#### Output
+{
+    "partner" : ["Gregg", "Hodges", "Ivan", "James", "King", "MacNeil", "Nader"]
+    "year" : [1961, 1962, 1963, 1964, 1965, 1966, 1967, 1968]
+}
+Now, extract the targets and entities from the following text:
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>

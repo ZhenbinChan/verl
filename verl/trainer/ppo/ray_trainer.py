@@ -1547,6 +1547,16 @@ class RayPPOTrainer:
                                         ext_prm_fns["fol"] = partial(
                                             compute_step_reward_fol, api_config=api_config
                                         )
+                                    elif rt == "fol_old":
+                                        from verl.utils.reward_score.fol_old import compute_step_reward_fol as compute_step_reward_fol_old
+                                        ext_prm_fns["fol_old"] = partial(
+                                            compute_step_reward_fol_old, api_config=api_config
+                                        )
+                                    elif rt == "fol_slm":
+                                        from verl.utils.reward_score.fol_slm import compute_step_reward_fol_slm
+                                        ext_prm_fns["fol_slm"] = partial(
+                                            compute_step_reward_fol_slm, api_config=api_config
+                                        )
                                     elif rt == "self_eval":
                                         from verl.utils.reward_score.self_eval import compute_step_reward_self_eval
                                         ext_prm_fns["self_eval"] = partial(

@@ -1,0 +1,85 @@
+﻿You are an experienced natural language processing expert with the capability to extract key information, such as entity relation extraction and predicate extraction.
+
+## Task Description
+Given the context, question description, multiple-choice options, and a list of extracted entities (in dictionary format, where the key represents the entity type and the value represents the list of entities of that type), your task is to extract key predicates or relations from the provided information. Additionally, clarify which entity types each predicate or relation acts upon.
+
+- Key Predicate: A key predicate represents a crucial action performed by entities in the given text/question. For example, in the following scenario, the question investigates the event of each partner joining the firm. Thus, there is a key predicate **join**, which acts on the "partners" type entities and returns the time of joining (i.e., entities of type "years"). Therefore, the expected output from this example is:
+``` 
+{
+...(other relations)
+"join": ["partners", "years"],
+}
+```
+
+- Key Relation: Here, the relationships to be extracted are the same as those in NLP relation extraction tasks, including positional relations, hierarchical relations, and role-based relations. The difference between relations and predicates is that relations may not necessarily be verbs. For instance, in the sentence "The library is southwest of the classroom," this indicates a positional relationship. This relation can be named "location." Assuming both the library and classroom are of type "building," and "southwest" is of type "Direction," the expected partial output is:
+``` 
+{
+...(other relations)
+"location": ["building", "building", "Direction"],
+}
+```
+Here, the relation takes two entities of type "building" as input and returns their relative position (of type "Direction").
+
+## Output Format
+1. The expected output is a dictionary (Dictionary);
+2. The values in the output dictionary should be target lists, where the corresponding keys represent the extracted key relations and predicates; the values are lists of entity types indicating the input entity types, and the output entity type (by default, the last entity type in the list is assumed to be the return type, as described in the task).
+3. The values in the output dictionary must be single-level lists and cannot contain dictionaries or nested lists or any other data types.
+4. For relationships that require truth-value judgment, append "bool" as the last element in the list. For example, in "John is taller than Mary," there is a relation "Taller_than," with inputs being two "person" entities and no explicit output type. However, the output type is True or False, so append "Bool" to the list corresponding to "Taller_than":
+
+```
+{
+...
+"Taller_than": ["person", "person", "BoolSort()"],
+}
+```
+5.CRITICAL: in addition to "BoolSort()", "RealSort()" (representing real numbers) and "IntSort()" (representing integers) are also available. When using these potential types, their initial letters must be capitalized!
+6.CRITICAL：The values in the output dictionary must be of type List. The elements within the list must be of the entity types defined in the `entity list`, please ensure strict consistency, 
+
+
+Below is a simple example:
+
+## Example
+#### Input
+<Context>
+The law firm has eight partners: Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens. From 1961 to 1968, one partner joined the firm each year. Hodges joined the firm earlier than Nader. King joined earlier than James. Both Nader and James joined earlier than Gregg. Nader joined earlier than Owens. James joined earlier than MacNeil. Gregg joined earlier than Ivan.
+</Context>
+<Question>
+Which of the following statements cannot be true? </Question>
+<Options>
+(A) Hodges joined the firm in 1961.
+(B) Hodges joined the firm in 1963.
+(C) Gregg joined the firm in 1964.
+(D) MacNeil joined the firm in 1964.
+(E) Owens joined the firm in 1964.
+</Options>
+
+<Entity_List>
+{
+'partners': {'Gregg', 'Hodges', 'Ivan', 'James', 'King', 'MacNeil', 'Nader', 'Owens'},
+ 'years': {1961, 1962, 1963, 1964, 1965, 1966, 1967, 1968}
+}
+</Entity_List>
+
+#### Output
+{
+"join" : ["partner", "year"], # The element in the list should in ["partners","years","BoolSort()","IntSort()","RealSort()"]
+"join_before": ["partner", "partner", "BoolSort()"]
+} 
+
+Now, extract targets and entities from the following text:
+
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>
+
+<Entity_List>
+${obj_list}
+</Entity_List>
