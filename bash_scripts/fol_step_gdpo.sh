@@ -70,8 +70,8 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
-    trainer.save_total_limit=3 \
+    trainer.save_freq=-1 \
+    trainer.max_actor_ckpt_to_keep=0 \
     trainer.test_freq=100 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
