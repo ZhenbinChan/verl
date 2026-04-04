@@ -1299,10 +1299,13 @@ class RayPPOTrainer:
             # Use num_mini_batch=1 so the whole batch is one mini-batch.
             tree_sampling = self.config.trainer.get("tree_sampling", False)
             if tree_sampling:
+                # Use actual batch size as global_batch_size for loss normalization
+                tree_batch_size = batch_td.batch_size[0]
                 tu.assign_non_tensor(
                     batch_td,
                     calculate_entropy=calculate_entropy,
                     distillation_use_topk=distillation_use_topk,
+                    global_batch_size=tree_batch_size,
                     num_mini_batch=1,
                     epochs=ppo_epochs,
                     seed=seed,
@@ -1628,25 +1631,28 @@ class RayPPOTrainer:
                             print(f"[TreeRL] Step {self.global_steps} | {total_trees} trees, {total_leaves} total leaves, "
                                   f"batch size: {gen_batch_output.batch['responses'].shape[0]}")
 
+                            # FIXED/PATCH: Pad tree batch to be divisible by all
+                            # micro_batch_size_per_gpu values used downstream
+                            # (log_prob inference + PPO training).
+                            from math import gcd
+                            _mbs_lp = self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu or 1
+                            _mbs_ppo = self.config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu or 1
+                            _lcm = _mbs_lp * _mbs_ppo // gcd(_mbs_lp, _mbs_ppo)
+                            from verl.protocol import pad_dataproto_to_divisor
+                            gen_batch_output, tree_pad_size = pad_dataproto_to_divisor(gen_batch_output, _lcm)
+                            if tree_pad_size > 0:
+                                print(f"[TreeRL] Padded batch by {tree_pad_size} "
+                                      f"(divisor={_lcm}): {total_leaves} -> {len(gen_batch_output)}")
+
                     # Now sleep replicas after tree expansion is done
                     if tree_sampling:
                         self.checkpoint_manager.sleep_replicas()
 
                     # repeat to align with repeated responses in rollout
                     if tree_sampling:
-                        # In tree mode, gen_batch_output already contains all leaf paths.
-                        # Each leaf path carries a tree_idx (via the order in build_flat_batch:
-                        # trees are iterated in original rollout order).  We need to map
-                        # each leaf path back to its prompt so that batch and gen_batch_output
-                        # have the same number of rows.
-                        #
-                        # build_flat_batch iterates: for tree in trees -> for leaf in tree.all_leaves
-                        # tree.tree_idx corresponds to the rollout sample index (0..M-1).
-                        # The original batch has one row per prompt (before rollout.n expansion),
-                        # so the mapping is: prompt_idx = tree_idx // rollout_n.
-                        #
-                        # We index batch per leaf path instead of using repeat, because
-                        # different prompts may have different numbers of leaf paths.
+                        # In tree mode, gen_batch_output already contains all leaf paths
+                        # (possibly padded for micro_batch divisibility).
+                        # Map each leaf path back to its prompt index.
                         num_leaf_paths = gen_batch_output.batch["responses"].shape[0]
                         rollout_n = self.config.actor_rollout_ref.rollout.n
                         num_prompts = len(batch)
@@ -1659,6 +1665,12 @@ class RayPPOTrainer:
                             prompt_idx = min(prompt_idx, num_prompts - 1)
                             for _ in tree.all_leaves:
                                 leaf_to_prompt.append(prompt_idx)
+
+                        # Account for padding rows added by pad_dataproto_to_divisor.
+                        # pad_dataproto_to_divisor copies data[:pad_size] (first leaves),
+                        # so we must use the SAME source indices here to stay consistent.
+                        if tree_pad_size > 0:
+                            leaf_to_prompt.extend(leaf_to_prompt[:tree_pad_size])
 
                         assert len(leaf_to_prompt) == num_leaf_paths, (
                             f"leaf_to_prompt length {len(leaf_to_prompt)} != "
