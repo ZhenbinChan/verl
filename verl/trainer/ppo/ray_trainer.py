@@ -1293,17 +1293,34 @@ class RayPPOTrainer:
             ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
             seed = self.config.actor_rollout_ref.actor.data_loader_seed
             shuffle = self.config.actor_rollout_ref.actor.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                calculate_entropy=calculate_entropy,
-                distillation_use_topk=distillation_use_topk,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-                compute_loss=True,
-            )
+            
+            # FIXED/PATCH: In tree mode the total batch size is the number of leaf paths
+            # (variable), which may not be divisible by ppo_mini_batch_size.
+            # Use num_mini_batch=1 so the whole batch is one mini-batch.
+            tree_sampling = self.config.trainer.get("tree_sampling", False)
+            if tree_sampling:
+                tu.assign_non_tensor(
+                    batch_td,
+                    calculate_entropy=calculate_entropy,
+                    distillation_use_topk=distillation_use_topk,
+                    num_mini_batch=1,
+                    epochs=ppo_epochs,
+                    seed=seed,
+                    dataloader_kwargs={"shuffle": shuffle},
+                    compute_loss=True,
+                )
+            else:
+                tu.assign_non_tensor(
+                    batch_td,
+                    calculate_entropy=calculate_entropy,
+                    distillation_use_topk=distillation_use_topk,
+                    global_batch_size=ppo_mini_batch_size,
+                    mini_batch_size=ppo_mini_batch_size,
+                    epochs=ppo_epochs,
+                    seed=seed,
+                    dataloader_kwargs={"shuffle": shuffle},
+                    compute_loss=True,
+                )
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
             actor_output = tu.get(actor_output, "metrics")
             actor_output = rename_dict(actor_output, "actor/")
@@ -1325,14 +1342,25 @@ class RayPPOTrainer:
             ppo_epochs = self.config.critic.ppo_epochs
             seed = self.config.critic.data_loader_seed
             shuffle = self.config.critic.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-            )
+            # In tree mode use num_mini_batch=1 (same reason as _update_actor)
+            tree_sampling = self.config.trainer.get("tree_sampling", False)
+            if tree_sampling:
+                tu.assign_non_tensor(
+                    batch_td,
+                    num_mini_batch=1,
+                    epochs=ppo_epochs,
+                    seed=seed,
+                    dataloader_kwargs={"shuffle": shuffle},
+                )
+            else:
+                tu.assign_non_tensor(
+                    batch_td,
+                    global_batch_size=ppo_mini_batch_size,
+                    mini_batch_size=ppo_mini_batch_size,
+                    epochs=ppo_epochs,
+                    seed=seed,
+                    dataloader_kwargs={"shuffle": shuffle},
+                )
 
             output = self.critic_wg.train_mini_batch(batch_td)
             output = output.get()
