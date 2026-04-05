@@ -76,7 +76,13 @@ def _call_llm(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_prompt})
 
-    client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url"))
+    timeout = cfg.pop("timeout", 120)
+    client = OpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg.get("base_url"),
+        timeout=timeout,
+        max_retries=1,
+    )
     completion = client.chat.completions.create(
         model=cfg["model"],
         messages=messages,
