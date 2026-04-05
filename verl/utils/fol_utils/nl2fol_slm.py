@@ -12,6 +12,7 @@ Uses a local vLLM-served small model (e.g. qwen2.5-3b) to:
 All API calls are parameterized via ``api_config`` dict.
 """
 
+import concurrent.futures
 import json
 import os
 import re
@@ -19,11 +20,36 @@ import string
 import subprocess
 import sys
 import tempfile
+import threading
+from functools import wraps
 from pathlib import Path
 from string import Template
 from typing import Optional
 
 from openai import OpenAI
+
+# ---------------------------------------------------------------------------
+# OpenAI client cache — reuse connections across calls
+# ---------------------------------------------------------------------------
+_client_cache: dict[tuple, OpenAI] = {}
+_client_cache_lock = threading.Lock()
+
+
+def _get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
+    """Return a cached OpenAI client, creating one if needed."""
+    cache_key = (api_key, base_url, timeout)
+    with _client_cache_lock:
+        client = _client_cache.get(cache_key)
+        if client is None:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                max_retries=1,
+            )
+            _client_cache[cache_key] = client
+        return client
+
 
 # ---------------------------------------------------------------------------
 # Prompt files — ship with verl under verl/prompts/
@@ -68,12 +94,7 @@ def _call_llm(
         cfg.update({k: v for k, v in api_config.items() if v is not None})
 
     timeout = cfg.pop("timeout", 120)
-    client = OpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        timeout=timeout,
-        max_retries=1,
-    )
+    client = _get_client(cfg["api_key"], cfg.get("base_url"), timeout)
     completion = client.chat.completions.create(
         model=cfg["model"],
         messages=[{"role": "user", "content": user_prompt}],
@@ -387,6 +408,39 @@ def correct_loop(
 # High-level API (used by step reward)
 # ---------------------------------------------------------------------------
 
+_preprocess_cache: dict[tuple, tuple[str, str]] = {}
+_preprocess_locks: dict[tuple, threading.Lock] = {}
+_preprocess_global_lock = threading.Lock()
+
+def thread_safe_cache(func):
+    """Decorator to add thread-safe caching to a function."""
+    @wraps(func)
+    def wrapper(context: str, question: str, options: str = "", *, api_config: Optional[dict] = None):
+        # 1. Build a unique cache key
+        cache_key = (context, question, options)
+        # 2. Check cache without lock first, if hit, return immediately
+        if cache_key in _preprocess_cache:
+            return _preprocess_cache[cache_key]
+        # Ensure only one thread preprocesses the same input at a time
+        # 3. Get or create a specialized lock for this cache key
+        with _preprocess_global_lock:
+            if cache_key not in _preprocess_locks:
+                _preprocess_locks[cache_key] = threading.Lock()
+            key_lock = _preprocess_locks[cache_key]
+        # 4. Acquire the key-specific lock to preprocess
+        with key_lock:
+            # 5. Check cache again inside lock (double-checked locking)
+            if cache_key in _preprocess_cache:
+                return _preprocess_cache[cache_key]
+            # 6. Call the original function to preprocess -- cache miss, so LLM calls will happen here
+            result = func(context, question, options, api_config=api_config)
+            # 7. Store result in cache before releasing lock
+            _preprocess_cache[cache_key] = result
+            return result
+        # 8. Release the lock automatically with 'with' statement
+    return wrapper
+
+@thread_safe_cache
 def slm_preprocess(
     context: str,
     question: str,
@@ -399,8 +453,14 @@ def slm_preprocess(
     Returns:
         (rephrased_context, declaration_code)
     """
-    rephrased = rephrase(context, question, options, api_config=api_config)
-    entities = object_extract(context, question, options, api_config=api_config)
+    # rephrased = rephrase(context, question, options, api_config=api_config)
+    # entities = object_extract(context, question, options, api_config=api_config)
+    # Parallelize rephrase and object extraction since they are independent
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        rephrase_future = executor.submit(rephrase, context, question, options, api_config=api_config)
+        object_future = executor.submit(object_extract, context, question, options, api_config=api_config)
+        rephrased = rephrase_future.result()
+        entities = object_future.result()
     predicates = predicate_extract(
         context, question, options, objectives=entities, api_config=api_config
     )
