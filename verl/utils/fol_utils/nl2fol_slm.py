@@ -67,7 +67,13 @@ def _call_llm(
     if api_config:
         cfg.update({k: v for k, v in api_config.items() if v is not None})
 
-    client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url"))
+    timeout = cfg.pop("timeout", 120)
+    client = OpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg.get("base_url"),
+        timeout=timeout,
+        max_retries=1,
+    )
     completion = client.chat.completions.create(
         model=cfg["model"],
         messages=[{"role": "user", "content": user_prompt}],
@@ -416,11 +422,12 @@ def translate_and_verify_step_slm(
     Returns:
         1.0 if SAT (step is consistent), 0.0 otherwise.
     """
+    max_tries = (api_config or {}).get("max_tries", 8)
     try:
         exe_code = translate_step_to_z3(
             rephrased_context, declaration_code, step_text, api_config=api_config
         )
-        result = correct_loop(exe_code, api_config=api_config)
+        result = correct_loop(exe_code, api_config=api_config, max_tries=max_tries)
 
         if result["success"] and result.get("output"):
             output = result["output"].strip()

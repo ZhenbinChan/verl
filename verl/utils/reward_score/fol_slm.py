@@ -10,9 +10,42 @@ Step reward type: ``fol_slm``
 
 import logging
 import re
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Prompt-level preprocessing cache
+# ---------------------------------------------------------------------------
+# slm_preprocess depends only on (context, question, options), NOT on step text.
+# All steps from the same prompt can share the same preprocessed result,
+# saving ~3 LLM calls per step after the first one.
+_preprocess_cache: dict[tuple[str, str, str], tuple[str, str]] = {}
+_preprocess_cache_lock = threading.Lock()
+_CACHE_MAX_SIZE = 512
+
+
+def _get_cached_preprocess(
+    context: str, question: str, options: str, api_config: dict | None
+) -> tuple[str, str]:
+    """Get (rephrased_context, declaration_code) with prompt-level caching."""
+    cache_key = (context, question, options)
+
+    with _preprocess_cache_lock:
+        if cache_key in _preprocess_cache:
+            return _preprocess_cache[cache_key]
+
+    from verl.utils.fol_utils.nl2fol_slm import slm_preprocess
+
+    result = slm_preprocess(context, question, options, api_config=api_config)
+
+    with _preprocess_cache_lock:
+        if len(_preprocess_cache) > _CACHE_MAX_SIZE:
+            _preprocess_cache.clear()
+        _preprocess_cache[cache_key] = result
+
+    return result
 
 
 def compute_step_reward_fol_slm(
@@ -30,7 +63,7 @@ def compute_step_reward_fol_slm(
       2. Extract objects & predicates (structured output)
       3. Generate Z3 declarations from code (deterministic)
       4. Translate step to Z3 via LLM
-      5. Execute with auto-correction loop (up to 8 retries)
+      5. Execute with auto-correction loop (up to ``max_tries`` retries)
 
     Extraction priority for context/question/options:
       1. Structured fields in extra_info (fol_context, fol_question, fol_options)
@@ -58,16 +91,19 @@ def compute_step_reward_fol_slm(
         return 0.0
 
     try:
-        from verl.utils.fol_utils.nl2fol_slm import (
-            slm_preprocess,
-            translate_and_verify_step_slm,
-        )
+        from verl.utils.fol_utils.nl2fol_slm import translate_and_verify_step_slm
 
-        rephrased_context, declaration_code = slm_preprocess(
-            context, question, options or "", api_config=api_config
+        is_cumulative = (api_config or {}).get("cumulative", False)
+        if is_cumulative and step_history:
+            step_text_to_translate = "\n".join(step_history)
+        else:
+            step_text_to_translate = step_text
+
+        rephrased_context, declaration_code = _get_cached_preprocess(
+            context, question, options or "", api_config
         )
         reward = translate_and_verify_step_slm(
-            rephrased_context, declaration_code, step_text, api_config=api_config
+            rephrased_context, declaration_code, step_text_to_translate, api_config=api_config
         )
         return float(reward)
     except Exception as e:
