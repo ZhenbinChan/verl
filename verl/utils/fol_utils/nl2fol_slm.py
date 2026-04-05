@@ -11,16 +11,20 @@ Uses a local vLLM-served small model (e.g. qwen2.5-3b) to:
 
 All API calls are parameterized via ``api_config`` dict.
 """
-
 import concurrent.futures
+import contextlib
+import io
 import json
+import multiprocessing
 import os
 import re
+import signal
 import string
 import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 from functools import wraps
 from pathlib import Path
 from string import Template
@@ -331,17 +335,69 @@ def get_premise_conclusion(step_content: str) -> tuple[list[str], Optional[str]]
     conclusion = matches[-1].strip() if matches else None
     return premise_list, conclusion
 
-
 # ---------------------------------------------------------------------------
 # Code execution and auto-correction
 # ---------------------------------------------------------------------------
 
-def run_code(code_string: str, timeout: float = 10.0) -> dict:
-    """Execute Python code string in a subprocess.
+_USE_FAST_EXEC = hasattr(signal, "alarm")
+_mp_pool = None
+_mp_pool_lock = threading.Lock()
 
-    Returns:
-        dict with keys: success (bool), output (str), error (str or None)
-    """
+
+def _get_mp_pool():
+    """获取单进程安全沙盒，既防止 OOM，又利用常驻内存提速"""
+    global _mp_pool
+    if _mp_pool is None:
+        with _mp_pool_lock:
+            if _mp_pool is None:
+                ctx = multiprocessing.get_context("spawn")
+                # processes=1: 每个 Ray worker 只启动 1 个子进程，防止 OOM
+                _mp_pool = ctx.Pool(processes=1, maxtasksperchild=50)
+    return _mp_pool
+
+
+def _worker_execute(code_string: str, timeout_sec: int) -> dict:
+    def handler(signum, frame):
+        raise TimeoutError("code execution timeout")
+
+    signal.signal(signal.SIGALRM, handler)
+    signal.alarm(timeout_sec)
+
+    stdout_io = io.StringIO()
+    stderr_io = io.StringIO()
+    success = False
+
+    try:
+        with contextlib.redirect_stdout(stdout_io), contextlib.redirect_stderr(stderr_io):
+            exec(code_string, {})
+        success = True
+    except TimeoutError as e:
+        stderr_io.write(f"RuntimeError: {str(e)}")
+    except Exception as e:
+        traceback.print_exc(file=stderr_io)
+    finally:
+        signal.alarm(0)
+
+    return {
+        "success": success,
+        "output": stdout_io.getvalue(),
+        "error": stderr_io.getvalue() if not success else None,
+    }
+
+
+def _run_code_pool(code_string: str, timeout: float = 10.0) -> dict:
+    pool = _get_mp_pool()
+    timeout_int = max(1, int(timeout))
+    try:
+        async_result = pool.apply_async(_worker_execute, (code_string, timeout_int))
+        return async_result.get(timeout=timeout_int + 2.0)
+    except multiprocessing.TimeoutError:
+        return {"success": False, "output": "", "error": "RuntimeError: worker process hung or timeout"}
+    except Exception as e:
+        return {"success": False, "output": "", "error": str(e)}
+
+
+def _run_code_subprocess(code_string: str, timeout: float = 10.0) -> dict:
     try:
         result = subprocess.run(
             [sys.executable, "-c", code_string],
@@ -357,6 +413,14 @@ def run_code(code_string: str, timeout: float = 10.0) -> dict:
         return {"success": False, "output": "", "error": "RuntimeError: code execution timeout"}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
+
+
+def run_code(code_string: str, timeout: float = 10.0) -> dict:
+    """Execute Python code string safely."""
+    if _USE_FAST_EXEC:
+        return _run_code_pool(code_string, timeout)
+    else:
+        return _run_code_subprocess(code_string, timeout)
 
 
 def correct_z3_code(
