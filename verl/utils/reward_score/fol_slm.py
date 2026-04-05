@@ -89,22 +89,25 @@ def compute_step_reward_fol_slm(
 
     if not context or not question:
         return 0.0
-
+    
+    from verl.utils.fol_utils.nl2fol_slm import translate_and_verify_step_slm
     try:
-        from verl.utils.fol_utils.nl2fol_slm import translate_and_verify_step_slm
-
         is_cumulative = (api_config or {}).get("cumulative", False)
         if is_cumulative and step_history:
             step_text_to_translate = "\n".join(step_history)
         else:
             step_text_to_translate = step_text
-
+        # print(f"FOL-SLM reward: Translating step: {step_text_to_translate}", flush=True)
         rephrased_context, declaration_code = _get_cached_preprocess(
             context, question, options or "", api_config
         )
+        # print(f"FOL-SLM reward: Rephrased context: {rephrased_context}", flush=True)
+        # print(f"FOL-SLM reward: Declaration code: {declaration_code}", flush=True)
+
         reward = translate_and_verify_step_slm(
             rephrased_context, declaration_code, step_text_to_translate, api_config=api_config
         )
+        print(f"FOL-SLM reward: Reward computed: {reward}", flush=True)
         return float(reward)
     except Exception as e:
         logger.warning("FOL-SLM reward computation failed: %s", e)

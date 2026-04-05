@@ -385,19 +385,19 @@ def _worker_execute(code_string: str, timeout_sec: int) -> dict:
     }
 
 
-def _run_code_pool(code_string: str, timeout: float = 10.0) -> dict:
+def _run_code_pool(code_string: str, timeout: float = 30.0) -> dict:
     pool = _get_mp_pool()
     timeout_int = max(1, int(timeout))
     try:
         async_result = pool.apply_async(_worker_execute, (code_string, timeout_int))
-        return async_result.get(timeout=timeout_int + 2.0)
+        return async_result.get(timeout=timeout_int + 5.0)
     except multiprocessing.TimeoutError:
         return {"success": False, "output": "", "error": "RuntimeError: worker process hung or timeout"}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
 
 
-def _run_code_subprocess(code_string: str, timeout: float = 10.0) -> dict:
+def _run_code_subprocess(code_string: str, timeout: float = 30.0) -> dict:
     try:
         result = subprocess.run(
             [sys.executable, "-c", code_string],
@@ -410,12 +410,13 @@ def _run_code_subprocess(code_string: str, timeout: float = 10.0) -> dict:
         else:
             return {"success": False, "output": result.stdout, "error": result.stderr}
     except subprocess.TimeoutExpired:
+        # print(f"FOL-SLM reward: Timtout with {timeout} seconds")
         return {"success": False, "output": "", "error": "RuntimeError: code execution timeout"}
     except Exception as e:
         return {"success": False, "output": "", "error": str(e)}
 
 
-def run_code(code_string: str, timeout: float = 10.0) -> dict:
+def run_code(code_string: str, timeout: float = 30.0) -> dict:
     """Execute Python code string safely."""
     if _USE_FAST_EXEC:
         return _run_code_pool(code_string, timeout)
@@ -443,7 +444,7 @@ def correct_loop(
     code: str,
     *,
     api_config: Optional[dict] = None,
-    max_tries: int = 8,
+    max_tries: int = 3,
 ) -> dict:
     """Execute Z3 code with auto-correction loop.
 
@@ -459,11 +460,12 @@ def correct_loop(
 
     while not res["success"] and tries < max_tries:
         error_msg = res.get("error", "Unknown error")
+        # print(f"FOL-SLM reward: Z3 Code Translation Error | {error_msg}")
         code = correct_z3_code(code, error_msg, api_config=cfg)
         res = run_code(code)
         tries += 1
         # Increase temperature each retry
-        cfg["temperature"] = cfg.get("temperature", 0.1) + 0.1
+        cfg["temperature"] = cfg.get("temperature", 0.1) + 0.05
 
     return res
 
