@@ -1,12 +1,10 @@
 set -x
 
-# FOL-SLM Step-GDPO — uses local vLLM small model for FOL translation & verification
-#
-# Requires 2 GPUs: GPU 0 for training, GPU 1 for FOL-SLM vLLM server
+# FOL-SLM Step-GDPO — 2 GPUs: training on GPU 0, FOL-SLM vLLM on GPU 1
 #
 # Usage:
 #   export CUDA_VISIBLE_DEVICES=0,1
-#   bash fol_slm_step_gdpo.sh
+#   bash fol_slm_step_gdpo_local.sh
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct

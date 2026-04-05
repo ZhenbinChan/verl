@@ -1,16 +1,23 @@
 set -x
 
-# FOL-SLM Tree-GAE — uses local vLLM small model for FOL translation & verification
+# FOL Tree-GAE — 1 GPU: actor + rollout + FOL judge all on the same GPU
 #
-# Requires 2 GPUs: GPU 0 for training, GPU 1 for FOL-SLM vLLM server
+# Uses "fol" reward type (API-based FOL code path) but pointed at a local vLLM server
+# instead of external OpenAI API. Combines fol_slm + self_eval_1gpu patterns.
+#
+# Memory budget (A800 80GB, 1.5B actor + 3B FOL model):
+#   - Actor (FSDP + grad ckpt + optimizer): ~15GB
+#   - Rollout vLLM (gpu_memory_utilization=0.35): ~28GB
+#   - FOL judge vLLM (gpu_memory_utilization=0.15): ~12GB
+#   Total: ~55GB, leaves headroom for activations
 #
 # Usage:
-#   export CUDA_VISIBLE_DEVICES=0,1
-#   bash fol_slm_tree_gae.sh
+#   export CUDA_VISIBLE_DEVICES=0
+#   bash fol_tree_gae_1gpu.sh
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-FOL_SLM_MODEL_PATH=${FOL_SLM_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
+FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -22,28 +29,28 @@ unset HIP_VISIBLE_DEVICES
 
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# ── Launch FOL-SLM vLLM server on GPU 1 ──
-FOL_SLM_PORT=${FOL_SLM_PORT:-4869}
-export FOL_SLM_MODEL=${FOL_SLM_MODEL:-$(basename $FOL_SLM_MODEL_PATH)}
+# ── Launch FOL vLLM judge server on the SAME GPU with low memory budget ──
+FOL_PORT=${FOL_PORT:-4869}
+export FOL_MODEL=${FOL_MODEL:-$(basename $FOL_MODEL_PATH)}
 
-echo "==> Launching FOL-SLM vLLM server on GPU 1 (port $FOL_SLM_PORT)..."
-CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
-    --model $FOL_SLM_MODEL_PATH \
-    --served-model-name $FOL_SLM_MODEL \
-    --port $FOL_SLM_PORT \
-    --gpu-memory-utilization 0.85 \
+echo "==> Launching local FOL vLLM judge server (port $FOL_PORT, same GPU)..."
+python3 -m vllm.entrypoints.openai.api_server \
+    --model $FOL_MODEL_PATH \
+    --served-model-name $FOL_MODEL \
+    --port $FOL_PORT \
+    --gpu-memory-utilization 0.15 \
     --tensor-parallel-size 1 \
-    --no-enable-log-requests > fol_slm_vllm_server.log 2>&1 &
+    --no-enable-log-requests > fol_vllm_server.log 2>&1 &
 FOL_VLLM_PID=$!
-echo "FOL-SLM vLLM server log: fol_slm_vllm_server.log"
-trap "echo 'Killing FOL-SLM vLLM server (PID=$FOL_VLLM_PID)'; kill $FOL_VLLM_PID 2>/dev/null" EXIT
+echo "FOL vLLM server log: fol_vllm_server.log"
+trap "echo 'Killing FOL vLLM server (PID=$FOL_VLLM_PID)'; kill $FOL_VLLM_PID 2>/dev/null" EXIT
 
-echo "Waiting for FOL-SLM vLLM server to start..."
+echo "Waiting for FOL vLLM server to start..."
 VLLM_READY=0
 set +x
 for i in $(seq 1 180); do
-    if curl -s http://localhost:${FOL_SLM_PORT}/health > /dev/null 2>&1; then
-        echo "FOL-SLM vLLM server ready after ${i}s"
+    if curl -s http://localhost:${FOL_PORT}/health > /dev/null 2>&1; then
+        echo "FOL vLLM server ready after ${i}s"
         VLLM_READY=1
         break
     fi
@@ -51,21 +58,20 @@ for i in $(seq 1 180); do
 done
 set -x
 if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: FOL-SLM vLLM server failed to start within 180s"
+    echo "ERROR: FOL vLLM server failed to start within 180s"
     exit 1
 fi
 
-# FOL-SLM uses these env vars (see nl2fol_slm.py defaults)
+# Point FOL API calls to local vLLM server
 export OPENAI_API_KEY="EMPTY"
-export FOL_SLM_BASE_URL="http://localhost:${FOL_SLM_PORT}/v1"
+export OPENAI_BASE_URL="http://localhost:${FOL_PORT}/v1"
 
-# ── Tree-GAE training on GPU 0 ──
+# ── Tree-GAE training (same GPU) ──
 # EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
 # +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation
-CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
+python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
-    +algorithm.step_reward_type=fol_slm \
-    +algorithm.fol_slm_max_tries=3 \
+    +algorithm.step_reward_type=fol \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
@@ -93,7 +99,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
     actor_rollout_ref.rollout.n=6 \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.top_p=0.95 \
@@ -113,7 +119,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_tree_gae_fol_slm_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_tree_gae_fol_local_1gpu_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
