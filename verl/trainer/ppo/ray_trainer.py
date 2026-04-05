@@ -1569,13 +1569,20 @@ class RayPPOTrainer:
                                         {k: v for k, v in cfg_override.items() if v is not None}
                                     )
 
-                                # FOL-SLM specific: correct_loop max retries and LLM call timeout
-                                max_tries = reward_cfg.get("fol_slm_max_tries", algo_cfg.get("fol_slm_max_tries", None))
+                                # FOL specific: correct_loop max retries and LLM call timeout
+                                max_tries = reward_cfg.get("fol_max_tries", algo_cfg.get("fol_max_tries", None))
                                 if max_tries is not None:
                                     api_config["max_tries"] = int(max_tries)
-                                llm_timeout = reward_cfg.get("fol_slm_timeout", algo_cfg.get("fol_slm_timeout", None))
+                                llm_timeout = reward_cfg.get("fol_timeout", algo_cfg.get("fol_timeout", None))
                                 if llm_timeout is not None:
                                     api_config["timeout"] = int(llm_timeout)
+                                # FOL preprocessing pipeline and translation mode
+                                fol_preprocess = reward_cfg.get("fol_preprocess", algo_cfg.get("fol_preprocess", None))
+                                if fol_preprocess is not None:
+                                    api_config["fol_preprocess"] = str(fol_preprocess)
+                                fol_translation = reward_cfg.get("fol_translation", algo_cfg.get("fol_translation", None))
+                                if fol_translation is not None:
+                                    api_config["fol_translation"] = str(fol_translation)
                                 cumulative = reward_cfg.get("fol_verify_with_cumulative_steps", algo_cfg.get("fol_verify_with_cumulative_steps", False))
                                 api_config["cumulative"] = bool(cumulative)
 
@@ -1592,11 +1599,6 @@ class RayPPOTrainer:
                                         from verl.utils.reward_score.fol_old import compute_step_reward_fol as compute_step_reward_fol_old
                                         ext_prm_fns["fol_old"] = partial(
                                             compute_step_reward_fol_old, api_config=api_config
-                                        )
-                                    elif rt == "fol_slm":
-                                        from verl.utils.reward_score.fol_slm import compute_step_reward_fol_slm
-                                        ext_prm_fns["fol_slm"] = partial(
-                                            compute_step_reward_fol_slm, api_config=api_config
                                         )
                                     elif rt == "self_eval":
                                         from verl.utils.reward_score.self_eval import compute_step_reward_self_eval

@@ -95,18 +95,26 @@ class TreeRewardManager(RewardManagerBase):
         if cfg_override:
             self.api_config.update({k: v for k, v in cfg_override.items() if v is not None})
 
-        # FOL-SLM specific: correct_loop max retries and LLM call timeout
+        # FOL configuration: correct_loop max retries, timeout, pipeline settings
         reward_cfg_fol = config.get("reward", {})
         algo_cfg_fol = config.get("algorithm", {})
-        max_tries = reward_cfg_fol.get("fol_slm_max_tries", algo_cfg_fol.get("fol_slm_max_tries", None))
+        max_tries = reward_cfg_fol.get("fol_max_tries", algo_cfg_fol.get("fol_max_tries", None))
         if max_tries is not None:
             self.api_config["max_tries"] = int(max_tries)
-        llm_timeout = reward_cfg_fol.get("fol_slm_timeout", algo_cfg_fol.get("fol_slm_timeout", None))
+        llm_timeout = reward_cfg_fol.get("fol_timeout", algo_cfg_fol.get("fol_timeout", None))
         if llm_timeout is not None:
             self.api_config["timeout"] = int(llm_timeout)
         cumulative = reward_cfg_fol.get("fol_verify_with_cumulative_steps", algo_cfg_fol.get("fol_verify_with_cumulative_steps", False))
         self.api_config["cumulative"] = bool(cumulative)
         print(f"FOL config 'fol_verify_with_cumulative_steps' is set to: {self.api_config['cumulative']}")
+
+        # FOL pipeline / translation mode
+        fol_preprocess = reward_cfg_fol.get("fol_preprocess", algo_cfg_fol.get("fol_preprocess", None))
+        if fol_preprocess is not None:
+            self.api_config["fol_preprocess"] = str(fol_preprocess)
+        fol_translation = reward_cfg_fol.get("fol_translation", algo_cfg_fol.get("fol_translation", None))
+        if fol_translation is not None:
+            self.api_config["fol_translation"] = str(fol_translation)
 
         # Step reward type: explicit parameter > reward config > algorithm config > None
         if step_reward_type is not None:
@@ -136,7 +144,7 @@ class TreeRewardManager(RewardManagerBase):
         }
 
         # Lazy-load built-in extra reward types
-        if any(rt in ["fol", "fol_old", "fol_slm", "format"] for rt in self.step_reward_types):
+        if any(rt in ["fol", "fol_old", "format"] for rt in self.step_reward_types):
             try:
                 from verl.utils.reward_score.fol import compute_step_reward_format_fol, compute_step_reward_fol
                 if "format" not in self.step_reward_fns:
@@ -149,12 +157,6 @@ class TreeRewardManager(RewardManagerBase):
                 from verl.utils.reward_score.fol_old import compute_step_reward_fol as compute_step_reward_fol_old
                 if "fol_old" not in self.step_reward_fns:
                     self.step_reward_fns["fol_old"] = compute_step_reward_fol_old
-            except ImportError:
-                pass
-            try:
-                from verl.utils.reward_score.fol_slm import compute_step_reward_fol_slm
-                if "fol_slm" not in self.step_reward_fns:
-                    self.step_reward_fns["fol_slm"] = compute_step_reward_fol_slm
             except ImportError:
                 pass
 

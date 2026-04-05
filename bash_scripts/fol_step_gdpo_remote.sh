@@ -1,6 +1,11 @@
 set -x
 
-# 1. 基础路径设置
+# FOL Step-GDPO — Remote: uses external API (no local vLLM needed)
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   export OPENAI_BASE_URL=https://api.openai.com/v1  # or compatible endpoint
+#   bash fol_step_gdpo_remote.sh
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
@@ -31,6 +36,7 @@ export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \
+    +algorithm.fol_max_tries=3 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \

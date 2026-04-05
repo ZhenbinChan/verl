@@ -1,65 +1,37 @@
 set -x
 
-# FOL-SLM Step-GDPO — 2 GPUs: training on GPU 0, FOL-SLM vLLM on GPU 1
+# FOL-SLM Step-GDPO — Remote: uses external API (no local vLLM needed)
+# Uses structured preprocessing + assertion translation mode.
 #
 # Usage:
-#   export CUDA_VISIBLE_DEVICES=0,1
-#   bash fol_slm_step_gdpo_local.sh
-
+#   export OPENAI_API_KEY=sk-...
+#   export OPENAI_BASE_URL=https://api.openai.com/v1  # or compatible endpoint
+#   bash fol_slm_step_gdpo_remote.sh
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-FOL_SLM_MODEL_PATH=${FOL_SLM_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-
 # ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
+# Sanity check
+echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# ── Launch FOL-SLM vLLM server on GPU 1 ──
-FOL_SLM_PORT=${FOL_SLM_PORT:-4869}
-export FOL_SLM_MODEL=${FOL_SLM_MODEL:-$(basename $FOL_SLM_MODEL_PATH)}
+# API configuration for LLM-based step rewards (FOL, self_eval, etc.)
+# These env vars are the default fallback; can also be overridden via
+# +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
+export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 
-echo "==> Launching FOL-SLM vLLM server on GPU 1 (port $FOL_SLM_PORT)..."
-CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
-    --model $FOL_SLM_MODEL_PATH \
-    --served-model-name $FOL_SLM_MODEL \
-    --port $FOL_SLM_PORT \
-    --gpu-memory-utilization 0.85 \
-    --tensor-parallel-size 1 \
-    --no-enable-log-requests > fol_slm_vllm_server.log 2>&1 &
-FOL_VLLM_PID=$!
-echo "FOL-SLM vLLM server log: fol_slm_vllm_server.log"
-trap "echo 'Killing FOL-SLM vLLM server (PID=$FOL_VLLM_PID)'; kill $FOL_VLLM_PID 2>/dev/null" EXIT
-
-echo "Waiting for FOL-SLM vLLM server to start..."
-VLLM_READY=0
-set +x
-for i in $(seq 1 180); do
-    if curl -s http://localhost:${FOL_SLM_PORT}/health > /dev/null 2>&1; then
-        echo "FOL-SLM vLLM server ready after ${i}s"
-        VLLM_READY=1
-        break
-    fi
-    sleep 1
-done
-set -x
-if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: FOL-SLM vLLM server failed to start within 180s"
-    exit 1
-fi
-
-# FOL-SLM uses these env vars (see nl2fol_slm.py defaults)
-export OPENAI_API_KEY="EMPTY"
-export FOL_SLM_BASE_URL="http://localhost:${FOL_SLM_PORT}/v1"
-
-# ── Step-GDPO training on GPU 0 ──
+# Step-GDPO training (remote API for FOL-SLM rewards)
+# Uses structured preprocessing (rephrase + object/predicate extraction) and
+# assertion translation mode (prompt negates conclusion).
 # +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation
-CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
+python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \
     +algorithm.fol_preprocess=structured \
@@ -100,7 +72,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_step_gdpo_fol_slm_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
