@@ -132,11 +132,17 @@ def compute_step_reward_fol(
             translate_and_verify_step,
         )
 
+        is_cumulative = (api_config or {}).get("cumulative", False)
+        if is_cumulative and step_history:
+            step_text_to_translate = "\n".join(step_history)
+        else:
+            step_text_to_translate = step_text
+
         declarations = fol_preprocess_declarations(
             context, question, options, api_config=api_config
         )
         reward = translate_and_verify_step(
-            context, declarations, step_text, api_config=api_config
+            context, declarations, step_text_to_translate, api_config=api_config
         )
         return float(reward)
     except Exception as e:

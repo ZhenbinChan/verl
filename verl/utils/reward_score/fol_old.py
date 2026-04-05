@@ -115,8 +115,14 @@ def compute_step_reward_fol(
     try:
         from verl.utils.fol_utils.nl2fol_old import fol_preprocessing, translate_and_execute_fol
 
+        is_cumulative = (api_config or {}).get("cumulative", False)
+        if is_cumulative and step_history:
+            step_text_to_translate = "\n".join(step_history)
+        else:
+            step_text_to_translate = step_text
+
         declaration = fol_preprocessing(context, question, options, api_config=api_config)
-        reward = translate_and_execute_fol(declaration, step_text, api_config=api_config)
+        reward = translate_and_execute_fol(declaration, step_text_to_translate, api_config=api_config)
         return float(reward)
     except Exception as e:
         logging.getLogger(__name__).warning("FOL reward computation failed: %s", e)

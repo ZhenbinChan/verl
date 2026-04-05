@@ -27,6 +27,7 @@ export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 #   reward_model.reward_manager: dapo -> step
 #   新增: step_reward_type, step_reward_weights (在 algorithm 里)
 #   删除: overlong_buffer_cfg (DAPO特有)
+# +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \

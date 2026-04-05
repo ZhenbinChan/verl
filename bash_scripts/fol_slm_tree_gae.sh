@@ -61,9 +61,11 @@ export FOL_SLM_BASE_URL="http://localhost:${FOL_SLM_PORT}/v1"
 
 # ── Tree-GAE training on GPU 0 ──
 # EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
+# +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation
 CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=fol_slm \
+    +algorithm.fol_slm_max_tries=8 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \

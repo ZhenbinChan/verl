@@ -95,6 +95,19 @@ class TreeRewardManager(RewardManagerBase):
         if cfg_override:
             self.api_config.update({k: v for k, v in cfg_override.items() if v is not None})
 
+        # FOL-SLM specific: correct_loop max retries and LLM call timeout
+        reward_cfg_fol = config.get("reward", {})
+        algo_cfg_fol = config.get("algorithm", {})
+        max_tries = reward_cfg_fol.get("fol_slm_max_tries", algo_cfg_fol.get("fol_slm_max_tries", None))
+        if max_tries is not None:
+            self.api_config["max_tries"] = int(max_tries)
+        llm_timeout = reward_cfg_fol.get("fol_slm_timeout", algo_cfg_fol.get("fol_slm_timeout", None))
+        if llm_timeout is not None:
+            self.api_config["timeout"] = int(llm_timeout)
+        cumulative = reward_cfg_fol.get("fol_verify_with_cumulative_steps", algo_cfg_fol.get("fol_verify_with_cumulative_steps", False))
+        self.api_config["cumulative"] = bool(cumulative)
+        print(f"FOL config 'fol_verify_with_cumulative_steps' is set to: {self.api_config['cumulative']}")
+
         # Step reward type: explicit parameter > reward config > algorithm config > None
         if step_reward_type is not None:
             if isinstance(step_reward_type, str):

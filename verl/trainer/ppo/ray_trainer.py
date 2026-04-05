@@ -1569,6 +1569,16 @@ class RayPPOTrainer:
                                         {k: v for k, v in cfg_override.items() if v is not None}
                                     )
 
+                                # FOL-SLM specific: correct_loop max retries and LLM call timeout
+                                max_tries = reward_cfg.get("fol_slm_max_tries", algo_cfg.get("fol_slm_max_tries", None))
+                                if max_tries is not None:
+                                    api_config["max_tries"] = int(max_tries)
+                                llm_timeout = reward_cfg.get("fol_slm_timeout", algo_cfg.get("fol_slm_timeout", None))
+                                if llm_timeout is not None:
+                                    api_config["timeout"] = int(llm_timeout)
+                                cumulative = reward_cfg.get("fol_verify_with_cumulative_steps", algo_cfg.get("fol_verify_with_cumulative_steps", False))
+                                api_config["cumulative"] = bool(cumulative)
+
                                 for rt in step_reward_types:
                                     if rt == "format":
                                         from verl.utils.reward_score.fol import compute_step_reward_format_fol
