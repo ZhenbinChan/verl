@@ -279,7 +279,7 @@ def extract_fol_problem(
 # ---------------------------------------------------------------------------
 # Code execution sandbox
 # ---------------------------------------------------------------------------
-_USE_FAST_EXEC = hasattr(signal, "alarm")
+# _USE_FAST_EXEC = hasattr(signal, "alarm")
 _mp_pool = None
 _mp_pool_lock = threading.Lock()
 
@@ -326,7 +326,10 @@ def _worker_execute(code_string: str, timeout_sec: int) -> dict:
 
 
 def _run_code_pool(code_string: str, timeout: float = 30.0) -> dict:
-    """Execute via multiprocessing pool with signal.alarm (Linux)."""
+    """
+    Execute via multiprocessing pool with signal.alarm (Linux).
+    Not used since tasks must queue behind a single worker, causing bottlenecks. Kept as reference for the signal-based timeout approach.
+    """
     pool = _get_mp_pool()
     timeout_int = max(1, int(timeout))
     try:
@@ -360,16 +363,15 @@ def _run_code_subprocess(code_string: str, timeout: float = 30.0) -> dict:
 def run_code(code_string: str, timeout: float = 30.0) -> dict:
     """Execute Python code safely in a sandbox.
 
-    Uses multiprocessing pool with signal.alarm on Linux,
-    falls back to subprocess on Windows.
+    Always uses subprocess — each Z3 run gets its own process so:
+    - No OOM accumulation (process dies after each run)
+    - Naturally parallel (no single-process pool bottleneck)
+    - Works on both Linux and Windows
 
     Returns:
         dict with keys: success (bool), output (str), error (str | None)
     """
-    if _USE_FAST_EXEC:
-        return _run_code_pool(code_string, timeout)
-    else:
-        return _run_code_subprocess(code_string, timeout)
+    return _run_code_subprocess(code_string, timeout)
 
 
 # ---------------------------------------------------------------------------
