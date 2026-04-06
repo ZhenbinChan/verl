@@ -36,7 +36,7 @@ export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \
-    +algorithm.fol_max_tries=3 \
+    +algorithm.fol_max_tries=1 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \
