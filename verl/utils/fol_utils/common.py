@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+# import time
 import traceback
 from functools import wraps
 from pathlib import Path
@@ -87,6 +88,9 @@ def _get_default_api_config() -> dict:
     }
 
 
+_llm_call_counter = 0
+_llm_call_counter_lock = threading.Lock()
+
 def call_llm(
     user_prompt: str,
     *,
@@ -103,6 +107,11 @@ def call_llm(
     Returns:
         The assistant's response text.
     """
+    global _llm_call_counter
+    with _llm_call_counter_lock:
+        _llm_call_counter += 1
+        call_id = _llm_call_counter
+
     cfg = _get_default_api_config()
     if api_config:
         cfg.update({k: v for k, v in api_config.items() if v is not None})
@@ -114,6 +123,12 @@ def call_llm(
 
     timeout = cfg.pop("timeout", 120)
     top_p = cfg.pop("top_p", 0.8)
+
+    # _tid = threading.current_thread().name
+    # _prompt_preview = user_prompt[:80].replace('\n', '\\n')
+    # print(f"[LLM][{_tid}] #{call_id} → {cfg['model']}@{cfg.get('base_url','?')}  prompt={_prompt_preview!r}...", flush=True)
+    # _t = time.time()
+
     client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
     completion = client.chat.completions.create(
         model=cfg["model"],
@@ -123,6 +138,11 @@ def call_llm(
         top_p=top_p,
         n=1,
     )
+    # _resp = completion.choices[0].message.content or ""
+    # _usage = getattr(completion, 'usage', None)
+    # _tok = f"in={_usage.prompt_tokens}/out={_usage.completion_tokens}" if _usage else "no_usage"
+    # print(f"[LLM][{_tid}] #{call_id} ← {time.time()-_t:.2f}s  {_tok}  resp_len={len(_resp)}", flush=True)
+    # return _resp
     return completion.choices[0].message.content or ""
 
 
@@ -371,6 +391,17 @@ def run_code(code_string: str, timeout: float = 30.0) -> dict:
     Returns:
         dict with keys: success (bool), output (str), error (str | None)
     """
+    # _tid = threading.current_thread().name
+    # _code_preview = code_string[:100].replace('\n', '\\n')
+    # print(f"[EXEC][{_tid}] → subprocess  timeout={timeout}  code={_code_preview!r}...", flush=True)
+    # _t = time.time()
+    # res = _run_code_subprocess(code_string, timeout)
+    # _elapsed = time.time() - _t
+    # _warn = "  ⚠ SLOW" if _elapsed > 5.0 else ""
+    # print(f"[EXEC][{_tid}] ← {_elapsed:.2f}s  success={res['success']}  out={res.get('output','')[:60]!r}{_warn}", flush=True)
+    # if not res['success']:
+    #     print(f"[EXEC][{_tid}]   err={res.get('error','')[:500]!r}", flush=True)
+    # return res
     return _run_code_subprocess(code_string, timeout)
 
 
@@ -409,17 +440,28 @@ def correct_loop(
     Returns:
         dict with keys: success, output, error
     """
+    # _tid = threading.current_thread().name
     cfg = dict(api_config or {})
+    # print(f"[Z3LOOP][{_tid}] → run_code (initial, timeout={timeout}s)...", flush=True)
+    # _t = time.time()
     res = run_code(code, timeout=timeout)
+    # print(f"[Z3LOOP][{_tid}] ← run_code {time.time()-_t:.2f}s  success={res['success']}  out={res.get('output','')[:80]!r}", flush=True)
     tries = 0
 
     while not res["success"] and tries < max_tries:
         error_msg = res.get("error", "Unknown error")
+        # print(f"[Z3LOOP][{_tid}] ⟳ retry {tries+1}/{max_tries}  err={error_msg[:100]!r}", flush=True)
+        # _tc = time.time()
         code = correct_z3_code(code, error_msg, api_config=cfg)
+        # print(f"[Z3LOOP][{_tid}]   correct_z3 {time.time()-_tc:.2f}s → run_code...", flush=True)
+        # _tr = time.time()
         res = run_code(code, timeout=timeout)
+        # print(f"[Z3LOOP][{_tid}]   run_code {time.time()-_tr:.2f}s  success={res['success']}  out={res.get('output','')[:80]!r}", flush=True)
         tries += 1
         cfg["temperature"] = cfg.get("temperature", 0.1) + 0.05
 
+    # if tries > 0:
+    #     print(f"[Z3LOOP][{_tid}] ✓ loop done after {tries} retries, total={time.time()-_t:.2f}s", flush=True)
     return res
 
 
@@ -439,9 +481,12 @@ def thread_safe_cache(func):
     @wraps(func)
     def wrapper(context: str, question: str, options: str = "", *, api_config: Optional[dict] = None):
         cache_key = (context, question, options)
+        # _tid = threading.current_thread().name
+        # _key_hash = hash(cache_key) % 10000
 
         # Fast path: check without lock
         if cache_key in _preprocess_cache:
+            # print(f"[CACHE][{_tid}] HIT  key={_key_hash}  fn={func.__name__}  cache_size={len(_preprocess_cache)}", flush=True)
             return _preprocess_cache[cache_key]
 
         # Get or create a key-specific lock
@@ -451,10 +496,16 @@ def thread_safe_cache(func):
             key_lock = _preprocess_locks[cache_key]
 
         # Double-checked locking
+        # print(f"[CACHE][{_tid}] MISS key={_key_hash}  fn={func.__name__}  waiting lock...", flush=True)
+        # _tw = time.time()
         with key_lock:
             if cache_key in _preprocess_cache:
+                # print(f"[CACHE][{_tid}] HIT-after-wait  key={_key_hash}  waited={time.time()-_tw:.2f}s", flush=True)
                 return _preprocess_cache[cache_key]
+            # print(f"[CACHE][{_tid}] COMPUTING  key={_key_hash}  fn={func.__name__}...", flush=True)
+            _tc = time.time()
             result = func(context, question, options, api_config=api_config)
+            # print(f"[CACHE][{_tid}] STORED  key={_key_hash}  fn={func.__name__}  {time.time()-_tc:.2f}s  cache_size={len(_preprocess_cache)+1}", flush=True)
             _preprocess_cache[cache_key] = result
             return result
 

@@ -19,6 +19,8 @@ Exports:
 """
 
 import logging
+# import threading
+# import time
 
 from verl.utils.fol_utils.common import check_step_format_fol, extract_fol_problem
 from verl.utils.fol_utils.engine import (
@@ -53,8 +55,13 @@ def compute_step_reward_fol(
       fol_translation: "implication" | "assertion"
       max_tries, timeout, cumulative
     """
+    # _t0 = time.time()
+    # _tid = threading.current_thread().name
+    # print(f"[FOL][{_tid}] ▶ enter  step={step_text[:60]!r}...", flush=True)
+
     context, question, options = extract_fol_problem(prompt_text, extra_info)
     if not context or not question:
+        # print(f"[FOL][{_tid}] ✗ no context/question, skip", flush=True)
         return 0.0
 
     cfg = api_config or {}
@@ -87,11 +94,19 @@ def compute_step_reward_fol(
         else:
             step_to_translate = step_text
 
+        # print(f"[FOL][{_tid}] → preprocess({fol_config.preprocess.value})...", flush=True)
+        # _t1 = time.time()
         processed_ctx, declarations = engine.preprocess(
             context, question, options or ""
         )
+        # print(f"[FOL][{_tid}] ← preprocess done  {time.time()-_t1:.2f}s  decl_len={len(declarations)}", flush=True)
+
+        # print(f"[FOL][{_tid}] → verify_step({fol_config.translation.value})...", flush=True)
+        # _t2 = time.time()
         reward = engine.verify_step(processed_ctx, declarations, step_to_translate)
+        # print(f"[FOL][{_tid}] ◀ done  reward={reward}  verify={time.time()-_t2:.2f}s  total={time.time()-_t0:.2f}s", flush=True)
         return float(reward)
     except Exception as e:
+        # print(f"[FOL][{_tid}] ✗ EXCEPTION after {time.time()-_t0:.2f}s: {e}", flush=True)
         logger.warning("FOL reward computation failed: %s", e)
         return 0.0
