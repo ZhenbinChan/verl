@@ -503,7 +503,7 @@ def thread_safe_cache(func):
                 # print(f"[CACHE][{_tid}] HIT-after-wait  key={_key_hash}  waited={time.time()-_tw:.2f}s", flush=True)
                 return _preprocess_cache[cache_key]
             # print(f"[CACHE][{_tid}] COMPUTING  key={_key_hash}  fn={func.__name__}...", flush=True)
-            _tc = time.time()
+            # _tc = time.time()
             result = func(context, question, options, api_config=api_config)
             # print(f"[CACHE][{_tid}] STORED  key={_key_hash}  fn={func.__name__}  {time.time()-_tc:.2f}s  cache_size={len(_preprocess_cache)+1}", flush=True)
             _preprocess_cache[cache_key] = result
