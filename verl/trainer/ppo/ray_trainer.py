@@ -1989,11 +1989,14 @@ class RayPPOTrainer:
                                     metrics[f"step_gdpo/{key}/mean"] = float(np.mean(arr))
                                     metrics[f"step_gdpo/{key}/std"] = float(np.std(arr))
                 # Log num_steps if available (works for step_gdpo, tree_gae, or any
-                # reward manager that populates num_steps in reward_extra_info)
+                # reward manager that populates num_steps in reward_extra_info).
+                # Follows the convention of response_length/* — training metrics have
+                # no prefix; validation metrics live under val-core/ or val-aux/.
                 if "num_steps" in batch.non_tensor_batch:
                     ns = np.asarray(batch.non_tensor_batch["num_steps"], dtype=np.float32)
-                    metrics["train/num_steps/mean"] = float(np.mean(ns))
-                    metrics["train/num_steps/max"] = float(np.max(ns))
+                    metrics["num_steps/mean"] = float(np.mean(ns))
+                    metrics["num_steps/max"] = float(np.max(ns))
+                    metrics["num_steps/min"] = float(np.min(ns))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

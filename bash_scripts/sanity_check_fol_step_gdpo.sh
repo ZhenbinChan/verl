@@ -1,13 +1,30 @@
 set -x
 
-# Self-Evaluate Tree-GAE — Mode B: 2 GPUs (training on GPU 0, vLLM reference on GPU 1)
+# FOL Step-GDPO Sanity Check — fast pipeline verification
 #
-# Usage:
+# Parallel structure to sanity_check_self_eval_step_gdpo.sh, but uses FOL
+# reward (Z3-based verification) instead of self-eval scoring.
+#
+# Key differences from full training scripts:
+#   - val_max_samples=8   (8 val samples instead of full dataset)
+#   - total_training_steps=3
+#   - console-only logging (no wandb)
+#   - FOL judge vLLM on same GPU (low memory)
+#   - fol_max_tries=1 (no retry loop, faster)
+#
+# Usage (1 GPU):
+#   export CUDA_VISIBLE_DEVICES=0
+#   bash sanity_check_fol_step_gdpo.sh
+#
+# Usage (2 GPUs, judge on second GPU, more room for retry loop):
 #   export CUDA_VISIBLE_DEVICES=0,1
-#   bash self_eval_tree_gae_local.sh
+#   bash sanity_check_fol_step_gdpo.sh
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
+# Use 1.5B as the FOL judge too to minimize memory in sanity check.
+# For full runs use Qwen2.5-3B-Instruct as the judge.
+FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen2.5-1.5B-Instruct}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -19,28 +36,28 @@ unset HIP_VISIBLE_DEVICES
 
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# Launch vLLM server on GPU 1 with reference model weights
-SELF_EVAL_PORT=${SELF_EVAL_PORT:-8199}
-export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
+# Launch FOL vLLM judge server
+FOL_PORT=${FOL_PORT:-4869}
+export FOL_MODEL=${FOL_MODEL:-$(basename $FOL_MODEL_PATH)}
 
-echo "==> Launching local vLLM server on GPU 1 (port $SELF_EVAL_PORT)..."
-CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
-    --model $MODEL_PATH \
-    --served-model-name $SELF_EVAL_MODEL \
-    --port $SELF_EVAL_PORT \
-    --gpu-memory-utilization 0.85 \
+echo "==> Launching FOL vLLM judge server (port $FOL_PORT)..."
+python3 -m vllm.entrypoints.openai.api_server \
+    --model $FOL_MODEL_PATH \
+    --served-model-name $FOL_MODEL \
+    --port $FOL_PORT \
+    --gpu-memory-utilization 0.15 \
     --tensor-parallel-size 1 \
-    --no-enable-log-requests > vllm_server.log 2>&1 &
-VLLM_PID=$!
-echo "vLLM server log: vllm_server.log"
-trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EXIT
+    --no-enable-log-requests > fol_vllm_server.log 2>&1 &
+FOL_VLLM_PID=$!
+echo "FOL vLLM server log: fol_vllm_server.log"
+trap "echo 'Killing FOL vLLM server (PID=$FOL_VLLM_PID)'; kill $FOL_VLLM_PID 2>/dev/null" EXIT
 
-echo "Waiting for vLLM server to start..."
+echo "Waiting for FOL vLLM server to start..."
 VLLM_READY=0
 set +x
 for i in $(seq 1 180); do
-    if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
-        echo "vLLM server ready after ${i}s"
+    if curl -s http://localhost:${FOL_PORT}/health > /dev/null 2>&1; then
+        echo "FOL vLLM server ready after ${i}s"
         VLLM_READY=1
         break
     fi
@@ -48,24 +65,26 @@ for i in $(seq 1 180); do
 done
 set -x
 if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: vLLM server failed to start within 180s"
+    echo "ERROR: FOL vLLM server failed to start within 180s"
     exit 1
 fi
 
+# Point FOL API calls to local vLLM server
 export OPENAI_API_KEY="EMPTY"
-export OPENAI_BASE_URL="http://localhost:${SELF_EVAL_PORT}/v1"
+export OPENAI_BASE_URL="http://localhost:${FOL_PORT}/v1"
 
-# EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
-CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=tree_gae \
-    +algorithm.step_reward_type=self_eval \
+python3 -u -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=step_gdpo \
+    +algorithm.step_reward_type=fol \
+    +algorithm.fol_max_tries=1 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
-    reward_model.reward_manager=tree \
+    reward_model.reward_manager=step \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
     data.val_batch_size=8 \
+    +data.val_max_samples=8 \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
@@ -86,34 +105,24 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.rollout.n=6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+    actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.top_p=0.95 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    +trainer.tree_sampling=True \
-    +trainer.tree_rounds=1 \
-    +trainer.tree_top_n=2 \
-    +trainer.tree_branches=2 \
-    +trainer.tree_mask_tail_ratio=0.1 \
-    +trainer.tree_step_reward_mode=la \
-    +trainer.tree_overall_norm_style=token \
-    +trainer.tree_use_weighted_value=False \
-    +trainer.tree_weighted_value_style=sqrt \
-    +algorithm.tree_ext_reward_dedup=True \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_self_eval" \
+    trainer.experiment_name="qwen1.5b_fol_step_gdpo_sanity_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=100 \
+    trainer.test_freq=3 \
     trainer.total_epochs=1 \
-    +reward.api_config.temperature=0.0 \
+    trainer.total_training_steps=3 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@

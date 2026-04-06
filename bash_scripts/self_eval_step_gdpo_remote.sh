@@ -70,6 +70,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.max_actor_ckpt_to_keep=0 \
     trainer.test_freq=100 \
     trainer.total_epochs=1 \
+    +reward.api_config.temperature=0.0 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@

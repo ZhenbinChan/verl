@@ -114,6 +114,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.test_freq=3 \
     trainer.total_epochs=1 \
     trainer.total_training_steps=3 \
+    +reward.api_config.temperature=0.0 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@
