@@ -567,7 +567,24 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
-        for test_data in self.val_dataloader:
+        # Wrap the dataloader with tqdm so validation has visible progress.
+        # Note: by default val_batch_size == len(val_dataset), so this is
+        # often a single batch — but at least the "Validation" line shows up
+        # so the user knows the trainer is in the validation phase rather
+        # than hanging. Set data.val_batch_size to a smaller value (e.g. 32)
+        # to get finer-grained progress.
+        try:
+            val_total = len(self.val_dataloader)
+            val_iter = tqdm(
+                self.val_dataloader,
+                desc="Validation",
+                total=val_total,
+                dynamic_ncols=True,
+            )
+        except (TypeError, AttributeError):
+            val_total = None
+            val_iter = self.val_dataloader
+        for test_data in val_iter:
             test_batch = DataProto.from_single_dict(test_data)
 
             if "uid" not in test_batch.non_tensor_batch:
