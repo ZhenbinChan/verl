@@ -24,10 +24,12 @@ TreeManager and stored in non_tensor_batch['treerl_step_reward'].
 External PRM scores are stored as '{type}_step_reward' in reward_extra_info.
 """
 
+import asyncio
 import inspect
 import logging
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from verl import DataProto
@@ -177,6 +179,12 @@ class TreeRewardManager(RewardManagerBase):
             use_xml_cfg = algo_cfg.get("use_xml_steps", None)
         self.use_xml = bool(use_xml_cfg) if use_xml_cfg is not None else False
 
+        # Thread pool for parallel API calls (mirrors StepRewardManager).
+        # Without this, every LLM-based step reward (self_eval / fol) is
+        # invoked serially per response, which makes tree_gae validation
+        # ~N_steps× slower than step_gdpo.
+        self._executor = ThreadPoolExecutor(max_workers=16)
+
     def _get_step_token_positions(self, response_text: str, valid_response_ids, valid_response_length: int):
         """Map character-level step boundaries to token positions.
 
@@ -274,18 +282,33 @@ class TreeRewardManager(RewardManagerBase):
                 reward_fn = self.step_reward_fns.get(reward_type)
                 if reward_fn is None:
                     raise ValueError(f"Unknown step reward type: {reward_type}")
-                step_rewards = []
-                step_history = []
-                for step_text, token_end_pos in step_positions:
-                    step_history.append(step_text)
-                    step_score = reward_fn(
-                        step_text,
-                        prompt_text,
-                        step_history,
-                        api_config=self.api_config,
-                        extra_info=extra_info,
+
+                # Pre-build all step histories so calls can run in parallel
+                # (same pattern as StepRewardManager). For LLM-based reward
+                # functions (self_eval / fol) this is the difference between
+                # N sequential blocking calls and ceil(N/16) concurrent ones.
+                call_args = []
+                for i, (step_text, token_end_pos) in enumerate(step_positions):
+                    history = [s for s, _ in step_positions[: i + 1]]
+                    call_args.append((step_text, prompt_text, history, token_end_pos))
+
+                loop = asyncio.get_event_loop()
+                futures = [
+                    loop.run_in_executor(
+                        self._executor,
+                        lambda args=args: reward_fn(
+                            args[0], args[1], args[2],
+                            api_config=self.api_config, extra_info=extra_info,
+                        ),
                     )
-                    step_rewards.append((int(token_end_pos), float(step_score)))
+                    for args in call_args
+                ]
+                scores = await asyncio.gather(*futures)
+
+                step_rewards = [
+                    (int(args[3]), float(score))
+                    for args, score in zip(call_args, scores)
+                ]
 
                 key = f"{reward_type}_step_reward"
                 reward_extra_info[key] = step_rewards
