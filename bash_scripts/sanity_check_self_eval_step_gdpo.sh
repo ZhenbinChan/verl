@@ -75,7 +75,7 @@ python3 -u -m verl.trainer.main_ppo \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
     data.val_batch_size=8 \
-    +data.val_max_samples=8 \
+    data.val_max_samples=8 \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \

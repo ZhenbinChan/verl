@@ -79,7 +79,7 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=100 \
+    trainer.test_freq=20 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
