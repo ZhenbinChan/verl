@@ -1560,16 +1560,18 @@ def gather_paths(root:MCTSNode,selected_terminals: list[MCTSNode], pass_k: int,u
     if len(selected_terminals) != pass_k:
         pass_k = len(selected_terminals)
         # return None
-    # terminal_values = normalize_selected_terminals(selected_terminals)
-    terminal_values = [leaf.accumulated_value for leaf in selected_terminals]
+
     # 添加 selected_terminal 的叶子节点路径
     for terminal_node in selected_terminals:
         paths.append(path_from_root_to_node(terminal_node,average_one_generation))
     assert len(paths) == pass_k, f"Failed to generate {pass_k} paths,{len(paths)} instead"
+
+    terminal_values = [leaf.accumulated_value for leaf in selected_terminals]
     if average_one_generation:
         root_value = root.accumulated_value
     else:
         root_value = root.accumulated_value / root.terminal_in_subtree
+
     if advantage_mix_allancestor:
         # print("use advantage mix all ancestor")
         for path in paths:
@@ -1587,6 +1589,7 @@ def gather_paths(root:MCTSNode,selected_terminals: list[MCTSNode], pass_k: int,u
                     num_value += 1
                     path[i]["value"] = sum_value / num_value
         return paths
+    
     paths = fill_in_paths(paths)
     if use_chain_reward:
         # print("use chain reward in mcts!!")
@@ -1626,9 +1629,6 @@ def pass_rate(paths):
     for path in paths:
         pass_num += path[-1]["pass_ratio"]
     pass_num /= len(paths)
-    # for path in paths:
-    #     if path[-1]["pass_ratio"] ==1 :
-    #         pass_num += 1
     return pass_num
 
 

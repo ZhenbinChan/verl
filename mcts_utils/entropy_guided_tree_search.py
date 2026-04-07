@@ -77,201 +77,6 @@ def normalize_selected_terminals(paths):
         return paths
     
 
-import multiprocessing
-from tqdm import tqdm
-
-# 假设args和manager是全局可访问的，或者通过partial传递
-def process_item_wrapper(data_item, args, manager):
-    """包装函数，用于处理单个数据项"""
-    item = {
-        "problem": data_item["Question"],
-        "golden_answer": data_item["Answer"],
-    }
-    result = manager.process_single_item(item, args)
-    score = result['raw_avg_reward']
-    selected_score = pass_rate(result['paths'])
-    return score, selected_score
-
-def parallel_process(data_batch, manager, args, num_workers=None):
-    """
-    并行处理数据批次
-    :param data_batch: 数据列表
-    :param manager: 包含process_single_item方法的对象
-    :param args: 参数
-    :param num_workers: 进程数，默认使用CPU核心数
-    :return: 所有结果的score_list
-    """
-    if num_workers is None:
-        num_workers = multiprocessing.cpu_count()
-    
-    # 使用functools.partial固定manager和args参数
-    from functools import partial
-    worker_func = partial(process_item_wrapper, args=args, manager=manager)
-    
-    score_list = []
-    selected_score_list = []
-    avg_score = 0.0
-    avg_selected_score = 0.0
-    
-    # 创建进程池
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        # 使用imap_unordered获取结果（顺序可能打乱，但更快）
-        # 如果需要保持顺序，使用imap
-        with tqdm(total=len(data_batch), desc="Overall progress") as pbar:
-            for (score, selected_score) in pool.imap_unordered(worker_func, data_batch):
-                score_list.append(score)
-                selected_score_list.append(selected_score)
-                avg_score = sum(score_list) / len(score_list)
-                avg_selected_score = sum(selected_score_list) / len(selected_score_list)
-                pbar.set_postfix(score=f"{score:.4f}", avg_score=f"{avg_score:.4f}, {avg_selected_score:.4f}")
-                pbar.update(1)
-    
-    return score_list, selected_score_list
-
-
-import multiprocessing
-from tqdm import tqdm
-from functools import partial
-
-def process_single_item_mcts(item, args, llm, tokenizer, tokenize_fn, detokenize_fn, eos_tokens_set, system_prompt=None):
-    """处理单个数据项，返回结果"""
-    problem = item["problem"]
-    answer = item["golden_answer"]
-    
-    mcts = MCTSr(
-        temperature=args["temperature"],
-        top_p=args["top_p"],
-        problem=problem,
-        golden_answer=answer,
-        max_nodes=args["max_nodes"],
-        max_node_per_depth=args["max_node_per_depth"],
-        max_children=args["max_children"],
-        min_children=args["min_children"],
-        shallow_enwide=args["shallow_enwide"],
-        max_depth=args["max_depth"],
-        random_pick=args["random_pick"],
-        exploration_constant=args["exploration_constant"],
-        selection_policy=SelectionPolicy.GREEDY,
-        backbone=args["backbone"],
-        pass_k=args["pass_k"],
-        backprop=args["backprop"],
-        first_token_temperature=args["first_token_temperature"],
-        look_ahead=args["look_ahead"],
-        llms=[llm],
-        tokenizer=tokenizer,
-        tokenize_fn=tokenize_fn,
-        detokenize_fn=detokenize_fn,
-        concurrent_num=args["concurrent_num"],
-        path_num=args["path_num"],
-        prompt_max_len=args["prompt_max_len"],
-        max_token_num=args["max_token_num"],
-        max_time_use=args["max_time_use"],
-        step_level_norm=args["step_level_norm"],
-        use_weighted_value=args["use_weighted_value"],
-        use_orm_reward=args["use_orm_reward"],
-        select_correct_leaf=args["select_correct_leaf"],
-        use_chain_reward=args["use_chain_reward"],
-        use_state_value_reward=args["use_state_value_reward"],
-        use_value_only=args["use_value_only"],
-        use_pure_RM=args["use_pure_RM"],
-        use_pure_binary=args["use_pure_binary"],
-        system_prompt=system_prompt,
-        average_one_generation=args["average_one_generation"],
-        a=args["a"],
-        b=args["b"],
-        eos_tokens_set=eos_tokens_set,
-        use_api_generation=args["use_api_generation"],
-        enable_info=args["enable_info"],
-        evaluation_strategy=args["evaluation_strategy"],
-        check_step_validity=args["check_step_validity"]
-    )
-    
-    mcts.run()
-    paths = gather_paths(
-        mcts.root,
-        mcts.selected_terminals,
-        args["path_num"],
-        use_orm_reward=mcts.use_orm_reward,
-        use_chain_reward=mcts.use_chain_reward,
-        step_level_norm=mcts.step_level_norm,
-        use_state_value_reward=mcts.use_state_value_reward,
-        use_value_only=mcts.use_value_only,
-        average_one_generation=mcts.average_one_generation,
-        advantage_mix_allancestor=args["advantage_mix_allancestor"]
-    )
-    
-    score = pass_rate(paths)
-    return {
-        "score": score,
-        "num_paths": len(paths),
-        "problem": problem
-    }
-
-def process_item_wrapper_mcts(item, args, llm, tokenizer, tokenize_fn, detokenize_fn, eos_tokens_set, system_prompt):
-    """包装函数，用于处理单个数据项"""
-    result = process_single_item_mcts(item, args, llm, tokenizer, tokenize_fn, detokenize_fn, eos_tokens_set, system_prompt)
-    return result['score']
-
-def parallel_process_mcts(data_batch, args, llm, tokenizer, tokenize_fn, detokenize_fn, eos_tokens_set, system_prompt=None, num_workers=None):
-    """
-    并行处理MCTS数据批次
-    :param data_batch: 数据批次列表
-    :param args: 参数字典
-    :param llm: LLM模型
-    :param tokenizer: tokenizer
-    :param tokenize_fn: tokenize函数
-    :param detokenize_fn: detokenize函数
-    :param eos_tokens_set: EOS tokens集合
-    :param system_prompt: 系统提示
-    :param num_workers: 进程数，默认使用CPU核心数
-    :return: 所有结果的score_list
-    """
-    if num_workers is None:
-        num_workers = multiprocessing.cpu_count()
-    print(f"Using {num_workers} parallel workers for MCTS processing.")
-    
-    # 准备数据项
-    data_items = []
-    for data in data_batch:
-        item = {
-            "problem": data["Question"],
-            "golden_answer": data["Answer"]
-        }
-        data_items.append(item)
-    
-    # 使用partial固定参数
-    worker_func = partial(
-        process_item_wrapper_mcts,
-        args=args,
-        llm=llm,
-        tokenizer=tokenizer,
-        tokenize_fn=tokenize_fn,
-        detokenize_fn=detokenize_fn,
-        eos_tokens_set=eos_tokens_set,
-        system_prompt=system_prompt
-    )
-    
-    score_list = []
-    avg_score = 0.0
-    
-    # 创建进程池
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        # 使用imap获取结果（保持顺序）
-        with tqdm(total=len(data_items), desc="Overall progress") as pbar:
-            for score in pool.imap(worker_func, data_items):
-                score_list.append(score)
-                avg_score = sum(score_list) / len(score_list)
-                pbar.set_postfix_str(f"score: {score:.4f}, avg_score: {avg_score:.4f}, processed: {len(score_list)}")
-                pbar.update(1)
-    
-    # 打印最终结果
-    if score_list:
-        avg_score = sum(score_list) / len(score_list)
-        print(f"Processing finished. Final avg_score: {avg_score:.4f}, total samples: {len(score_list)}")
-    
-    return score_list
-
-
 def parallel_entropy_guided_tree(
     item,
     llm,
@@ -302,41 +107,43 @@ def parallel_entropy_guided_tree(
 def process_single_data_for_each_gpu(
     data_batch, gpu_id, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
 ):
-    '''
-    仅用作评测本地 vllm 推理性能，不进入 RL 训练
-    '''
     # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     args = {
-        "temperature": 1.0,
-        "top_p": 0.9,
+        # TreeRL parameters
         "m": 1,
         "n": 4,
         "l": 3,
         "t": 3,
-        "eos_tokens": eos_tokens,
-        "use_pure_binary": True, # 是否只使用二分类奖励，若为 False 则使用 rm 评分作为奖励
-        "entropy_rm_urls": ["http://172.18.80.30:8000/encode"],
-        "num_traces": 12, # 每轮迭代的轨迹数量
-        "use_pure_RM" : True, # 是否只使用 rm 评分作为奖励，若为 False 则使用综合评分（可能包含 rm 评分、链路奖励等）作为奖励
-        "use_orm_reward" : False, # 是否使用 openrm 评分作为奖励的一部分
-        "use_chain_reward" : False, # 是否使用链路奖励作为奖励的一部分
-        "step_level_norm" : False, # 是否在每一步进行奖励归一化，若为 False 则只在最终选择的轨迹上进行奖励归一化
-        "use_state_value_reward" : False,
-        "use_value_only" : True,
-        "balance_ratio": 0.2,
-        "average_one_generation" : False,
-        "advantage_mix_allancestor" : False,
-        "use_weighted_value": False,
-        "use_all_terminals": False,
-        "a": 0.5,
-        "b": 0.5,
-        "generate_max_len" : 4096,
-        "weighted_value_style": "sqrt",
-        "overall_norm_style": "token",
-        "inner_repetition_penalty" : False,
-        "use_diverse_sampling" : False,
         "training_type": "general",
         "system_prompt": system_prompt,
+        "generate_max_len" : 4096, # 每轮迭代生成的最大 token 数
+        "use_diverse_sampling" : False, # 选择TopK中最多样的轨迹进行迭代
+        # Generating parameters
+        "temperature": 1.0,
+        "top_p": 0.9,
+        "eos_tokens": eos_tokens,
+        # Evaluating node parameters
+        "use_pure_binary": True, # node.score = reward where reward = 1 / 0
+        "use_pure_RM" : True, # node.score = sigmoid(a*(value-b)) if use_pure_RM else (reward + 0.5 * sigmoid(value))
+        "a": 0.5,
+        "b": 0.5,
+        # Selecting terminals parameters
+        "inner_repetition_penalty" : False, # if leaf.finish_reason != "stop": leaf.R = -1
+        "overall_norm_style": "token", # 归一化node.accumulated_value = node.accumulated_value - mean * node.terminal_in_subtree
+        "use_all_terminals": False, # 是否选择所有的轨迹
+        "num_traces": 12, # 最终选择轨迹数量
+        "balance_ratio": -0.2, # 最终选择的轨迹中，正确轨迹的比例，负数表示使用启发式选择节点（用于评测）
+        "use_weighted_value": False, # 根据所选轨迹更改node.accumulated_value
+        "weighted_value_style": "sqrt", # 更改node.accumulated_value的方式
+        # Gathering paths parameters
+        "use_orm_reward" : False, # 更改node.value的各种方式
+        "use_chain_reward" : False,
+        "step_level_norm" : False,
+        "use_state_value_reward" : False,
+        "use_value_only" : True,
+        "average_one_generation" : False,
+        "advantage_mix_allancestor" : False,
+        # Custom parameters
         "use_api_generation": "gpt" in tokenizer_path.lower(),
         "enable_info": False,
         "check_step_validity": False,
@@ -364,7 +171,7 @@ def process_single_data_for_each_gpu(
         tokenizer=tokenizer,
         encode_fn=tokenize_fn,
         decode_fn=detokenize_fn,
-        eos_tokens_set=args['eos_tokens'],
+        eos_tokens_set=eos_tokens,
     )
 
     df = pd.DataFrame(data_batch)
@@ -373,10 +180,8 @@ def process_single_data_for_each_gpu(
             "Question": batch["Question"].tolist(),
             "Answer": batch["Answer"].tolist()
         }
-        for _, batch in df.groupby(df.index // 32)
+        for _, batch in df.groupby(df.index // 128)
     ]
-
-    # score_list, selected_score_list = parallel_process(data_batch, manager, args, num_workers=32)
 
     score_list = []
     selected_score_list = []
@@ -387,12 +192,13 @@ def process_single_data_for_each_gpu(
         }
         result = manager.process_single_item(item, args)
         score = result['raw_avg_reward']
-        selected_score = pass_rate(result['paths'])
+        selected_score = [pass_rate(paths) for paths in result['paths']]
+
         score_list.extend(score)
         selected_score_list.extend(selected_score)
         avg_score = sum(score_list) / len(score_list)
         avg_selected_score = sum(selected_score_list) / len(selected_score_list)
-        print(f"score: {score:.4f}, avg_score: {avg_score:.4f}, avg_selected_score: {avg_selected_score:.4f}")
+        print(f"avg_score: {avg_score:.4f}, avg_selected_score: {avg_selected_score:.4f}")
     print(f"GPU {gpu_id} finished processing. Scores: {avg_score:.4f}")
 
     avg_score = sum(score_list) / len(score_list)
@@ -410,14 +216,13 @@ def process_single_data_for_each_gpu(
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2, cls=EnumJSONEncoder)
 
+
 def process_single_data_for_each_gpu_mcts(
     data_batch, gpu_id, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
 ):
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     args = {
-        "temperature": 1.0, 
-        "top_p": 0.9, 
-        "eos_tokens": eos_tokens,
+        # MCTS parameters
         "max_depth": 40, # 最大树深
         "max_node_per_depth": 18, # 每层最大节点数
         "max_nodes": 256, # 最大节点数
@@ -426,10 +231,7 @@ def process_single_data_for_each_gpu_mcts(
         "shallow_enwide": False, # "Shallow and wide"（浅而宽）一种广度优先倾向的MCTS变体
         "prompt_key": "problem", 
         "answer_key": "golden_answer", 
-        "backbone": "qwen", 
-        "use_all_terminals": True,
-        "path_num": 30, # 最终选择的轨迹数量, 用于评测
-        "pass_k": 30, # 无用参数，功能同 path_num
+        "backbone": "qwen",
         "concurrent_num": 4, # 每次选择扩展的节点数量，也是每次并行推理的数量
         "first_token_temperature": 0, # 生成子节点时, 第一个 token 的 temperature, 用于增加多样性
         "exploration_constant": 0.5, # (node.value+offset+1e-8)/2 + self.exploration_constant * math.sqrt(math.log(node.parent.visits + 1) / (node.visits + self.epsilon))
@@ -438,20 +240,31 @@ def process_single_data_for_each_gpu_mcts(
         "prompt_max_len": 4096,
         "max_token_num": 4096,
         "max_time_use": 360, 
-        "step_level_norm": False,
         "random_pick": True, # 每次选择扩展节点时，是否随机选择
-        "use_orm_reward": False,
-        "select_correct_leaf": False, # 是否至少选择一个正确的叶子节点
-        "use_chain_reward":  False,
-        "use_state_value_reward": False,
-        "use_value_only": False,
-        "use_pure_RM": False,
+        # Generating parameters
+        "temperature": 1.0,
+        "top_p": 0.9,
+        "eos_tokens": eos_tokens,
+        # Evaluating node parameters
         "use_pure_binary": True,
-        "average_one_generation": False,
-        "advantage_mix_allancestor": False,
-        "use_weighted_value": False,
+        "use_pure_RM": False,
         "a": 0.5,
         "b": 0.5,
+        # Selecting terminals parameters
+        "path_num": 30, # 最终选择的轨迹数量, 用于评测
+        "pass_k": 30, # 无用参数，功能同 path_num 
+        "select_correct_leaf": False, # 是否至少选择一个正确的叶子节点
+        "use_weighted_value": False,
+        "use_all_terminals": True,
+        # Gathering paths parameters
+        "use_orm_reward": False,
+        "use_chain_reward":  False,
+        "step_level_norm": False,
+        "use_state_value_reward": False,
+        "use_value_only": False,
+        "average_one_generation": False,
+        "advantage_mix_allancestor": False,
+        # Custom parameters
         "use_api_generation": "gpt" in tokenizer_path.lower(),
         "enable_info": False,
         "check_step_validity": False,
@@ -472,29 +285,6 @@ def process_single_data_for_each_gpu_mcts(
     else:
         tokenizer = tiktoken.encoding_for_model(tokenizer_path)
         llm = None
-
-    # score_list = parallel_process_mcts(
-    #     data_batch=data_batch,
-    #     args=args,
-    #     llm=llm,
-    #     tokenizer=tokenizer,
-    #     tokenize_fn=tokenize_fn,
-    #     detokenize_fn=detokenize_fn,
-    #     eos_tokens_set=eos_tokens,
-    #     system_prompt=system_prompt,
-    #     num_workers=1
-    # )
-    # avg_score = sum(score_list) / len(score_list)
-    # results = {
-    #     "args": args,
-    #     "avg_score": avg_score,
-    #     "score_list": score_list,
-    #     "num_samples": len(score_list)
-    # }
-
-    # output_file = f"results/{'GPT4o-mini' if args['use_api_generation'] else tokenizer_path.split('/')[-1]}_temp_{args['temperature']}_random_select.json"
-    # with open(output_file, "w") as f:
-    #     json.dump(results, f, indent=2, cls=EnumJSONEncoder)
     
     score_list = []
     for data in tqdm(data_batch, desc=f"GPU {gpu_id} progress"):

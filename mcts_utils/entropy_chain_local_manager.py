@@ -40,8 +40,6 @@ class EntropyGuidedChainLocalManager:
         tokenizer: Any,
         encode_fn: Callable,
         decode_fn: Callable,
-        # evaluator_urls: List[str],
-        # extractor_urls: List[str],
         eos_tokens_set: List[int]
     ):
         """
@@ -54,8 +52,6 @@ class EntropyGuidedChainLocalManager:
         """
         self.args = args
         self.llm = llm
-        # self.evaluator_urls = evaluator_urls
-        # self.extractor_urls = extractor_urls
         self.tokenizer = tokenizer
         self.eos_tokens_set = eos_tokens_set
         self.encode_fn = encode_fn
@@ -103,7 +99,7 @@ class EntropyGuidedChainLocalManager:
             binary_score = 0
 
         if args["use_pure_binary"]:
-            final_score = sum(node.segment_scores) / len(node.segment_scores) if node.segment_scores else 0
+            final_score = binary_score
             return binary_score, final_score
 
         # Get reward model score
@@ -489,16 +485,12 @@ class EntropyGuidedChainLocalManager:
         else:
             paths = self.entropy_guided_chain(problems, answers, system_prompt=system_prompt, args=args)
         
-        results = [
-            {
-                "problem": problems[i],
-                "golden_answer": answers[i],
-                "paths": paths[i],
-                "raw_avg_reward": raw_avg_reward[i] if args["training_type"] == "general" else None
-            } 
-            for i in range(len(paths))
-        ]
-
+        results = {
+            "problem": problems,
+            "golden_answer": answers,
+            "paths": paths,
+            "raw_avg_reward": raw_avg_reward if args["training_type"] == "general" else None
+        }
         return results
 
     def select_diverse_tokens(self, token_indices, scores, n):

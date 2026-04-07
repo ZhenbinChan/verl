@@ -29,6 +29,7 @@ class MCTSNode(BaseModel):
     finish_reason: Optional[str] = None
     reward_raw: float = None
     visits: int = 0
+    heuristic: float = 0
 
     def __repr__(self):
         return f"MCTSNode(answer={self.answer}, value={self.value:.2f}, visits={self.visits})"
@@ -129,19 +130,29 @@ class TreeNode:
         self.binary_score: Optional[float] = None
         self.score: Optional[float] = None
 
-        # --- 节点划分 ---
+        # --- 节点的划分 ---
         self.segments = [0] + [i + 1 for i, token_str in enumerate(self.token_str_list) if '\n\n' in token_str]
         self.token_id2segment_id = [0] * len(self.token_id_list)
         for i in range(len(self.segments) - 1):
             start, end = self.segments[i], self.segments[i + 1]
             for j in range(start, end):
                 self.token_id2segment_id[j] = i
+        self.heuristic = 0
 
         # --- 节点的蕴含信息（分段） ---
         self.evaluation_strategy = kwargs.get('evaluation_strategy', 'token-entropy')
-        self.parent_implication = kwargs.get('parent_implication', [])
+        self.token_score = []
+        self.segment_scores = []
         self.implication = []
+        self.aggregate_implication = kwargs.get('aggregate_implication', [])
         self.compute_token_score(**kwargs)
+
+        self.aggregate_segment_scores = []
+        if parent_node is not None:
+            self.aggregate_segment_scores = parent_node.aggregate_segment_scores + \
+                parent_node.segment_scores[:parent_node.token_id2segment_id[parent_node_split_idx]]
+        self.all_segment_scores = self.aggregate_segment_scores + self.segment_scores
+        self.heuristic = sum(self.segment_scores) / len(self.segment_scores) if len(self.segment_scores) > 0 else 0
 
     def get_prefix(self, current_token_index: int) -> str:
         """
@@ -163,7 +174,7 @@ class TreeNode:
         return parent_token_ids + self.token_id_list[:current_token_index]
     
     def get_prefix_implication(self, current_token_index: int) -> str:
-        return self.parent_implication + self.implication[:self.token_id2segment_id[current_token_index]]
+        return self.aggregate_implication + self.implication[:self.token_id2segment_id[current_token_index]]
 
     def add_child(self, child_node: 'TreeNode', split_index: int) -> None:
         """
@@ -208,7 +219,7 @@ class TreeNode:
                 + f"Reasoning steps:\n{self.total_str}\n\n" \
                 + f"Z3 Declaration:\n{kwargs['declaration']}"
             try:
-                prefix_implication = construct_implication_prefix(self.parent_implication)
+                prefix_implication = construct_implication_prefix(self.aggregate_implication)
                 implication = get_response(usr_input, system_prompt_z3_implication, prefix_implication)
                 parsed_implication = parse_python_logic_steps(extract_python_code(implication))
                 results_fol = verify_steps_fol(kwargs['declaration'], parsed_implication)
@@ -264,8 +275,6 @@ def build_into_tree_format(
     weighted_value_style="uniform",
     overall_norm_style = "token",
     inner_repetition_penalty=False) -> MCTSNode:
-    # from IPython import embed
-    # embed()
     all_leaves = []
     try:
         def convert_to_json(node: MCTSNode):
@@ -306,14 +315,16 @@ def build_into_tree_format(
             # 存储所有孩子节点的 parent_node_split_idx
             child_split_indices = [child.parent_node_split_idx for child in tree_node.child_nodes]
             
-            # 如果没有孩子节点，设置end_idx为整个token_id_list的长度
             is_terminal = False
             R = 0
+            heuristic = 0
             main_chain = False
             if not child_split_indices:
+                # 如果没有孩子节点，设置end_idx为整个token_id_list的长度
                 first_child_split_idx = len(tree_node.token_id_list)
                 is_terminal = True
                 R = tree_node.score
+                heuristic = tree_node.heuristic
                 if tree_node.binary_score == 1:
                     main_chain = True
             else:
@@ -328,7 +339,8 @@ def build_into_tree_format(
                 terminal=is_terminal,
                 R = R,
                 main_chain = main_chain,
-                finish_reason=tree_node.finish_reason
+                finish_reason=tree_node.finish_reason,
+                heuristic=heuristic,
             )
             
             if root_node.terminal:
@@ -347,6 +359,7 @@ def build_into_tree_format(
                         i += 1
                     is_terminal = False
                     R = 0
+                    heuristic = 0
                     main_chain = False
                     if i < len(tree_node.child_nodes):
                         next_split_idx = child_split_indices[i]
@@ -354,6 +367,7 @@ def build_into_tree_format(
                         next_split_idx = len(tree_node.token_id_list)
                         is_terminal = True
                         R = tree_node.score
+                        heuristic = tree_node.heuristic
                         if tree_node.binary_score == 1:
                             main_chain = True
                     
@@ -367,6 +381,7 @@ def build_into_tree_format(
                         R = R,
                         main_chain = main_chain,
                         finish_reason=tree_node.finish_reason,
+                        heuristic=heuristic,
                     )
                     current_mcts_node.children.append(segment_node)
                     if segment_node.terminal:
@@ -397,22 +412,17 @@ def build_into_tree_format(
             if len(tree_list) > 0:
                 root.children.append(build_tree_node(decode_fn, tree_list[0], root))
         
-        leaf_normalize(all_leaves,root, average_one_generation,overall_norm_style,inner_repetition_penalty)
+        leaf_normalize(all_leaves, root, average_one_generation, overall_norm_style, inner_repetition_penalty)
         if use_all_terminals:
-            # print("use all terminals into training")
             selected_terminals = all_leaves
         else:
-            selected_terminals = select_terminal(all_leaves, num_traces,balance_ratio)
+            selected_terminals = select_terminal(all_leaves, num_traces, balance_ratio)
 
         if use_weighted_value:
             print("weighted value")
             for leaf in selected_terminals:
                 selected_backpropagate(leaf)
-            # assert weighted_value_style == "sqrt"
             compute_weighted_update(root, reweighted_value_style=weighted_value_style)
-        # with open("/workspace/lurui/openrlhf-glm/logs/outputs/entropy_tree_glm.jsonl","a") as f:
-        #     f.write(json.dumps(convert_to_json(root)))
-        #     f.write("\n")
         return root, selected_terminals
     except Exception as e:
         import traceback
@@ -528,11 +538,12 @@ def compute_accumulated_value(node: MCTSNode):
     node.accumulated_value = total_value / terminal_children if terminal_children > 0 else 0
     return node.accumulated_value
 
-def select_terminal(nodes, num_traces, balance_ratio = 0):
-    nodes.sort(key=lambda x: x.R, reverse=True)
-    return nodes[:num_traces]
-
-    if balance_ratio == 0:
+def select_terminal(nodes: List[MCTSNode], num_traces: int, balance_ratio: float = 0):
+    if balance_ratio < 0:
+        nodes.sort(key=lambda x: x.heuristic, reverse=True)
+        return nodes[:num_traces]
+    
+    elif balance_ratio == 0:
         random.shuffle(nodes)
         selected_terminals = []
         remaining_terminals = []
