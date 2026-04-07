@@ -948,13 +948,15 @@ def check_steps_format(steps_text: str) -> Tuple[bool, List[Dict], List[str]]:
     """
     # 分割step，假设以\n\n分隔
     step_blocks = re.split(r'\n\s*\n', steps_text.strip())
-    
+
     all_results = []
     all_errors = []
     all_valid = True
     
     for i, block in enumerate(step_blocks):
         block = block.strip()
+        if block.startswith("["): # NOTE: special case for prompt [Synthesis of all options and logical nodes]
+            break
         if not block:
             continue
             
@@ -1349,7 +1351,7 @@ def query_local_vllm_ids_with_logprobs(
     return None, None, None, None, None
 
 
-def query_openai_api_with_logprobs(
+def query_openai_api_with_logprobs_slow(
     messages,
     n: int = 1,
     max_tokens: int = 4096,
@@ -1386,9 +1388,9 @@ def query_openai_api_with_logprobs(
                     log_probs = [token_logprob.logprob for token_logprob in choice.logprobs.content]
                     
                     # 组织数据结构以匹配原函数格式
-                    content_token_list.append([generated_tokens])
-                    content_str_list.append([generated_text])
-                    finish_reason_list.append([choice.finish_reason])
+                    content_token_list.append(generated_tokens)
+                    content_str_list.append(generated_text)
+                    finish_reason_list.append(choice.finish_reason)
                     token_num_list.append([len(generated_tokens)])
                     log_probs_list.append(log_probs)
                 
@@ -1403,3 +1405,69 @@ def query_openai_api_with_logprobs(
             time.sleep(sleep_time)
     
     return None, None, None, None, None
+
+
+async def query_openai_api_with_logprobs(
+    messages,
+    n: int = 1,
+    max_tokens: int = 2048,
+    stops: Optional[List[str]] = None,
+    temperature: float = 0.9,
+    top_p: float = 0.9,
+    model: str = "gpt-4o-mini-2024-07-18",
+    tokenizer: Any = None,
+):
+    content_token_list = []
+    content_str_list = []
+    finish_reason_list = []
+    token_num_list = []
+    log_probs_list = []
+    
+    for try_counter in range(RETRY_COUNT):
+        try:
+            kwargs = {
+                "model": model,
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_tokens": max_tokens,
+                "n": n,
+                "stop": stops if stops else None,
+                "logprobs": True,
+            }
+            
+            responses = await async_api_generate(messages, **kwargs)
+            
+            for response in responses:
+                for choice in response.choices:
+                    generated_text = choice.message.content
+                    generated_tokens = tokenizer.encode(generated_text) if tokenizer else []
+                    log_probs = [token_logprob.logprob for token_logprob in choice.logprobs.content] if choice.logprobs else []
+                    
+                    content_token_list.append(generated_tokens)
+                    content_str_list.append(generated_text)
+                    finish_reason_list.append(choice.finish_reason)
+                    log_probs_list.append(log_probs)
+                    token_num_list.append([len(generated_tokens)])
+            
+            return content_token_list, content_str_list, finish_reason_list, token_num_list, log_probs_list
+            
+        except Exception as e:
+            await asyncio.sleep(1)
+    
+    return None, None, None, None, None
+
+
+def query_openai_api_with_logprobs_fast(*args, **kwargs):
+    # 静音日志
+    original_levels = {}
+    loggers_to_silence = ['httpx', 'openai', 'httpcore']
+    for logger_name in loggers_to_silence:
+        logger = logging.getLogger(logger_name)
+        original_levels[logger_name] = logger.level
+        logger.setLevel(logging.WARNING)
+        
+    result =  asyncio.run(query_openai_api_with_logprobs(*args, **kwargs))
+
+    for logger_name, level in original_levels.items():
+        logging.getLogger(logger_name).setLevel(level)
+    return result

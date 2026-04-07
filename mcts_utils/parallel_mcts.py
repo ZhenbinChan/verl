@@ -183,12 +183,12 @@ def visualize_tree(root, filename="search_tree"):
         answer = getattr(node, 'answer', 'None')
         label = f"Token: {answer[:30]}\n...{answer[-30:]}"
         # 可选：显示 Q值或访问次数
-        if hasattr(node, 'visits'):
-            label += f"\nVisits: {node.visits}"
-        if hasattr(node, 'value'):
-            label += f"\nValue: {node.value:.2f}"
-        if hasattr(node, 'answer_token'):
-            label += f"\nTokens: { len(getattr(node, 'answer_token', []))}"
+        # if hasattr(node, 'visits'):
+        #     label += f"\nVisits: {node.visits}"
+        # if hasattr(node, 'value'):
+        #     label += f"\nValue: {node.value:.2f}"
+        # if hasattr(node, 'answer_token'):
+        #     label += f"\nTokens: { len(getattr(node, 'answer_token', []))}"
         
 
         dot.node(node_id, label=label)
@@ -258,7 +258,10 @@ class EvaluationStrategy(Enum):
     SELF_EVALUATION = 1
     MODEL_EVALUATION = 2
     FOL_EVALUATION = 3
-    RANDOM_EVALUATION = 4
+    NLI_EVALUATION = 4
+    RANDOM_EVALUATION = 5
+    TOKEN_ENTROPY = 6
+    SENTENCE_ENTROPY = 7
 
 class InitializeStrategy(Enum):
     ZERO_SHOT = 1
@@ -297,7 +300,7 @@ class MCTSr(BaseModel):
     temperature: float = 0.9
     top_p: float = 0.9
     llms : List
-    tokenizer: Callable
+    tokenizer: Any
     tokenize_fn :Callable 
     detokenize_fn :Callable
 
@@ -827,7 +830,7 @@ class MCTSr(BaseModel):
                     tokenizer=self.tokenizer
                 )
             end_time = time.time()
-            self.info(f"Generation latency: {end_time - start_time:.2f} seconds",True)
+            self.info(f"Generation latency: {end_time - start_time:.2f} seconds")
 
             # 生成响应后，遍历每个结果，将其封装成 MCTSNode 对象
             for idx, (response_token_list, response_str_list, finish_reason_list, stop_token_list, token_num_list) in enumerate(zip(responses_token, responses_str, finish_reasons, stop_tokens, token_nums)):
@@ -1554,7 +1557,7 @@ def gather_paths(root:MCTSNode,selected_terminals: list[MCTSNode], pass_k: int,u
     paths = []
     if len(selected_terminals) == 0:
         return paths
-    if len(selected_terminals) < pass_k:
+    if len(selected_terminals) != pass_k:
         pass_k = len(selected_terminals)
         # return None
     # terminal_values = normalize_selected_terminals(selected_terminals)

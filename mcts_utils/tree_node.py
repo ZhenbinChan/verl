@@ -5,7 +5,11 @@ from pydantic import BaseModel
 import json
 import random
 from collections import deque
+from utils import *
 
+prompt_dir = "mcts_utils/prompts"
+with open(os.path.join(prompt_dir, "Z3ImplicationConversion1.txt"), "r") as f:
+    system_prompt_z3_implication = f.read()
 
 class MCTSNode(BaseModel):
     answer: str
@@ -24,6 +28,11 @@ class MCTSNode(BaseModel):
     value: float = 0
     finish_reason: Optional[str] = None
     reward_raw: float = None
+    visits: int = 0
+
+    def __repr__(self):
+        return f"MCTSNode(answer={self.answer}, value={self.value:.2f}, visits={self.visits})"
+
 
 class TreeNode:
     def __init__(
@@ -41,6 +50,7 @@ class TreeNode:
         child_nodes: Optional[List['TreeNode']] = None,
         child_split_indices: Optional[List[int]] = None,
         max_length: int = 7144,
+        **kwargs
     ):
         """
         树节点的信息
@@ -76,12 +86,13 @@ class TreeNode:
         self.child_total_num: List[int] = []
 
         # --- 截止到目前的 aggregate 字符串以及所有完整字符串（减少遍历时间，以及用于判断答案） ---
+        self.answer: str = ''.join(self.token_str_list)
         self.aggregate_str: str = ""
         if parent_node is not None:
             parent_token_str_list = parent_node.token_str_list
             self.aggregate_str = parent_node.aggregate_str + \
                 ''.join(parent_token_str_list[:parent_node_split_idx])
-        self.total_str: str = self.aggregate_str + ''.join(self.token_str_list)
+        self.total_str: str = self.aggregate_str + self.answer
 
         self.aggregate_token_ids: List[int] = []
         if parent_node is not None:
@@ -118,42 +129,26 @@ class TreeNode:
         self.binary_score: Optional[float] = None
         self.score: Optional[float] = None
 
+        # --- 节点划分 ---
+        self.segments = [0] + [i + 1 for i, token_str in enumerate(self.token_str_list) if '\n\n' in token_str]
+        self.token_id2segment_id = [0] * len(self.token_id_list)
+        for i in range(len(self.segments) - 1):
+            start, end = self.segments[i], self.segments[i + 1]
+            for j in range(start, end):
+                self.token_id2segment_id[j] = i
+
+        # --- 节点的蕴含信息（分段） ---
+        self.evaluation_strategy = kwargs.get('evaluation_strategy', 'token-entropy')
+        self.parent_implication = kwargs.get('parent_implication', [])
+        self.implication = []
+        self.compute_token_score(**kwargs)
+
     def get_prefix(self, current_token_index: int) -> str:
         """
         给定截断的位置，获取前缀文本，通过迭代构建，从根节点到当前节点。
 
         :return: 拼接后的前缀字符串。
         """
-
-        # # 存储从根节点到当前节点的路径信息
-        # node_path = []
-        # current_node = self
-
-        # # 向上遍历到根节点，收集路径信息
-        # while current_node is not None:
-        #     node_path.append({
-        #         'node': current_node,
-        #         'split_idx': current_node.parent_node_split_idx
-        #     })
-        #     current_node = current_node.parent_node
-
-        # # 从根节点开始构建字符串
-        # result = ""
-        # for i in range(len(node_path) - 1, -1, -1):  # 从后向前遍历（从根到叶）
-        #     node_info = node_path[i]
-        #     node = node_info['node']
-
-        #     if i == 0:  # 当前节点
-        #         result += ''.join(node.token_list[:current_token_index])
-        #     else:  # 父节点们
-        #         split_idx = node_info['split_idx']
-        #         result += ''.join(node.token_list[:split_idx])
-
-        # expected = self.aggregate_str + \
-        #     ''.join(self.token_list[:current_token_index])
-        # assert result == expected, f"Prefix mismatch:\nExpected: {expected}\nGot: {result}"
-        # print("you pass!")
-
         parent_tokens = self.aggregate_str
         return parent_tokens + ''.join(self.token_str_list[:current_token_index])
 
@@ -166,6 +161,9 @@ class TreeNode:
 
         parent_token_ids = self.aggregate_token_ids
         return parent_token_ids + self.token_id_list[:current_token_index]
+    
+    def get_prefix_implication(self, current_token_index: int) -> str:
+        return self.parent_implication + self.implication[:self.token_id2segment_id[current_token_index]]
 
     def add_child(self, child_node: 'TreeNode', split_index: int) -> None:
         """
@@ -177,9 +175,58 @@ class TreeNode:
         self.child_nodes.append(child_node)
         self.child_split_indices.append(split_index)
         child_node.parent_node = self
-        child_node.parent_split_index = split_index
 
-    def get_max_entropy_tokens(self, top_n: int = 1, split_token='.') -> List[int]:
+    def compute_token_score(self, **kwargs) -> None:
+        if self.evaluation_strategy == 'token-entropy':
+            self.token_score = self.log_prob_list
+            self.segment_scores = self.log_prob_list
+            return
+        
+        label2score = {
+            "ENTAILMENT": 1,
+            "NEUTRAL": 0,
+            "CONTRADICTION": -1,
+            "UNKNOWN": 0,
+            "ERROR": 0
+        }
+
+        self.token_score = [0] * len(self.token_str_list)
+        self.segment_scores = []
+
+        if self.evaluation_strategy == 'segment-entropy':
+            for start, end in zip(self.segments[:-1], self.segments[1:]):
+                log_probs = self.log_prob_list[start:end]
+                self.segment_scores.append(sum(log_probs) / len(log_probs))
+
+        elif self.evaluation_strategy in 'nli':
+            parsed_chain = parse_reasoning_steps(self.answer)
+            results_nli = verify_steps_nli(parsed_chain)
+            self.segment_scores = [label2score[result['label']] * result['score'] for result in results_nli]
+
+        elif self.evaluation_strategy == 'fol':
+            usr_input = f"Question:\n{kwargs['question']}\n\n" \
+                + f"Reasoning steps:\n{self.total_str}\n\n" \
+                + f"Z3 Declaration:\n{kwargs['declaration']}"
+            try:
+                prefix_implication = construct_implication_prefix(self.parent_implication)
+                implication = get_response(usr_input, system_prompt_z3_implication, prefix_implication)
+                parsed_implication = parse_python_logic_steps(extract_python_code(implication))
+                results_fol = verify_steps_fol(kwargs['declaration'], parsed_implication)
+                self.implication = parsed_implication
+                self.segment_scores = [label2score[result['label']] * 1.0 for result in results_fol]
+            except Exception as e:
+                pass
+
+        if len(self.segment_scores) == 0:
+            return
+
+        for start, end, score in zip(self.segments[:-1], self.segments[1:], self.segment_scores):
+            self.token_score[start] = score
+            self.mask[start+1:end] = [True] * (end - start - 1)
+        self.mask[end:] = [True] * (len(self.token_str_list) - end)
+
+
+    def get_max_entropy_tokens(self, top_n: int = 1) -> List[int]:
         """
         获取最高熵的token索引，返回top_n个。
         只考虑未被 mask 的 token。
@@ -187,21 +234,14 @@ class TreeNode:
         :param top_n: 需要返回的最高熵token数量。
         :return: 最高熵token的索引列表。
         """
-
-        # 计算每个 token 位置的熵
         entropies = []
-        if split_token is None:
-            for i, log_prob in enumerate(self.log_prob_list):
+        for i, score in enumerate(self.token_score):
+            try:
                 if not self.mask[i]:  # 只考虑未被 mask 的 token
-                    entropy = -log_prob  # 简单地用负对数概率作为熵
+                    entropy = -score  # 简单地用负对数概率作为熵
                     entropies.append((entropy, i))
-        else:
-            mask = [i + 1 for i, token_str in enumerate(self.token_str_list) if split_token in token_str]
-            mask = [0] + mask
-            for start, end in zip(mask[:-1], mask[1:]):
-                log_probs = self.log_prob_list[start:end]
-                entropy = sum(log_probs) / len(log_probs) if log_probs else 0
-                entropies.append((entropy, end))
+            except IndexError:
+                continue
 
         # 按熵值排序并返回前 top_n 个索引
         sorted_indices = sorted(entropies, key=lambda x: x[0], reverse=True)
@@ -357,7 +397,6 @@ def build_into_tree_format(
             if len(tree_list) > 0:
                 root.children.append(build_tree_node(decode_fn, tree_list[0], root))
         
-        
         leaf_normalize(all_leaves,root, average_one_generation,overall_norm_style,inner_repetition_penalty)
         if use_all_terminals:
             # print("use all terminals into training")
@@ -490,6 +529,9 @@ def compute_accumulated_value(node: MCTSNode):
     return node.accumulated_value
 
 def select_terminal(nodes, num_traces, balance_ratio = 0):
+    nodes.sort(key=lambda x: x.R, reverse=True)
+    return nodes[:num_traces]
+
     if balance_ratio == 0:
         random.shuffle(nodes)
         selected_terminals = []
