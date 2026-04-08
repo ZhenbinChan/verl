@@ -243,7 +243,7 @@ class EntropyGuidedChainLocalManager:
                 finish_reason=finish_reason,
                 max_length=max_length,
                 **kwargs
-            ) # 一个完整的response作为一个node， [response]作为tree_list
+            )
             self.tree_lists.append([root_node])
 
         # iterate to expand the trees
@@ -311,7 +311,7 @@ class EntropyGuidedChainLocalManager:
             # prepare the inference
             m_tree_top_n_inputs = []
             task_mapping = {}
-            for i, (tree_idx, node_idx, node, split_idx) in enumerate(expansion_tasks * T):
+            for i, (tree_idx, node_idx, node, split_idx) in enumerate(repeat_lst(expansion_tasks, T)):
                 node.mask[split_idx] = True  # mark the token as masked to avoid repeated expansion in the next iterations
                 prefix_ids = node.get_prefix_ids(split_idx)
                 prefix_input = prefix_ids if not self.use_api_generation else \
@@ -401,12 +401,12 @@ class EntropyGuidedChainLocalManager:
 
         # above is serial evaluation, below is parallel evaluation
         eval_time_start = time.time()
-        pass_k_results = self.evaluate_trees(problems, answers, args)
+        results_per_tree = self.evaluate_trees(problems, answers, args)
         pass_k_results = [
             [
                 item
                 for j in range(M)
-                for item in pass_k_results[i * M + j]
+                for item in results_per_tree[i * M + j]
             ]
             for i in range(batch_size)
         ]

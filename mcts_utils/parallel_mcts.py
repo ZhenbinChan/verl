@@ -181,7 +181,10 @@ def visualize_tree(root, filename="search_tree"):
         # 节点标签：显示 token 或 value
         # 根据你的 TreeNode 属性调整（例如 node.token, node.text, node.value
         answer = getattr(node, 'answer', 'None')
-        label = f"Token: {answer[:30]}\n...{answer[-30:]}"
+        numSegments = answer.count("\n\n") + 1 if isinstance(answer, str) else 0
+        # isCorrect = getattr(node, 'main_chain', False)
+        ratio = node.correct_terminal_in_subtree / node.terminal_in_subtree
+        label = f"ratioCorrect: {ratio}\nnumSegments: {numSegments}"
         # 可选：显示 Q值或访问次数
         # if hasattr(node, 'visits'):
         #     label += f"\nVisits: {node.visits}"

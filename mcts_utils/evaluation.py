@@ -1287,7 +1287,8 @@ def query_local_vllm_ids_with_logprobs(
         skip_special_tokens=skip_special_tokens,
         stop_token_ids=stops,
         n=n,
-        logprobs=True
+        logprobs=True,
+        # repetition_penalty=1.1, # prevent repetition
     )
 
     content_token_id_lists: List[List[int]] = []

@@ -131,7 +131,9 @@ class TreeNode:
         self.score: Optional[float] = None
 
         # --- 节点的划分 ---
-        self.segments = [0] + [i + 1 for i, token_str in enumerate(self.token_str_list) if '\n\n' in token_str]
+        self.segments = [0] + [i + 1 for i, token_str in enumerate(self.token_str_list) if '\n\n' in token_str] + [len(self.token_str_list)]
+        # if self.segments[-1] != len(self.token_str_list):
+        #     self.segments.append(len(self.token_str_list))
         self.token_id2segment_id = [0] * len(self.token_id_list)
         for i in range(len(self.segments) - 1):
             start, end = self.segments[i], self.segments[i + 1]
@@ -152,7 +154,7 @@ class TreeNode:
             self.aggregate_segment_scores = parent_node.aggregate_segment_scores + \
                 parent_node.segment_scores[:parent_node.token_id2segment_id[parent_node_split_idx]]
         self.all_segment_scores = self.aggregate_segment_scores + self.segment_scores
-        self.heuristic = sum(self.segment_scores) / len(self.segment_scores) if len(self.segment_scores) > 0 else 0
+        self.heuristic = sum(self.all_segment_scores) / len(self.all_segment_scores)
 
     def get_prefix(self, current_token_index: int) -> str:
         """
@@ -229,7 +231,7 @@ class TreeNode:
                 pass
 
         if len(self.segment_scores) == 0:
-            return
+            self.segment_scores = [0] * (len(self.segments) - 1)
 
         for start, end, score in zip(self.segments[:-1], self.segments[1:], self.segment_scores):
             self.token_score[start] = score
@@ -247,12 +249,9 @@ class TreeNode:
         """
         entropies = []
         for i, score in enumerate(self.token_score):
-            try:
-                if not self.mask[i]:  # 只考虑未被 mask 的 token
-                    entropy = -score  # 简单地用负对数概率作为熵
-                    entropies.append((entropy, i))
-            except IndexError:
-                continue
+            if not self.mask[i]:  # 只考虑未被 mask 的 token
+                entropy = -score  # 简单地用负对数概率作为熵
+                entropies.append((entropy, i))
 
         # 按熵值排序并返回前 top_n 个索引
         sorted_indices = sorted(entropies, key=lambda x: x[0], reverse=True)

@@ -180,7 +180,7 @@ def process_single_data_for_each_gpu(
             "Question": batch["Question"].tolist(),
             "Answer": batch["Answer"].tolist()
         }
-        for _, batch in df.groupby(df.index // 128)
+        for _, batch in df.groupby(df.index // 1)
     ]
 
     score_list = []
