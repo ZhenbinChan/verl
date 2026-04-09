@@ -1066,18 +1066,6 @@ def model_reward_generation(question, response, is_terminal=False):
         reward = 0.0
     return reward
 
-def get_fol_reward(question_prompt, response):
-    from nl2fol import fol_prepocessing, translate_and_execute_fol
-    context_match = re.search(r"<Context>(.*?)</Context>", question_prompt, re.DOTALL)
-    context = context_match.group(1).strip() if context_match else None
-    question_match = re.search(r"<Question>(.*?)</Question>", question_prompt, re.DOTALL)
-    question = question_match.group(1).strip() if question_match else None
-    options_match = re.search(r"<Options>(.*?)</Options>", question_prompt, re.DOTALL)
-    options = options_match.group(1).strip() if options_match else None
-    declaration = fol_prepocessing(context, question, options)
-    reward = float(translate_and_execute_fol(declaration=declaration, sentences=response))
-    return reward
-
 # general-math-code-RM
 import random
 import requests

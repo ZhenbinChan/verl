@@ -2,8 +2,12 @@ import time
 import math
 from typing import List, Dict, Any, Callable
 import json
-from tree_node import TreeNode, build_into_tree_format
-from parallel_mcts import gather_paths, print_tree
+from tree_node import (
+    TreeNode, 
+    build_into_tree_format, 
+    gather_paths, 
+    print_tree
+)
 from evaluation import (
     check_result,
     query_local_vllm_completions_with_logprobs,
@@ -53,9 +57,10 @@ class EntropyGuidedChainLocalManager:
         self.args = args
         self.llm = llm
         self.tokenizer = tokenizer
-        self.eos_tokens_set = eos_tokens_set
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
+        self.eos_tokens_set = eos_tokens_set
+
         self.paths: Dict[str, Any] = {
             "M": args["m"],
             "N": args["n"],

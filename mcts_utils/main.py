@@ -2,10 +2,8 @@ import random
 from vllm import LLM
 from transformers import AutoTokenizer
 from entropy_chain_local_manager import EntropyGuidedChainLocalManager
-from parallel_mcts import (
-    MCTSr,
-    SelectionPolicy,
-    EvaluationStrategy,
+from parallel_mcts_local_manager import ParallelMCTSLocalManager
+from tree_node import (
     gather_paths,
     pass_rate, 
     visualize_tree, 
@@ -28,86 +26,12 @@ class EnumJSONEncoder(JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Enum):
             return obj.name
-        return super().default(obj)
-
-
-def select_paths_with_ratio(paths, num_traces=32):
-    # Shuffle the paths to ensure random selection order
-    random.shuffle(paths)
-
-    selected_paths = []
-    remaining_paths = []
-
-    # Traverse the shuffled paths and select the first pass_ratio == 1 path
-    for path in paths:
-        if path[-1]["pass_ratio"] == 1 and len(selected_paths) == 0:
-            selected_paths.append(path)
-        else:
-            remaining_paths.append(path)
-
-    # Calculate how many additional paths we need
-    remaining_num_traces = num_traces - len(selected_paths)
-
-    # Randomly select remaining_num_traces paths from the remaining_paths if possible
-    if remaining_num_traces > 0:
-        selected_paths.extend(random.sample(remaining_paths, min(
-            remaining_num_traces, len(remaining_paths))))
-
-    # Shuffle the selected paths to ensure they are returned in random order
-    random.shuffle(selected_paths)
-    assert len(
-        selected_paths) == num_traces, f"len(selected_paths) = {len(selected_paths)} != num_traces = {num_traces}"
-
-    return selected_paths
-
-
-def normalize_selected_terminals(paths):
-    leaf_orm_value = [path[-1]["value"] for path in paths]
-    _sum = sum(leaf_orm_value)
-    num = len(leaf_orm_value) - 1
-    if num == 0:
-        return paths
-    else:
-        mean = [(_sum - leaf_orm_value[i]) /
-                num for i in range(len(leaf_orm_value))]
-        orm_normalized = [leaf_orm_value[i] - mean[i]
-                          for i in range(len(leaf_orm_value))]
-        for i in range(len(orm_normalized)):
-            paths[i][-1]["value"] = orm_normalized[i]
-        return paths
-    
-
-def parallel_entropy_guided_tree(
-    item,
-    llm,
-    # tokenizer,
-    args=None,
-    tokenize_fn=None,
-    decode_fn=None,
-    system_prompt=None,
-):
-    manager = EntropyGuidedChainLocalManager(
-        args=args,
-        llm=llm,
-        encode_fn=tokenize_fn,
-        decode_fn=decode_fn,
-        evaluator_urls=args['evaluator_urls'],
-        extractor_urls=args['extractor_urls'],
-        eos_tokens_set=args['eos_tokens'],
-    )
-
-    result = manager.process_single_item(item, args)
-    paths = result["paths"]
-    if args["training_type"] == "general":
-        raw_avg_reward = result["raw_avg_reward"]
-        return paths, raw_avg_reward
-    return paths
+        return super().default(obj)  
 
 
 def process_single_data_for_each_gpu(
-    data_batch, gpu_id, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
+    data_batch, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
 ):
-    # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     args = {
         # TreeRL parameters
         "m": 1,
@@ -115,12 +39,12 @@ def process_single_data_for_each_gpu(
         "l": 3,
         "t": 3,
         "training_type": "general",
-        "system_prompt": system_prompt,
         "generate_max_len" : 4096, # 每轮迭代生成的最大 token 数
         "use_diverse_sampling" : False, # 选择TopK中最多样的轨迹进行迭代
         # Generating parameters
         "temperature": 1.0,
         "top_p": 0.9,
+        "system_prompt": system_prompt,
         "eos_tokens": eos_tokens,
         # Evaluating node parameters
         "use_pure_binary": True, # node.score = reward where reward = 1 / 0
@@ -159,6 +83,10 @@ def process_single_data_for_each_gpu(
             tensor_parallel_size=1,
             trust_remote_code=True,
             gpu_memory_utilization=0.8,
+            enable_prefix_caching=False,  # 禁用前缀缓存
+            chunked_prefill_enabled=False,  # 禁用分块预填充
+            max_num_batched_tokens=8192,  # 这个比batch_size更重要
+            max_num_seqs=128,             # 限制并发序列数
             seed=3407,
         )
     else:
@@ -174,18 +102,9 @@ def process_single_data_for_each_gpu(
         eos_tokens_set=eos_tokens,
     )
 
-    df = pd.DataFrame(data_batch)
-    data_batch = [
-        {
-            "Question": batch["Question"].tolist(),
-            "Answer": batch["Answer"].tolist()
-        }
-        for _, batch in df.groupby(df.index // 1)
-    ]
-
     score_list = []
     selected_score_list = []
-    for data in tqdm(data_batch, desc=f"GPU {gpu_id} progress"):
+    for data in tqdm(data_batch, desc=f"Progress"):
         item = {
             "problem": data["Question"],
             "golden_answer": data["Answer"],
@@ -196,13 +115,12 @@ def process_single_data_for_each_gpu(
 
         score_list.extend(score)
         selected_score_list.extend(selected_score)
+
         avg_score = sum(score_list) / len(score_list)
         avg_selected_score = sum(selected_score_list) / len(selected_score_list)
         print(f"avg_score: {avg_score:.4f}, avg_selected_score: {avg_selected_score:.4f}")
-    print(f"GPU {gpu_id} finished processing. Scores: {avg_score:.4f}")
+    print(f"Finished processing. Scores: {avg_score:.4f}, avg_selected_score: {avg_selected_score:.4f}")
 
-    avg_score = sum(score_list) / len(score_list)
-    avg_selected_score = sum(selected_score_list) / len(selected_score_list)
     results = {
         "args": args,
         "avg_score": avg_score,
@@ -212,15 +130,14 @@ def process_single_data_for_each_gpu(
         "num_samples": len(score_list)
     }
 
-    output_file = f"results/{'GPT4o-mini' if args['use_api_generation'] else tokenizer_path.split('/')[-1]}_tau_{args['temperature']}_mnlt_{args['m']}_{args['n']}_{args['l']}_{args['t']}_{args['evaluation_strategy']}.json"
+    output_file = f"results/{tokenizer_path.split('/')[-1]}_tau_{args['temperature']}_mnlt_{args['m']}_{args['n']}_{args['l']}_{args['t']}_{args['evaluation_strategy']}.json"
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2, cls=EnumJSONEncoder)
 
 
 def process_single_data_for_each_gpu_mcts(
-    data_batch, gpu_id, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
+    data_batch, tokenizer_path, tokenize_fn, detokenize_fn, eos_tokens, system_prompt=None
 ):
-    # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     args = {
         # MCTS parameters
         "max_depth": 40, # 最大树深
@@ -242,6 +159,7 @@ def process_single_data_for_each_gpu_mcts(
         "max_time_use": 360, 
         "random_pick": True, # 每次选择扩展节点时，是否随机选择
         # Generating parameters
+        "system_prompt": system_prompt,
         "temperature": 1.0,
         "top_p": 0.9,
         "eos_tokens": eos_tokens,
@@ -268,7 +186,7 @@ def process_single_data_for_each_gpu_mcts(
         "use_api_generation": "gpt" in tokenizer_path.lower(),
         "enable_info": False,
         "check_step_validity": False,
-        "evaluation_strategy": EvaluationStrategy.MODEL_EVALUATION
+        "evaluation_strategy": "model-evaluation"
     }
     if not args["use_api_generation"]:    
         tokenizer = AutoTokenizer.from_pretrained(
@@ -279,78 +197,40 @@ def process_single_data_for_each_gpu_mcts(
             model=tokenizer_path,
             tensor_parallel_size=1,
             trust_remote_code=True,
-            gpu_memory_utilization=0.75,
+            gpu_memory_utilization=0.8,
             seed=3407,
         )
     else:
         tokenizer = tiktoken.encoding_for_model(tokenizer_path)
         llm = None
     
+    manager = ParallelMCTSLocalManager(
+        args=args,
+        llm=llm,
+        tokenizer=tokenizer,
+        encode_fn=tokenize_fn,
+        decode_fn=detokenize_fn,
+        eos_tokens_set=eos_tokens,
+    )
+    
     score_list = []
-    for data in tqdm(data_batch, desc=f"GPU {gpu_id} progress"):
-        problem = data["Question"]
-        answer = data["Answer"]
+    for data in tqdm(data_batch, desc=f"Progress"):
+        item = {
+            "problem": data["Question"],
+            "golden_answer": data["Answer"],
+        }
+        result = manager.process_single_item(item, args)
 
-        mcts = MCTSr(
-            temperature=args["temperature"],
-            top_p=args["top_p"],
-            problem=problem,
-            golden_answer=answer,
-            max_nodes=args["max_nodes"],
-            max_node_per_depth = args["max_node_per_depth"],
-            max_children=args["max_children"],
-            min_children=args["min_children"],
-            shallow_enwide = args["shallow_enwide"],
-            max_depth=args["max_depth"],
-            random_pick = args["random_pick"],
-            exploration_constant=args["exploration_constant"],
-            selection_policy=SelectionPolicy.GREEDY,
-            backbone=args["backbone"],
-            pass_k=args["pass_k"],
-            backprop=args["backprop"],
-            first_token_temperature=args["first_token_temperature"],
-            look_ahead=args["look_ahead"],
-            llms=[llm],
-            tokenizer=tokenizer,
-            tokenize_fn = tokenize_fn,
-            detokenize_fn = detokenize_fn,
-            concurrent_num=args["concurrent_num"],
-            path_num = args["path_num"],
-            prompt_max_len = args["prompt_max_len"],
-            max_token_num = args["max_token_num"],
-            max_time_use = args["max_time_use"],
-            step_level_norm = args["step_level_norm"],
-            use_weighted_value = args["use_weighted_value"],
-            use_orm_reward = args["use_orm_reward"],
-            select_correct_leaf = args["select_correct_leaf"],
-            use_chain_reward = args["use_chain_reward"],
-            use_state_value_reward = args["use_state_value_reward"],
-            use_value_only = args["use_value_only"],
-            use_pure_RM = args["use_pure_RM"],
-            use_pure_binary = args["use_pure_binary"],
-            system_prompt=system_prompt,
-            average_one_generation = args["average_one_generation"],
-            a = args["a"],
-            b = args["b"],
-            eos_tokens_set=args['eos_tokens'],
-            # custom
-            use_api_generation=args["use_api_generation"],
-            enable_info=args["enable_info"],
-            evaluation_strategy=args["evaluation_strategy"],
-            check_step_validity=args["check_step_validity"]
-        )
-        
-        mcts.run()
         paths = gather_paths(
-            mcts.root,
-            mcts.selected_terminals,
+            result["root"],
+            result["selected_terminals"],
             args["path_num"],
-            use_orm_reward=mcts.use_orm_reward,
-            use_chain_reward=mcts.use_chain_reward,
-            step_level_norm=mcts.step_level_norm,
-            use_state_value_reward=mcts.use_state_value_reward,
-            use_value_only=mcts.use_value_only,
-            average_one_generation=mcts.average_one_generation,
+            use_orm_reward=args["use_orm_reward"],
+            use_chain_reward=args["use_chain_reward"],
+            step_level_norm=args["step_level_norm"],
+            use_state_value_reward=args["use_state_value_reward"],
+            use_value_only=args["use_value_only"],
+            average_one_generation=args["average_one_generation"],
             advantage_mix_allancestor=args["advantage_mix_allancestor"]
         )
         print(f"Gathered {len(paths)} paths.")
@@ -358,9 +238,9 @@ def process_single_data_for_each_gpu_mcts(
         score_list.append(score)
         avg_score = sum(score_list) / len(score_list)
         print(f"score: {score:.4f}, avg_score: {avg_score:.4f}, sample_num: {len(score_list)}")
-        # visualize_tree(mcts.root)
-        # print_tree(mcts.root)
-    print(f"GPU {gpu_id} finished processing. Scores: {avg_score:.4f}")
+        # visualize_tree(result["root"])
+        # print_tree(result["root"])
+    print(f"Finished processing. Scores: {avg_score:.4f}")
 
 
 if __name__ == '__main__':
@@ -372,7 +252,6 @@ if __name__ == '__main__':
         SYSTEM_PROMPT = f.read()
 
     eval_path = "data/logiqa.jsonl"
-    num_gpus = 1
 
     use_api_generation = "gpt" in MODEL_PATH.lower()
     if not use_api_generation:
@@ -426,20 +305,15 @@ if __name__ == '__main__':
     with open(eval_path, "r", encoding="utf-8") as f:
         datas = [json.loads(line) for line in f]
 
-    # Split data across GPUs
-    data_batches = [datas[i::num_gpus] for i in range(num_gpus)]
+    df = pd.DataFrame(datas)
+    data_batch = [
+        {
+            "Question": batch["Question"].tolist(),
+            "Answer": batch["Answer"].tolist()
+        }
+        for _, batch in df.groupby(df.index // 1)
+    ]
 
-    # Create a process for each GPU
-    processes = []
-    process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, SYSTEM_PROMPT)
-    # process_single_data_for_each_gpu_mcts(data_batches[0][:], 0, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, system_prompt=SYSTEM_PROMPT)
+    # process_single_data_for_each_gpu(data_batch, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, SYSTEM_PROMPT)
+    process_single_data_for_each_gpu_mcts(data_batch, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, SYSTEM_PROMPT)
     
-    # for gpu_id, data_batch in enumerate(data_batches):
-    #     p = Process(target=process_single_data_for_each_gpu, args=(
-    #         data_batch, gpu_id, MODEL_PATH, evaluator_urls, extractor_urls, eos_tokens, tokenize_fn))
-    #     processes.append(p)
-    #     p.start()
-
-    # # Wait for all processes to complete
-    # for p in processes:
-    #     p.join()

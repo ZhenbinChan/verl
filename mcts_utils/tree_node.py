@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Any
 from pydantic import BaseModel
 import json
 import random
@@ -211,7 +211,7 @@ class TreeNode:
                 log_probs = self.log_prob_list[start:end]
                 self.segment_scores.append(sum(log_probs) / len(log_probs))
 
-        elif self.evaluation_strategy in 'nli':
+        elif self.evaluation_strategy == 'nli':
             parsed_chain = parse_reasoning_steps(self.answer)
             results_nli = verify_steps_nli(parsed_chain)
             self.segment_scores = [label2score[result['label']] * result['score'] for result in results_nli]
@@ -228,7 +228,9 @@ class TreeNode:
                 self.implication = parsed_implication
                 self.segment_scores = [label2score[result['label']] * 1.0 for result in results_fol]
             except Exception as e:
-                pass
+                parsed_chain = parse_reasoning_steps(self.answer)
+                results_nli = verify_steps_nli(parsed_chain)
+                self.segment_scores = [label2score[result['label']] * result['score'] for result in results_nli]
 
         if len(self.segment_scores) == 0:
             self.segment_scores = [0] * (len(self.segments) - 1)
@@ -629,3 +631,213 @@ def compute_weighted_update(node: MCTSNode, reweighted_value_style="original"):
     
     for child in node.children:
         compute_weighted_update(child, reweighted_value_style=reweighted_value_style)
+
+
+
+def normalize_selected_terminals(selected_terminals: list[MCTSNode]):
+    leaf_orm_value = [leaf.accumulated_value for leaf in selected_terminals]
+    _sum = sum(leaf_orm_value)
+    num = len(leaf_orm_value) - 1
+    if num == 0:
+        return leaf_orm_value
+    else:
+        mean = [(_sum - leaf_orm_value[i]) / num for i in range(len(leaf_orm_value))]
+        orm_normalized = [leaf_orm_value[i] - mean[i] for i in range(len(leaf_orm_value))]
+        return orm_normalized
+
+def fill_in_paths(paths):
+    # 对于每个路径，如果存在"value"=0，就用他的前一个节点的"value"填充
+    for path in paths:
+        for i in range(1,len(path)):
+            epsilon = 1e-8
+            if abs(path[i]["value"]) < epsilon: 
+            # if path[i]["value"] == 0:
+                assert i > 0, "value=0 in the first node"
+                assert path[i]["value"] < epsilon  and path[i]["value"] > -epsilon, "value is not 0"
+                # print("fill in value",path[i-1]["value"])
+                path[i]["value"] = path[i-1]["value"]
+    return paths
+
+def normalize_all_paths(paths,step_level_norm = False):
+    # 对所有路径进行归一化
+    if step_level_norm:
+        state_value_sum = 0
+        state_value_num = 0
+        for path in paths:
+            for node in path:
+                state_value_sum += node["state_value"]
+                state_value_num += 1
+        if state_value_num == 0:
+            mean = 0
+        else:
+            mean = state_value_sum/state_value_num
+        for path in paths:
+            for node in path:
+                node["state_value"] = node["state_value"] - mean
+        return paths
+    else:
+        state_value_sum = 0
+        state_value_num = 0
+        for path in paths:
+            for node in path:
+                state_value_sum += node["state_value"]*len(node["token_answer"])
+                state_value_num += len(node["token_answer"])
+        if state_value_num == 0:
+            mean = 0
+        else:
+            mean = state_value_sum/state_value_num
+        for path in paths:
+            for node in path:
+                node["state_value"] = node["state_value"] - mean
+        return paths
+
+def path_from_root_to_node(node: MCTSNode,average_one_generation:bool = False) -> List[Dict[str, Any]]:
+    path = []
+    while node.parent is not None:
+        if average_one_generation:
+            print("average_one_generation when gather")
+            parent_value = node.parent.accumulated_value
+            child_value = node.accumulated_value
+        else:
+            parent_value = node.parent.accumulated_value / node.parent.terminal_in_subtree
+            child_value = node.accumulated_value / node.terminal_in_subtree
+        if node.terminal:
+            assert node.terminal_in_subtree == 1, f"terminal_in_subtree is not 1,{node.terminal_in_subtree}"
+        path.append(
+            {'answer': node.answer,
+             'token_answer':node.answer_token,
+             'reward': node.value,
+             "pass_ratio":node.correct_terminal_in_subtree / node.terminal_in_subtree,
+             "value":child_value - parent_value,
+             "state_value":child_value
+            }
+        )
+        node = node.parent
+    return path[::-1]
+
+
+def gather_paths(root:MCTSNode,selected_terminals: list[MCTSNode], pass_k: int,use_orm_reward:bool = False,use_chain_reward:bool=False,step_level_norm:bool=False,use_state_value_reward:bool=False,use_value_only:bool=False,average_one_generation:bool=False,advantage_mix_allancestor:bool=False) -> List[List[Dict[str, Any]]]:
+    paths = []
+    if len(selected_terminals) == 0:
+        return paths
+    if len(selected_terminals) != pass_k:
+        pass_k = len(selected_terminals)
+        # return None
+
+    # 添加 selected_terminal 的叶子节点路径
+    for terminal_node in selected_terminals:
+        paths.append(path_from_root_to_node(terminal_node,average_one_generation))
+    assert len(paths) == pass_k, f"Failed to generate {pass_k} paths,{len(paths)} instead"
+
+    terminal_values = [leaf.accumulated_value for leaf in selected_terminals]
+    if average_one_generation:
+        root_value = root.accumulated_value
+    else:
+        root_value = root.accumulated_value / root.terminal_in_subtree
+
+    if advantage_mix_allancestor:
+        # print("use advantage mix all ancestor")
+        for path in paths:
+            # 每个节点的 value 都用其 state_value - 祖先.state_value，对所有祖先求平均
+            for i in range(len(path)):
+                if i == 0:
+                    path[i]["value"] = path[i]["state_value"] - root_value
+                else:
+                    sum_value = 0
+                    num_value = 0
+                    for j in range(i):
+                        sum_value += path[i]["state_value"] - path[j]["state_value"]
+                        num_value += 1
+                    sum_value += path[i]["state_value"] - root_value
+                    num_value += 1
+                    path[i]["value"] = sum_value / num_value
+        return paths
+    
+    paths = fill_in_paths(paths)
+    if use_chain_reward:
+        # print("use chain reward in mcts!!")
+        terminal_values = normalize_selected_terminals(selected_terminals)
+        for path in paths:
+            for node in path:
+                node["value"] = terminal_values[paths.index(path)]
+    elif use_orm_reward:
+        # print("use orm reward in mcts!!")
+        terminal_values = normalize_selected_terminals(selected_terminals)
+        for path in paths:
+            for node in path:
+                # node["value"] = (node["value"] + terminal_values[paths.index(path)])/2
+                node["value"] = (node["value"] + terminal_values[paths.index(path)])
+    elif use_state_value_reward:
+        # print("use state value reward in mcts!!")
+        # paths = normalize_all_paths(paths,step_level_norm)
+        for path in paths:
+            for node in path:
+                # node["value"] = (node["value"] + node["state_value"])/2
+                node["value"] = (node["value"] + node["state_value"])
+    elif use_value_only:
+        # print("use value only in mcts!!")
+        for path in paths:
+            for node in path:
+                node["value"] = node["state_value"]
+    # else:
+    #     print("use pure advantage in mcts!!")
+    # print("path num",len(paths))
+    return paths
+
+from graphviz import Digraph
+
+def visualize_tree(root, filename="search_tree"):
+    """
+    将 TreeNode 结构可视化为 PDF/PNG
+    Args:
+        root: 你的 TreeNode 根节点
+        filename: 输出文件名（不含后缀）
+    """
+    dot = Digraph(comment='Search Tree', format='png')
+    dot.attr(rankdir='TB')  # 从上到下布局 (Top to Bottom)
+
+    # 递归遍历节点
+    def add_node_edges(node, parent_id=None):
+        # 为当前节点生成唯一ID（使用内存地址或自定义ID）
+        node_id = str(id(node))  # 或用 node.id 如果自定义了
+        
+        # 节点标签：显示 token 或 value
+        # 根据你的 TreeNode 属性调整（例如 node.token, node.text, node.value
+        answer = getattr(node, 'answer', 'None')
+        numSegments = answer.count("\n\n") + 1 if isinstance(answer, str) else 0
+        # ratio = node.correct_terminal_in_subtree / node.terminal_in_subtree
+        ratio = 1.0
+        label = f"ratioCorrect: {ratio}\nnumSegments: {numSegments}"
+
+        dot.node(node_id, label=label)
+        
+        # 如果是根节点，没有父节点连接
+        if parent_id is not None:
+            dot.edge(parent_id, node_id)
+        
+        # 递归处理子节点
+        for child in getattr(node, 'children', []):
+            add_node_edges(child, node_id)
+
+    add_node_edges(root)
+    dot.render(filename, cleanup=True, view=True)  # view=True 会自动打开图片
+    print(f"Tree visualized to {filename}.png")
+
+def print_tree(node: MCTSNode | None, level: int = 0, index: int = 0):
+    if node is None:
+        return
+    indent = " " * level * 2 + str(level) + f"-{index}: "
+    node_str = repr(node)
+    for line in node_str.split("\n"):
+        print(indent + line)
+    for index, child in enumerate(node.children):
+        print_tree(child, level + 1, index)
+
+def pass_rate(paths):
+    if not paths:
+        return 0
+    pass_num = 0
+    for path in paths:
+        pass_num += path[-1]["pass_ratio"]
+    pass_num /= len(paths)
+    return pass_num
