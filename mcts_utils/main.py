@@ -186,7 +186,7 @@ def process_single_data_for_each_gpu_mcts(
         "use_api_generation": "gpt" in tokenizer_path.lower(),
         "enable_info": False,
         "check_step_validity": False,
-        "evaluation_strategy": "model-evaluation"
+        "evaluation_strategy": "nli"
     }
     if not args["use_api_generation"]:    
         tokenizer = AutoTokenizer.from_pretrained(
@@ -241,6 +241,17 @@ def process_single_data_for_each_gpu_mcts(
         # visualize_tree(result["root"])
         # print_tree(result["root"])
     print(f"Finished processing. Scores: {avg_score:.4f}")
+
+    results = {
+        "args": args,
+        "avg_score": avg_score,
+        "score_list": score_list,
+        "num_samples": len(score_list)
+    }
+
+    output_file = f"results/mcts_{tokenizer_path.split('/')[-1]}_tau_{args['temperature']}_{args['evaluation_strategy']}.json"
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2, cls=EnumJSONEncoder)
 
 
 if __name__ == '__main__':
