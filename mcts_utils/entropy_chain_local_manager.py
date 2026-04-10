@@ -180,7 +180,7 @@ class EntropyGuidedChainLocalManager:
         N = self.args["n"]
         L = self.args["l"]
         T = self.args['t']
-        max_length = args["generate_max_len"]
+        max_length = args["max_token_num"]
 
         init_inputs = []
         parsed_declarations = [] if self.evaluation_strategy == "fol" else None

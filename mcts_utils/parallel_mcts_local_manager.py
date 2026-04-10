@@ -24,7 +24,11 @@ from evaluation import (
     query_openai_api_completions_ids_slow,
     query_openai_api_completions_ids_fast,
 )
-
+from tree_node import (
+    pass_rate, 
+    gather_paths, 
+    print_tree
+)
 import numpy as np
 from utils import *
 
@@ -59,7 +63,7 @@ def find_repeated_patterns(s, pattern_length=50, threshold=20):
 
 class MCTSNode(BaseModel):
     state: List[int]
-    answer: str
+    answer: str = ""
     answer_token : List[int] = []
     aggregate_answer: str = ""
     aggregate_answer_token: List[int] = []
@@ -79,7 +83,8 @@ class MCTSNode(BaseModel):
     accumulated_value: float = 0
     visited_terminal: int = 0
     repeat:bool = False
-    node_id: int = 0
+    tree_idx: int = 0
+    node_idx: int = 0
     is_correct: Optional[bool] = None
 
     def add_child(self, child_node: MCTSNode):
@@ -91,11 +96,11 @@ class MCTSNode(BaseModel):
     def __eq__(self, other):
         if isinstance(other, MCTSNode):
             # return self.state == other.state and self.answer == other.answer
-            return self.node_id == other.node_id
+            return self.node_idx == other.node_idx and self.tree_idx == other.tree_idx
         return False
 
     def __hash__(self):
-        return hash((self.node_id))
+        return hash((self.node_idx))
 
     def add_reward(self, reward: int):
         self.reward_samples.append(reward)
@@ -128,32 +133,28 @@ class ParallelMCTSLocalManager:
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
         self.eos_tokens_set = eos_tokens_set
+        self.system_prompt = args.get("system_prompt", None)
         
         # 从参数中提取配置
         self.max_nodes = args["max_nodes"]
         self.max_token_num = args["max_token_num"]
         self.max_time_use = args["max_time_use"]
-
-
         self.max_depth = args.get("max_depth", 40)
+        self.max_node_per_depth = args.get("max_node_per_depth", 16)
         self.max_children = args.get("max_children", 3)
         self.min_children = args.get("min_children", 2)
-        self.max_node_per_depth = args.get("max_node_per_depth", 16)
+        self.shallow_enwide = args.get("shallow_enwide", False)
+        self.concurrent_num = args.get("concurrent_num", 4)
 
         self.exploration_constant = args.get("exploration_constant", 1.0)
         self.epsilon = args.get("epsilon", 1e-10)
 
         self.pass_k = args.get("pass_k", 4)
-        self.path_num = args.get("path_num", 16)
-        self.backbone = args.get("backbone", "qwen")
+        self.backbone = args.get("backbone", "qwen") # NOTE
         self.temperature = args.get("temperature", 0.9)
         self.top_p = args.get("top_p", 0.9)
         
-        self.prompt_max_len = args.get("prompt_max_len", 1024)
-        self.concurrent_num = args.get("concurrent_num", 4)
         self.backprop = args.get("backprop", True)
-        
-        # 策略和标志
         self.selection_policy = args.get("selection_policy", "importance_sampling")
         self.first_token_temperature = args.get("first_token_temperature", False)
         self.step_level_norm = args.get("step_level_norm", True)
@@ -165,16 +166,15 @@ class ParallelMCTSLocalManager:
         self.use_state_value_reward = args.get("use_state_value_reward", False)
         self.use_pure_RM = args.get("use_pure_RM", False)
         self.use_pure_binary = args.get("use_pure_binary", False)
-        self.shallow_enwide = args.get("shallow_enwide", False)
         self.average_one_generation = args.get("average_one_generation", False)
         self.use_value_only = args.get("use_value_only", False)
+        self.a = args.get("a", 0.5)
+        self.b = args.get("b", -2.898)
+
         self.use_api_generation = args.get("use_api_generation", False)
         self.enable_info = args.get("enable_info", False)
         self.evaluation_strategy = args.get("evaluation_strategy", "self_evaluation")
         self.check_step_validity = args.get("check_step_validity", False)
-        self.a = args.get("a", 0.5)
-        self.b = args.get("b", -2.898)
-        self.system_prompt = args.get("system_prompt", None)
         
 
     def info(self, message: str, enable_info: Optional[bool] = None):
@@ -200,12 +200,12 @@ class ParallelMCTSLocalManager:
                 node.is_correct = correct
                 
                 if answer:
-                    if self.evaluation_strategy == "self_eval":
+                    if self.evaluation_strategy == "self-eval":
                         reward = self_reward_generation(
                             self.llm, problem, node.aggregate_answer, 
                             self.encode_fn, is_terminated
                         )
-                    elif self.evaluation_strategy == "model_eval":
+                    elif self.evaluation_strategy == "model-eval":
                         reward = model_reward_generation(
                             problem, node.aggregate_answer, is_terminal=is_terminated
                         )
@@ -213,7 +213,7 @@ class ParallelMCTSLocalManager:
                         raise NotImplementedError("FOL evaluation is not implemented in self_evaluate method")
                         # reward = get_fol_reward(problem, node.aggregate_answer)
                     elif self.evaluation_strategy == "nli":
-                        parsed_chain = parse_reasoning_steps(node.answer)
+                        parsed_chain = parse_reasoning_steps(node.aggregate_answer)
                         results_nli = verify_steps_nli(parsed_chain)
                         segment_scores = [label2score[result['label']] * result['score'] for result in results_nli]
                         reward = sum(segment_scores) / len(segment_scores) if segment_scores else 0
@@ -246,12 +246,12 @@ class ParallelMCTSLocalManager:
                 is_valid_step = True
                 
             if is_valid_step:
-                if self.evaluation_strategy == "self_eval":
+                if self.evaluation_strategy == "self-eval":
                     reward = self_reward_generation(
                         self.llm, problem, node.aggregate_answer, 
                         self.encode_fn, is_terminated
                     )
-                elif self.evaluation_strategy == "model_eval":
+                elif self.evaluation_strategy == "model-eval":
                     reward = model_reward_generation(
                         problem, node.aggregate_answer, is_terminal=is_terminated
                     )
@@ -259,7 +259,7 @@ class ParallelMCTSLocalManager:
                     raise NotImplementedError("FOL evaluation is not implemented in self_evaluate method")
                     # reward = get_fol_reward(problem, node.aggregate_answer)
                 elif self.evaluation_strategy == 'nli':
-                    parsed_chain = parse_reasoning_steps(node.answer)
+                    parsed_chain = parse_reasoning_steps(node.aggregate_answer)
                     results_nli = verify_steps_nli(parsed_chain)
                     segment_scores = [label2score[result['label']] * result['score'] for result in results_nli]
                     reward = sum(segment_scores) / len(segment_scores) if segment_scores else 0
@@ -331,9 +331,9 @@ class ParallelMCTSLocalManager:
                 math.log(node.parent.visits + 1) / (node.visits + self.epsilon)
             )
 
-    def _is_fully_expanded(self, node: MCTSNode, depth_node_count: Dict) -> bool:
+    def _is_fully_expanded(self, node: MCTSNode, depth_node_count: Dict[int, int]) -> bool:
         next_depth = node.depth + 1
-        next_depth_count = depth_node_count.get(next_depth, 0) # NOTE: 不同树需要维护不同的depth_node_count
+        next_depth_count = depth_node_count.get(next_depth, 0)
         if next_depth_count >= self.max_node_per_depth:
             return True
         return len(node.children) >= node.max_children or node.terminal
@@ -365,7 +365,7 @@ class ParallelMCTSLocalManager:
                 
         return selected_indices
 
-    def select_node(self, root: MCTSNode, depth_node_count: Dict, k: int = 1, random_pick: bool = False) -> List[MCTSNode]:
+    def select_node(self, root: MCTSNode, depth_node_count: Dict[int, int], k: int = 1, random_pick: bool = False) -> List[MCTSNode]:
         candidates = []
         to_consider = deque([root])
         
@@ -376,7 +376,7 @@ class ParallelMCTSLocalManager:
             to_consider.extend(current_node.children)
             
         if not candidates:
-            return None
+            return []
             
         if random_pick:
             return random.sample(candidates, min(k, len(candidates)))
@@ -422,18 +422,22 @@ class ParallelMCTSLocalManager:
             raise ValueError(f"Invalid selection policy: {self.selection_policy}")
 
     def process_single_item(self, item: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
-        problems = item["problem"][0]
-        answers = item["golden_answer"][0]
+        problems = item["problem"]
+        answers = item["golden_answer"]
         system_prompt = args.get("system_prompt", None)
+            
+        if args["training_type"] == "general":
+            paths, raw_avg_reward = self.parallel_mcts(problems, answers, system_prompt=system_prompt, args=args)
+        else:
+            paths = self.parallel_mcts(problems, answers, system_prompt=system_prompt, args=args)
         
-        results = self.parallel_mcts(problems, answers, system_prompt, args)
-        
-        return {
+        results = {
             "problem": problems,
             "golden_answer": answers,
-            "root": results["root"],
-            "selected_terminals": results["selected_terminals"],
+            "paths": paths,
+            "raw_avg_reward": raw_avg_reward if args["training_type"] == "general" else None
         }
+        return results
 
     def parallel_mcts(
         self,
@@ -442,51 +446,40 @@ class ParallelMCTSLocalManager:
         system_prompt=None,
         args: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
-        if not self.use_api_generation:
-            init_state = self.encode_fn(
-                [[problems],[None]], self.prompt_max_len, device="cpu",system_prompt=self.system_prompt
-            )["input_ids"][0]
-        else:
-            init_state = []
-            
-        root = MCTSNode(
-            state=init_state,
-            answer="",
-            max_children=self.max_children,
-            depth=0
-        )
+        batch_size = len(problems)
+
+        # 初始化统计信息
+        root_lst = []
+        node_number_lst = [1] * batch_size
+        leaf_num_lst = [0] * batch_size
+        leaves_lst = [[] for _ in range(batch_size)]
+        depth_node_count_lst = [{0: 1} for _ in range(batch_size)]
+
+        for tree_idx, problem_str in enumerate(problems):
+            encode_output = self.encode_fn([[problem_str]], 4096, device="cpu", system_prompt=system_prompt)
+            init_state = encode_output["messages"] if self.use_api_generation else encode_output["input_ids"][0].tolist()
+            root_lst.append(MCTSNode(state=init_state, max_children=self.max_children, tree_idx=tree_idx))
 
         start_time = time.time()
-        leaf_rank = 0
-        leaves = []
-        leaf_num = 0
-
-        total_token_num = 0
-        leaf_num_and_token = {}
-        depth_node_count = {0: 1}
-        node_number = 0
-        leaf_num_count = 1
         
-        while (node_number < self.max_nodes and time.time() - start_time < self.max_time_use):
-            selected_nodes = self.select_node(root, depth_node_count, k=self.concurrent_num, random_pick=self.random_pick)
+        while (max(node_number_lst) < self.max_nodes and time.time() - start_time < self.max_time_use):
+            selected_nodes = []
+
+            for root, depth_node_count in zip(root_lst, depth_node_count_lst):
+                if node_number_lst[root.tree_idx] >= self.max_nodes:
+                    continue
+                selected_nodes.extend(
+                    self.select_node(root, depth_node_count, k=self.concurrent_num, random_pick=self.random_pick)
+                )
             
             if not selected_nodes:
                 self.info("Terminated because no node to expand")
                 break
-                
+
             # 扩展节点
-            expand_results = self.expand(selected_nodes, problems, answers, leaf_num_count)
-            
-            # 统计信息
-            total_token_num += expand_results["total_tokens"]
-            terminal_generated = 0
-            for node, child_num in expand_results["node_results"]:
-                for child in node.children:
-                    if child.terminal:
-                        terminal_generated += 1
-                        
-            leaf_rank += terminal_generated
-            leaf_num_and_token[leaf_rank] = total_token_num
+            expand_results, node_number_lst = self.expand(
+                selected_nodes, problems, answers, node_number_lst
+            )
             
             # 处理扩展结果
             for node, child_num in expand_results["node_results"]:
@@ -494,9 +487,9 @@ class ParallelMCTSLocalManager:
                     self.info(f"Cannot expand node {node}")
                     continue
                     
-                node_number += child_num
-                depth_node_count[node.depth + 1] = (
-                    depth_node_count.get(node.depth + 1, 0) + child_num
+                tree_idx = node.tree_idx
+                depth_node_count_lst[tree_idx][node.depth + 1] = (
+                    depth_node_count_lst[tree_idx].get(node.depth + 1, 0) + child_num
                 )
                 
                 child_terminal_exists = False
@@ -512,49 +505,67 @@ class ParallelMCTSLocalManager:
                             self.backpropagate(child)
                             
                     if is_terminated:
-                        leaves.append(child)
+                        leaves_lst[tree_idx].append(child)
 
                         if not child_terminal_exists:
-                            leaf_num += 1
+                            leaf_num_lst[tree_idx] += 1
                             child_terminal_exists = True
-                            
-            if leaf_num >= self.pass_k:
-                self.info(f"Terminated because reached {leaf_num} leaf nodes")
+
+            if min(leaf_num_lst) >= self.pass_k:
+                self.info(f"Terminated because reached {leaf_num_lst} leaf nodes")
                 break
-        
+
         # 后处理
-        self.leaf_normalize(leaves)
-        for leaf in leaves:
-            self.leaf_backpropagate(leaf)
+        path_lst = []
+        for root, leaves in zip(root_lst, leaves_lst):
+            self.leaf_normalize(leaves)
+            for leaf in leaves:
+                self.leaf_backpropagate(leaf)
+                
+            if self.average_one_generation:
+                self.update_accumulated_values(root)
+                
+            selected_terminals = self.select_terminal(
+                leaves,
+                args['num_traces'],
+            )
             
-        if self.average_one_generation:
-            self.update_accumulated_values(root)
-            
-        selected_terminals = self.select_terminal(leaves)
-        
-        if self.use_weighted_value:
-            for leaf in selected_terminals:
-                self.selected_backpropagate(leaf)
-            self.weighted_update(root)
-            
-        return {
-            "root": root,
-            "selected_terminals": selected_terminals
-        }
+            if self.use_weighted_value:
+                for leaf in selected_terminals:
+                    self.selected_backpropagate(leaf)
+                self.weighted_update(root)
+
+            paths = gather_paths(
+                root,
+                selected_terminals,
+                args['num_traces'],
+                use_orm_reward=args["use_orm_reward"],
+                use_chain_reward=args["use_chain_reward"],
+                step_level_norm=args["step_level_norm"],
+                use_state_value_reward=args["use_state_value_reward"],
+                use_value_only=args["use_value_only"],
+                average_one_generation=args["average_one_generation"],
+                advantage_mix_allancestor=args["advantage_mix_allancestor"]
+            )
+            self.info(f"Gathered {len(paths)} paths.")
+            path_lst.append(paths)
+
+        if args["training_type"] == "general":
+            return path_lst, [root.correct_terminal_in_subtree / root.terminal_in_subtree for root in root_lst]
+        return path_lst
 
     def expand(
         self, 
         nodes: List[MCTSNode], 
-        problem: str,
-        answer: str,
-        leaf_num_count: int
+        problems: List[str],
+        answers: List[str],
+        leaf_num_count_lst: List[int]
     ) -> Dict[str, Any]:
         """扩展选中的节点"""
         if not nodes:
             return {"node_results": [], "total_tokens": 0}
             
         stops = get_stops(self.backbone)
-        all_children_token_num = 0
         max_tokens_per_step = self.max_token_num
         max_attempts = 3
         children_map = {node: [] for node in nodes}
@@ -639,6 +650,7 @@ class ParallelMCTSLocalManager:
                 response = response_str_list[0]
                 finish_reason = finish_reason_list[0]
                 stop_token = stop_token_list[0]
+                token_num = token_num_list[0]
                 
                 if next_tokens:
                     response = next_strs[idx] + response
@@ -649,49 +661,40 @@ class ParallelMCTSLocalManager:
                     
                 if not ((stop_token is None) or (stop_token in self.eos_tokens_set)):
                     stop_token_str = self.decode_fn([stop_token])
-                    if stop_token_str not in response[-5:]:
+                    if not response.endswith(stop_token_str):
                         response += stop_token_str
-                    if stop_token != response_token[-1]:
+                    if response_token[-1] != stop_token:
                         response_token += [stop_token]
 
                 new_aggregate_answer = node.aggregate_answer + response
                 new_aggregate_answer_token = node.aggregate_answer_token + response_token
-                all_children_token_num += token_num_list[0]
                 
-                if (len(new_aggregate_answer_token) > self.max_token_num) or (find_repeated_patterns(new_aggregate_answer)):
-                    repeat = True
-                else:
-                    repeat = False
-
-                if (stop_token is None) or (stop_token in self.eos_tokens_set) or repeat:
-                    if_finish = True
-                else:
-                    if_finish = False
-
-                finished = self.judge_finished(
-                    if_finish, node.depth + 1
-                )
+                repeat = (len(new_aggregate_answer_token) > self.max_token_num) \
+                    or (find_repeated_patterns(new_aggregate_answer) != {})
                 
-                if self.shallow_enwide:
-                    max_children = max(node.max_children / 2, self.min_children)
-                else:
-                    max_children = node.max_children
+                finished = (stop_token is None) or (stop_token in self.eos_tokens_set) \
+                    or (node.depth > self.max_depth) or repeat
+                
+                max_children = max(node.max_children / 2, self.min_children) if self.shallow_enwide else node.max_children
                     
+                tree_idx = node.tree_idx
+
                 child_node = MCTSNode(
                     state=node.state + response_token,
                     answer=response,
                     answer_token=response_token,
-                    aggregate_answer=node.aggregate_answer + response,
-                    aggregate_answer_token=node.aggregate_answer_token + response_token,
+                    aggregate_answer=new_aggregate_answer,
+                    aggregate_answer_token=new_aggregate_answer_token,
                     parent=node,
                     depth=node.depth + 1,
                     terminal=finished,
                     max_children=max_children,
                     repeat=repeat,
-                    node_id=leaf_num_count
+                    tree_idx=tree_idx,
+                    node_idx=leaf_num_count_lst[tree_idx]
                 )
                 
-                leaf_num_count += 1
+                leaf_num_count_lst[tree_idx] += 1
                 children_map[node].append(child_node)
                 
             if all(len(children_map[node]) >= node.max_children for node in nodes):
@@ -700,6 +703,10 @@ class ParallelMCTSLocalManager:
         # 评估子节点
         node_results = []
         for node, childrens in children_map.items():
+            tree_idx = node.tree_idx
+            problem = problems[tree_idx]
+            answer = answers[tree_idx]
+
             if self.random_pick:
                 for child in childrens:
                     if child.terminal:
@@ -732,8 +739,7 @@ class ParallelMCTSLocalManager:
             
         return {
             "node_results": node_results,
-            "total_tokens": all_children_token_num
-        }
+        }, leaf_num_count_lst
 
 
     def judge_finished(self, is_stopped: bool, depth: int) -> bool:
@@ -783,7 +789,7 @@ class ParallelMCTSLocalManager:
     def weighted_update(self, root: MCTSNode):
         self.compute_weighted_update(root)
 
-    def select_terminal(self, leaves: List[MCTSNode]) -> bool:
+    def select_terminal(self, leaves: List[MCTSNode], num_traces: int) -> bool:
         """选择终止节点"""
         parent_to_children = {}
         
@@ -813,7 +819,7 @@ class ParallelMCTSLocalManager:
             correct_leaf = None
             correct_leaf_parent = None
             
-        if total_sum == self.path_num:
+        if total_sum == num_traces:
             selected_terminals = []
             for parent, children in parent_to_children.items():
                 if parent == correct_leaf_parent and correct_leaf is not None:
@@ -821,15 +827,15 @@ class ParallelMCTSLocalManager:
                 else:
                     selected_terminals.append(random.choice(children))
             
-        elif total_sum > self.path_num:
+        elif total_sum > num_traces:
             if correct_leaf is None:
-                selected_parents = random.sample(list(parent_to_children.keys()), self.path_num)
+                selected_parents = random.sample(list(parent_to_children.keys()), num_traces)
                 selected_terminals = []
                 for parent in selected_parents:
                     selected_terminals.append(random.choice(parent_to_children[parent]))
             else:
                 other_parents = [p for p in parent_to_children.keys() if p != correct_leaf_parent]
-                selected_parents = random.sample(other_parents, self.path_num - 1)
+                selected_parents = random.sample(other_parents, num_traces - 1)
                 selected_terminals = [correct_leaf]
                 for parent in selected_parents:
                     selected_terminals.append(random.choice(parent_to_children[parent]))
@@ -839,15 +845,15 @@ class ParallelMCTSLocalManager:
                 for parent, children in parent_to_children.items():
                     selected_terminals.append(random.choice(children))
                     
-                if len(selected_terminals) < self.path_num:
+                if len(selected_terminals) < num_traces:
                     k = 0
-                    while len(selected_terminals) < self.path_num:
+                    while len(selected_terminals) < num_traces:
                         added_in_this_round = False
                         for parent, children in parent_to_children.items():
                             if k < len(children) and children[k] not in selected_terminals:
                                 selected_terminals.append(children[k])
                                 added_in_this_round = True
-                                if len(selected_terminals) >= self.path_num:
+                                if len(selected_terminals) >= num_traces:
                                     break
                         if not added_in_this_round:
                             break
@@ -860,15 +866,15 @@ class ParallelMCTSLocalManager:
                     else:
                         selected_terminals.append(random.choice(children))
                         
-                if len(selected_terminals) < self.path_num:
+                if len(selected_terminals) < num_traces:
                     k = 0
-                    while len(selected_terminals) < self.path_num:
+                    while len(selected_terminals) < num_traces:
                         added_in_this_round = False
                         for parent, children in parent_to_children.items():
                             if k < len(children) and children[k] not in selected_terminals:
                                 selected_terminals.append(children[k])
                                 added_in_this_round = True
-                                if len(selected_terminals) >= self.path_num:
+                                if len(selected_terminals) >= num_traces:
                                     break
                         if not added_in_this_round:
                             break
