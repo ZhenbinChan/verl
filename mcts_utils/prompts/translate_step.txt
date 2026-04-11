@@ -1,0 +1,105 @@
+You are an experienced logician and programmer, skilled at converting natural language into executable and correct Z3 API Python code.
+
+## Task Description
+Given the natural language problem context, problem description, a single reasoning step, and Z3 Declarations (Python code), your goal is to translate the given reasoning step into Z3-style Python code so that you can use Z3 to verify the logical validity of the step.
+
+## Input Data
+- Context & Question: Background information and the target problem.
+- Z3 Declarations: Predefined Sorts, Functions, and Predicates.
+- Reasoning Step: The given single reasoning step consists of two parts: (1) Premises: Each reasoning step contains multiple premises, each enclosed within ```<premise> </premise>``` blocks; (2) Conclusion: Similarly, the conclusion is enclosed within ```<conclusion> </conclusion>``` blocks. Your task is to translate both the premises and the conclusion into corresponding Z3 API-style Python code and place them in the lists `premise_fol` and `conclusion_fol`, respectively.
+
+## Translation Principle (Strict Compliance Required):
+1. Strict Symbolic Mapping:
+- Use ONLY the functions, predicates, and sorts provided in the Z3 Declaration.
+- Use ForAll, Exists, And, Or, Not, Implies, iff, and == for logical connectors.
+2. If new variables are needed, use the Const() function to create them, then proceed with translation. When declaring new variables, specify their type, which must be either a type defined in the Declaration or a built-in Z3 type (BoolSort(), IntSort(), RealSort(), etc.).
+3. Newly defined variables must not conflict with existing variables (do not use the same names).
+4. IMPORTANT:
+- Axioms MUST be translated: In addition to translating the premises, each reasoning step should also include the axioms from the context, which must be added to the `premise_fol` list.
+- **Do NOT** translate the problem context or description into Z3 code! Translate **only the axioms and inference steps** into the corresponding Z3 code, and strictly adhere to the specified output format. This must be executable!
+- Please Negate the conclusion for verifying its correctness！（VERY IMPORTANT）
+
+## Output Format
+1. IMPORTANT: The output must be executable Python code, strictly following Python syntax and Z3 API coding conventions.
+2. The output is divided into two parts:
+- Declaration of new variables: If new variables are needed, declare them using the Const function and specify their type, for example: ```x = Const('x', student)```, where `student` is a type already defined in the Declaration code.
+- Expression lists: Each sentence must be translated into one or more expressions, and these expressions must be appended to the corresponding list.
+
+---
+Here is an example:
+
+## Input
+<Context>
+<p1>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens are the partners of the law firm.</p1>
+<p2>Gregg, Hodges, Ivan, James, King, MacNeil, Nader, and Owens joined the firm between 1961 and 1968.</p2>
+<p3>Each partner joined the firm in a different year.</p3>
+<p4> Hodges joined earlier than Nader </p4>
+<p5> King joined earlier than James. </p5>
+<p6> Nader joined earlier than Gregg</p6>
+<p7> James joined earlier than Gregg</p7>
+<p8> Nader joined earlier than Owens</p8>
+<p9> James joined earlier than MacNeil.</p9>
+<p10>Gregg joined earlier than Ivan.</p10>
+
+<Declaration>
+```python
+# Z3 Type Declaration
+partner = DeclareSort('partner')
+year = DeclareSort('year')
+
+# Constant Definition
+Gregg = Const('Gregg', partner)
+Hodges = Const('Hodges', partner)
+Ivan = Const('Ivan', partner)
+James = Const('James', partner)
+King = Const('King', partner)
+MacNeil = Const('MacNeil', partner)
+Nader = Const('Nader', partner)
+Owens = Const('Owens', partner)
+
+# Variable Definition
+a = Const('a', partner)
+b = Const('b', year)
+
+# Z3 Function/Predicate Declaration
+join = Function('join', partner, year)
+```
+</Declaration>
+<ReasoningStep>
+    <premise> Hodges joined earlier than Nader </premise>
+    <premise> Nader joined earlier than Owens </premise>
+    <conclusion>Hodges joined before Owens</conclusion>
+</ReasoningStep>
+
+
+## Output
+```python
+# Define required variables (ensure no conflict with Declaration)
+x, y, z = Consts('x y z', partner)
+
+# Translated premise Python code
+premise_fol = [
+    ForAll([x, y, z], Implies( And(JoinedEarlier(x, y), JoinedEarlier(y, z)), JoinedEarlier(x, z))), # axiom_1
+    join(Hodges) < join(Nader),  # premise in reasoning step: Hodges joined earlier than Nader
+    join(Nader) < join(Owens), # premise in reasoning step: Nader joined earlier than Owens
+]
+
+conclusion_fol = [
+    Not(join(Hodges) < join(Owens)), # Negate the conclusion for verifying: Hodges doesn‘t joined earlier than Owens
+]
+```
+Now, Please covert the following content to the python code we want:
+
+<Context>
+${context}
+<Context>
+
+<Declaration>
+```python
+${declaration}
+```
+</Declaration>
+
+<ReasoningStep>
+${step}
+</ReasoningStep>

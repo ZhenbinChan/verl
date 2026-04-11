@@ -544,6 +544,20 @@ class RayPPOTrainer:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
 
+        # check tree_sampling config consistency
+        if self.tree_sampling:
+            reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            assert reward_manager_name == "tree", (
+                f"tree_sampling=True requires reward_model.reward_manager='tree', "
+                f"but got '{reward_manager_name}'. "
+                f"Other reward managers are not designed to work with tree sampling."
+            )
+            assert config.algorithm.adv_estimator in [AdvantageEstimator.Tree_GRPO, AdvantageEstimator.Tree_GAE], (
+                f"tree_sampling=True requires algorithm.adv_estimator to be 'tree_grpo' or 'tree_gae', "
+                f"but got '{config.algorithm.adv_estimator}'. "
+                f"Standard advantage estimators do not consume tree structure data (state_value_scores, step_q_scores, etc.)."
+            )
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
@@ -1140,7 +1154,9 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     with _timer("reward", timing_raw):
-                        using_tree_rewards = "reward_fn_scores" in batch.batch
+                        # using_tree_rewards = "reward_fn_scores" in batch.batch
+                        # using_tree_rewards = self.tree_sampling
+                        
                         # [info] 对每一步使用 Outcome Reward 加权使用
                         # reward_dict = self.reward_fn(batch, return_dict=True)
                         # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
@@ -1155,7 +1171,8 @@ class RayPPOTrainer:
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples in total!!")
                         
                         # 使用 Tree Structure 里面的 Reward
-                        if using_tree_rewards:
+                        # if using_tree_rewards:
+                        if self.tree_sampling:
                             reward_fn_tensor = batch.batch.get("reward_fn_scores")
                             if reward_fn_tensor is None:
                                 raise ValueError("Tree rewards expected but reward_fn_scores missing")
@@ -1164,7 +1181,7 @@ class RayPPOTrainer:
                                 verifiable_rewards = reward_fn_tensor.sum(-1)
                                 batch.union(DataProto.from_dict({"verifiable_rewards": verifiable_rewards}))
                             reward_tensor = reward_fn_tensor
-                            reward_dict = self.reward_fn(batch, return_dict=True)
+                            reward_dict = self.reward_fn(batch, return_dict=True) # reward fn = reward manager cls / compute score / __call__
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
                                 for i in range(len(reward_dict["ground_truth"])):
@@ -1180,7 +1197,7 @@ class RayPPOTrainer:
                             # if self.config.reward_model.launch_reward_fn_async:
                             #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                             # else:
-                            reward_dict = self.reward_fn(batch, return_dict=True)#[info]上面如果不先计算 ORM，解除注释这一行
+                            reward_dict = self.reward_fn(batch, return_dict=True) #[info] 上面如果不先计算 ORM，解除注释这一行
                             
                             # PRM: function reward
                             reward_fn_tensor = reward_dict["reward_tensor"]# Outcome Reward
@@ -1234,6 +1251,8 @@ class RayPPOTrainer:
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # compute advantage
+                    # 试图合并ORM和PRM，但是不知道对错
                     with _timer("adv", timing_raw):
                         """
                         # we combine with rule-based rm

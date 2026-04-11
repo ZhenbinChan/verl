@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
     data_source = "lucasmccabe/logiqa"
 
-    dataset = datasets.load_dataset(data_source, "default")
+    dataset = datasets.load_dataset(data_source, "default", trust_remote_code=True)
 
     # train_dataset = dataset["train"].select([i for i in range(2000)])
     # test_dataset = dataset["validation"].select([i for i in range(100)])

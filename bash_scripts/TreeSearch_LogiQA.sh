@@ -1,13 +1,13 @@
 set -x
 
-HOME=/home/chenzhb/Workspaces/verl
+HOME=~
 
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_grpo \
-    data.train_files=$HOME/data/logiqa_tree/train.parquet \
-    data.val_files=$HOME/data/logiqa_tree/test.parquet \
+    data.train_files=./data/logiqa_tree/train.parquet \
+    data.val_files=./data/logiqa_tree/test.parquet \
     data.train_batch_size=4 \
     data.max_prompt_length=512 \
     data.max_response_length=2048 \
