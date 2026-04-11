@@ -63,6 +63,7 @@ yoruba_people = Const('yoruba_people', Person)
 # 4.1 Boolean
 IsWesternized = Function('IsWesternized', Person, BoolSort())
 HasGeneticAdaptation = Function('HasGeneticAdaptation', Person, BoolSort())
+HighSaltDiet = Function('HighSaltDiet', Person, BoolSort())
 
 # 4.2 Arithmetic
 BloodPressureValue = Function('BloodPressureValue', Person, RealSort())

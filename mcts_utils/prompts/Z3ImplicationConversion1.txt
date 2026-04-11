@@ -6,15 +6,15 @@ Input Data:
 
     1.  Context & Question: The background information and the target problem.
 
-    2.  Z3 Declarations: The predefined Sorts, Functions, and Predicates.
+    2.  Reasoning Steps: A sequence of <step> blocks containing <premise> and <conclusion> in natural language.
 
-    3.  Reasoning Steps: A sequence of <step> blocks containing <premise> and <conclusion> in natural language.
+    3.  Z3 Declarations: The predefined Sorts, Functions, and Predicates.
 
 Translation Rules (Strict Compliance Required):
 
     1.  Strict Symbolic Mapping:
 
-        • Use ONLY the functions, predicates, and sorts provided in the Z3 Declaration.
+        • Use ONLY the functions, predicates, and sorts **provided in the Z3 Declaration**.
 
         • Use ForAll, Exists, And, Or, Not, Implies, and == for logical connectors.
 
@@ -60,6 +60,17 @@ Option (C): Considering health care, most African whites also pay attention to c
 Option (D): The blood pressure of Yoruba people in West Africa is not high. Yoruba people have lived inland far away from sea salt and far away from the Sahara salt mine in Africa.
 </Options>
 
+Reasoning steps:
+<step>
+<premise>Descendants of Senegalese (a) are Westernized black individuals.</premise>
+<conclusion>Individual 'a' is Black and Westernized.</conclusion>
+</step>
+<step>
+<premise>Individual 'a' is Black and Westernized.</premise>
+<premise>The hypothesis states all Westernized Black people with high salt diets and genetic adaptation get hypertension.</premise>
+<conclusion>Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptation(a))</conclusion>
+</step>
+
 Z3 Declaration:
 from z3 import *
 
@@ -76,17 +87,6 @@ SaltDeficientHistory = Function('SaltDeficientHistory', Region, BoolSort())
 GeneticAdaptationToLowSalt = Function('GeneticAdaptationToLowSalt', Person, BoolSort())
 HighSaltDiet = Function('HighSaltDiet', Person, BoolSort())
 Hypertension = Function('Hypertension', Person, BoolSort())
-
-Reasoning steps:
-<step>
-<premise>Descendants of Senegalese (a) are Westernized black individuals.</premise>
-<conclusion>Individual 'a' is Black and Westernized.</conclusion>
-</step>
-<step>
-<premise>Individual 'a' is Black and Westernized.</premise>
-<premise>The hypothesis states all Westernized Black people with high salt diets and genetic adaptation get hypertension.</premise>
-<conclusion>Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptation(a))</conclusion>
-</step>
 
 Example Output:
 # Step 1

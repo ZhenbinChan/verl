@@ -948,13 +948,15 @@ def check_steps_format(steps_text: str) -> Tuple[bool, List[Dict], List[str]]:
     """
     # 分割step，假设以\n\n分隔
     step_blocks = re.split(r'\n\s*\n', steps_text.strip())
-    
+
     all_results = []
     all_errors = []
     all_valid = True
     
     for i, block in enumerate(step_blocks):
         block = block.strip()
+        if block.startswith("["): # NOTE: special case for prompt [Synthesis of all options and logical nodes]
+            break
         if not block:
             continue
             
@@ -1062,18 +1064,6 @@ def model_reward_generation(question, response, is_terminal=False):
         reward = max(0.0, min(10.0, score)) / 10.0
     else:        
         reward = 0.0
-    return reward
-
-def get_fol_reward(question_prompt, response):
-    from nl2fol import fol_prepocessing, translate_and_execute_fol
-    context_match = re.search(r"<Context>(.*?)</Context>", question_prompt, re.DOTALL)
-    context = context_match.group(1).strip() if context_match else None
-    question_match = re.search(r"<Question>(.*?)</Question>", question_prompt, re.DOTALL)
-    question = question_match.group(1).strip() if question_match else None
-    options_match = re.search(r"<Options>(.*?)</Options>", question_prompt, re.DOTALL)
-    options = options_match.group(1).strip() if options_match else None
-    declaration = fol_prepocessing(context, question, options)
-    reward = float(translate_and_execute_fol(declaration=declaration, sentences=response))
     return reward
 
 # general-math-code-RM
@@ -1285,7 +1275,8 @@ def query_local_vllm_ids_with_logprobs(
         skip_special_tokens=skip_special_tokens,
         stop_token_ids=stops,
         n=n,
-        logprobs=True
+        logprobs=True,
+        # repetition_penalty=1.1, # prevent repetition
     )
 
     content_token_id_lists: List[List[int]] = []
@@ -1349,7 +1340,7 @@ def query_local_vllm_ids_with_logprobs(
     return None, None, None, None, None
 
 
-def query_openai_api_with_logprobs(
+def query_openai_api_with_logprobs_slow(
     messages,
     n: int = 1,
     max_tokens: int = 4096,
@@ -1387,9 +1378,9 @@ def query_openai_api_with_logprobs(
                     log_probs = [token_logprob.logprob for token_logprob in choice.logprobs.content]
                     
                     # 组织数据结构以匹配原函数格式
-                    content_token_list.append([generated_tokens])
-                    content_str_list.append([generated_text])
-                    finish_reason_list.append([choice.finish_reason])
+                    content_token_list.append(generated_tokens)
+                    content_str_list.append(generated_text)
+                    finish_reason_list.append(choice.finish_reason)
                     token_num_list.append([len(generated_tokens)])
                     log_probs_list.append(log_probs)
                 
@@ -1404,3 +1395,69 @@ def query_openai_api_with_logprobs(
             time.sleep(sleep_time)
     
     return None, None, None, None, None
+
+
+async def query_openai_api_with_logprobs(
+    messages,
+    n: int = 1,
+    max_tokens: int = 2048,
+    stops: Optional[List[str]] = None,
+    temperature: float = 0.9,
+    top_p: float = 0.9,
+    model: str = "gpt-4o-mini-2024-07-18",
+    tokenizer: Any = None,
+):
+    content_token_list = []
+    content_str_list = []
+    finish_reason_list = []
+    token_num_list = []
+    log_probs_list = []
+    
+    for try_counter in range(RETRY_COUNT):
+        try:
+            kwargs = {
+                "model": model,
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_tokens": max_tokens,
+                "n": n,
+                "stop": stops if stops else None,
+                "logprobs": True,
+            }
+            
+            responses = await async_api_generate(messages, **kwargs)
+            
+            for response in responses:
+                for choice in response.choices:
+                    generated_text = choice.message.content
+                    generated_tokens = tokenizer.encode(generated_text) if tokenizer else []
+                    log_probs = [token_logprob.logprob for token_logprob in choice.logprobs.content] if choice.logprobs else []
+                    
+                    content_token_list.append(generated_tokens)
+                    content_str_list.append(generated_text)
+                    finish_reason_list.append(choice.finish_reason)
+                    log_probs_list.append(log_probs)
+                    token_num_list.append([len(generated_tokens)])
+            
+            return content_token_list, content_str_list, finish_reason_list, token_num_list, log_probs_list
+            
+        except Exception as e:
+            await asyncio.sleep(1)
+    
+    return None, None, None, None, None
+
+
+def query_openai_api_with_logprobs_fast(*args, **kwargs):
+    # 静音日志
+    original_levels = {}
+    loggers_to_silence = ['httpx', 'openai', 'httpcore']
+    for logger_name in loggers_to_silence:
+        logger = logging.getLogger(logger_name)
+        original_levels[logger_name] = logger.level
+        logger.setLevel(logging.WARNING)
+        
+    result =  asyncio.run(query_openai_api_with_logprobs(*args, **kwargs))
+
+    for logger_name, level in original_levels.items():
+        logging.getLogger(logger_name).setLevel(level)
+    return result

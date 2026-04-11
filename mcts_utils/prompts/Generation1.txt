@@ -37,5 +37,4 @@ Output Template Example:
 </step>
 
 [Synthesis of all options and logical nodes]
-
 \boxed{Letter}

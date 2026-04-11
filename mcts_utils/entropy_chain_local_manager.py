@@ -2,8 +2,12 @@ import time
 import math
 from typing import List, Dict, Any, Callable
 import json
-from tree_node import TreeNode, build_into_tree_format
-from parallel_mcts import gather_paths
+from tree_node import (
+    TreeNode, 
+    build_into_tree_format, 
+    gather_paths, 
+    print_tree
+)
 from evaluation import (
     check_result,
     query_local_vllm_completions_with_logprobs,
@@ -11,12 +15,25 @@ from evaluation import (
     GLM_QA_PROMPT,
     get_qwen_remote_reward_model_value,
     check_steps_format,
-    query_openai_api_with_logprobs
+    query_openai_api_with_logprobs_fast,
+    query_openai_api_with_logprobs_slow
 )
 from IPython import embed
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
+
+from utils import *
+
+prompt_dir = "mcts_utils/prompts"
+with open(os.path.join(prompt_dir, "Z3DeclarationsGeneration1.txt"), "r") as f:
+    system_prompt_z3_declaration = f.read()
+
+
+def repeat_lst(lst: List[Any], times: int) -> List[Any]:
+    if lst is None:
+        return None
+    return [item for item in lst for _ in range(times)]
 
 
 class EntropyGuidedChainLocalManager:
@@ -24,10 +41,9 @@ class EntropyGuidedChainLocalManager:
         self,
         args: Dict[str, Any],
         llm: Any,
+        tokenizer: Any,
         encode_fn: Callable,
         decode_fn: Callable,
-        evaluator_urls: List[str],
-        extractor_urls: List[str],
         eos_tokens_set: List[int]
     ):
         """
@@ -40,11 +56,11 @@ class EntropyGuidedChainLocalManager:
         """
         self.args = args
         self.llm = llm
-        self.evaluator_urls = evaluator_urls
-        self.extractor_urls = extractor_urls
-        self.eos_tokens_set = eos_tokens_set
+        self.tokenizer = tokenizer
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
+        self.eos_tokens_set = eos_tokens_set
+
         self.paths: Dict[str, Any] = {
             "M": args["m"],
             "N": args["n"],
@@ -54,8 +70,8 @@ class EntropyGuidedChainLocalManager:
             "time_use": 0,
             "tree_structures": []
         }
-        from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(args['tokenizer_path'], trust_remote_code=True)
+        self.use_api_generation = args.get("use_api_generation", False)
+        self.evaluation_strategy = args.get("evaluation_strategy", "model_evaluation")
 
     def serialize_tree(self, node: TreeNode) -> Dict[str, Any]:
         """
@@ -71,28 +87,25 @@ class EntropyGuidedChainLocalManager:
             'children': [self.serialize_tree(child) for child in node.child_nodes]
         }
 
-    def evaluate_node(self, args: Dict[str, Any], problem_str: str, node: TreeNode) -> Tuple[float, float]:
+    def evaluate_node(self, problem_str: str, answer_str: str, args: Dict[str, Any], node: TreeNode) -> Tuple[float, float]:
         """evaluate the score of the single node
 
         :return: Tuple[float, float]: (binary_score, final_score)
         """
-        if node.is_end and node.finish_reason == "stop":
-            format_score = check_steps_format(node.total_str)
-            if format_score == 0:
-                binary_score = 0
-            else:
-                binary_score = check_result(
-                    problem_str,
-                    node.total_str,
-                    self.answer_str,  # 需要将answer_str作为类属性存储
-                    checker_urls=self.evaluator_urls,
-                extractor_urls=self.extractor_urls
+        if node.is_end and node.finish_reason == "stop" \
+            and (not args['check_step_validity'] \
+                 or check_steps_format(node.total_str)[0]):
+            binary_score = check_result(
+                problem_str,
+                node.total_str,
+                answer_str,
             )[-1]
         else:
             binary_score = 0
 
         if args["use_pure_binary"]:
-            return binary_score, binary_score
+            final_score = binary_score
+            return binary_score, final_score
 
         # Get reward model score
         value = get_qwen_remote_reward_model_value(
@@ -116,14 +129,13 @@ class EntropyGuidedChainLocalManager:
 
         return binary_score, final_score
 
-    def evaluate_trees(self, problem_str: str, answer_str: str, args: Dict[str, Any]) -> List[float]:
+    def evaluate_trees(self, problems: List[str], answers: List[str], args: Dict[str, Any]) -> List[float]:
         """evaluate the nodes in all trees"""
-        self.answer_str = answer_str  # 临时存储供evaluate_node使用
 
         # collect all the nodes to evaluate
         evaluation_tasks = [
-            (args, problem_str, node)
-            for tree_list in self.tree_lists
+            (problem_str, answer_str, args, node)
+            for problem_str, answer_str, tree_list in zip(problems, answers, self.tree_lists)
             for node in tree_list
         ]
 
@@ -136,22 +148,24 @@ class EntropyGuidedChainLocalManager:
             ))
 
         # update the node scores and collect the results
-        pass_k_result = []
-        for (binary_score, final_score), (_, _, node) in zip(results, evaluation_tasks):
+        for (binary_score, final_score), (_, _, _, node) in zip(results, evaluation_tasks):
             node.binary_score = binary_score
             node.score = final_score
-            pass_k_result.append(binary_score)
 
-            # if args["use_pure_RM"]:
-            #     print("entropy rm_score", final_score)
+        pass_k_results = []
+        for tree_list in self.tree_lists:
+            pass_k_result = []
+            for node in tree_list:
+                pass_k_result.append(node.binary_score)
+            pass_k_results.append(pass_k_result)
 
-        return pass_k_result
+        return pass_k_results
 
     # 主函数，执行熵引导的链式推理
     def entropy_guided_chain(
         self,
-        problem_str: str,
-        answer_str: str,
+        problems: List[str],
+        answers: List[str],
         args: Dict[str, Any] = None,
         system_prompt=None,
     ) -> Dict[str, Any]:
@@ -166,57 +180,64 @@ class EntropyGuidedChainLocalManager:
         N = self.args["n"]
         L = self.args["l"]
         T = self.args['t']
-        max_length = args["generate_max_len"]
+        max_length = args["max_token_num"]
 
-        encode_output = self.encode_fn(
-            [[problem_str], [None]], 1024, device="cpu", system_prompt=system_prompt
-        )
+        init_inputs = []
+        parsed_declarations = [] if self.evaluation_strategy == "fol" else None
+        
+        for problem_str in problems:
+            encode_output = self.encode_fn([[problem_str]], 4096, device="cpu", system_prompt=system_prompt)
+            init_input_with_template = encode_output["messages"] if self.use_api_generation else encode_output["input_ids"][0].tolist()
+            init_inputs.append(init_input_with_template)
 
-        init_prompt_ids_with_template  = encode_output["input_ids"][0].tolist()
-        messages = encode_output["messages"]
+            if parsed_declarations is not None:
+                declaration = get_response(problem_str, system_prompt_z3_declaration)
+                parsed_declarations.append(extract_python_code(declaration))
 
-        # print(init_prompt_ids_with_template)
-
-        paths = self.paths
-
-        self.paths['init_prompt_ids_with_template'] = init_prompt_ids_with_template
-
+        self.paths['init_prompt_ids_with_template'] = init_inputs
+        batch_size = len(problems)
+        problems = repeat_lst(problems, M)
+        answers = repeat_lst(answers, M)
+        init_inputs = repeat_lst(init_inputs, M)
+        parsed_declarations = repeat_lst(parsed_declarations, M)
+        
         time_start = time.time()
 
         # initialize M trees
         self.tree_lists = []
-        initial_prompt_ids = [init_prompt_ids_with_template] * M
-
         # get the initial inference results
-        # initial_results = query_local_vllm_completions_with_logprobs(
         for _ in range(4):
-            # initial_results = query_local_vllm_ids_with_logprobs(
-            #     initial_prompt_ids,
-            #     llm=self.llm,
-            #     skip_special_tokens=False,
-            #     max_tokens=max_length,
-            #     stops=self.eos_tokens_set,
-            #     temperature=self.args["temperature"],
-            #     top_p=self.args["top_p"],
-            #     use_ray=False
-            # )
-            initial_results = query_openai_api_with_logprobs(
-                messages,
-                model='qwen2.5-3b', # default: gpt-4o-mini-2024-07-18
-                n=1,
-                max_tokens=max_length,
-                temperature=self.args["temperature"],
-                top_p=self.args["top_p"],
-                # stops=['\n\n'],
-                tokenizer=self.tokenizer
-            )
-
+            if not self.use_api_generation:
+                initial_results = query_local_vllm_ids_with_logprobs(
+                    init_inputs,
+                    llm=self.llm,
+                    skip_special_tokens=False,
+                    max_tokens=max_length,
+                    stops=self.eos_tokens_set,
+                    temperature=self.args["temperature"],
+                    top_p=self.args["top_p"],
+                    use_ray=False
+                )
+            else:
+                initial_results = query_openai_api_with_logprobs_fast(
+                    init_inputs,
+                    n=1,
+                    max_tokens=max_length,
+                    temperature=self.args["temperature"],
+                    top_p=self.args["top_p"],
+                    tokenizer=self.tokenizer
+                )
             # initial_results = {content_token_id_lists, content_str_lists, finish_reason_lists, token_num_lists, log_probs_lists}
             if initial_results is None or initial_results[0] is None:
                 continue
             break
-        # import pdb;pdb.set_trace()
+
         for idx, (content_token_ids, _, finish_reason, _, log_probs) in enumerate(zip(*initial_results)):
+            kwargs = {
+                'evaluation_strategy': self.evaluation_strategy,
+                'question': problems[idx],
+                'declaration': parsed_declarations[idx] if parsed_declarations else None,
+            }
             root_node = TreeNode(
                 tree_idx=idx,
                 node_idx=0,
@@ -226,23 +247,20 @@ class EntropyGuidedChainLocalManager:
                 log_prob_list=log_probs,
                 is_end=True,
                 finish_reason=finish_reason,
-                max_length=max_length
-            ) # 一个完整的response作为一个node， [response]作品为tree_list
+                max_length=max_length,
+                **kwargs
+            )
             self.tree_lists.append([root_node])
 
         # iterate to expand the trees
         for iteration in range(L):
-            # print(f"第 {iteration + 1}/{L} 轮迭代")
-
             # collect all the entropy token indices of the expandable nodes
             expansion_tasks = []
             for tree_idx, tree_list in enumerate(self.tree_lists):
                 # first get the top-N nodes in each Node
                 tree_entropy_tokens = []
                 for node_idx, node in enumerate(tree_list):
-                    if not all(node.mask):  # 节点未被完全 mask
-                        # assert self.args['use_diverse_sampling'], f"not use_diverse_sampling"
-                        # assert self.args['diverse_upsampling'] == 5, f"not use_diverse_sampling"
+                    if not all(node.mask):
                         if self.args['use_diverse_sampling']:
                             entropy_tokens = node.get_max_entropy_tokens(
                                 top_n=N * self.args['diverse_upsampling']
@@ -251,9 +269,7 @@ class EntropyGuidedChainLocalManager:
                             entropy_tokens = node.get_max_entropy_tokens(
                                 top_n=N) # [token_idx, ...]
                         for token_idx in entropy_tokens:
-                            # 存储 (熵值, tree_idx, node_idx, node, token_idx)
-                            entropy_value = - \
-                                node.log_prob_list[token_idx]  # negative log probability as entropy
+                            entropy_value = -node.token_score[token_idx]
                             tree_entropy_tokens.append(
                                 (entropy_value, tree_idx,
                                  node_idx, node, token_idx)
@@ -262,7 +278,6 @@ class EntropyGuidedChainLocalManager:
                 # because it is the same problem, so we don't need to consider the entropy value across problems
                 # select the top-N nodes as the expansion tasks
                 tree_entropy_tokens.sort(reverse=True)  # sort by entropy value in descending order
-
                 if self.args['use_diverse_sampling']:
                     # get the candidate tokens of top-(ratio*N)
                     token_indices = [token_idx for _, _,
@@ -300,44 +315,54 @@ class EntropyGuidedChainLocalManager:
                 break
 
             # prepare the inference
-            m_tree_top_n_prompt_ids = []
+            m_tree_top_n_inputs = []
             task_mapping = {}
-            for i, (tree_idx, node_idx, node, split_idx) in enumerate(expansion_tasks * T):
+            for i, (tree_idx, node_idx, node, split_idx) in enumerate(repeat_lst(expansion_tasks, T)):
+                node.mask[split_idx] = True  # mark the token as masked to avoid repeated expansion in the next iterations
                 prefix_ids = node.get_prefix_ids(split_idx)
-                prompt_ids = init_prompt_ids_with_template + prefix_ids
-                m_tree_top_n_prompt_ids.append(prompt_ids)
+                prefix_input = prefix_ids if not self.use_api_generation else \
+                    [
+                        {"role": "assistant", "content": self.decode_fn(prefix_ids)},
+                        {"role": "user", "content": "Please continue."}
+                    ]
+                init_input_with_template = init_inputs[tree_idx]
+                m_tree_top_n_inputs.append(init_input_with_template + prefix_input)
                 task_mapping[i] = (tree_idx, node_idx, node, split_idx)
 
             # batch execute the inference
-            # inference_results = query_local_vllm_ids_with_logprobs(
-            #     m_tree_top_n_prompt_ids,
-            #     llm=self.llm,
-            #     skip_special_tokens=False,
-            #     max_tokens=max_length,
-            #     stops=self.eos_tokens_set,
-            #     temperature=self.args["temperature"],
-            #     top_p=self.args["top_p"],
-            #     use_ray=False
-            # )
-            messages=[[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": self.tokenizer.decode(prompt, skip_special_tokens=True)},
-            ] for prompt in m_tree_top_n_prompt_ids]
-            inference_results = query_openai_api_with_logprobs(
-                messages,
-                n=1,
-                max_tokens=max_length,
-                temperature=self.args["temperature"],
-                top_p=self.args["top_p"],
-                # stops=['\n\n'],
-                tokenizer=self.tokenizer
-            )
-            if inference_results is None or inference_results[0] is None:
-                continue
+            if not self.use_api_generation:
+                inference_results = query_local_vllm_ids_with_logprobs(
+                    m_tree_top_n_inputs,
+                    llm=self.llm,
+                    skip_special_tokens=False,
+                    max_tokens=max_length,
+                    stops=self.eos_tokens_set,
+                    temperature=self.args["temperature"],
+                    top_p=self.args["top_p"],
+                    use_ray=False
+                )
+            else:
+                inference_results = query_openai_api_with_logprobs_fast(
+                    m_tree_top_n_inputs,
+                    n=1,
+                    max_tokens=max_length,
+                    temperature=self.args["temperature"],
+                    top_p=self.args["top_p"],
+                    tokenizer=self.tokenizer
+                )
+                if inference_results is None or inference_results[0] is None:
+                    continue
 
             # process the results, update the tree structure
             for i, (content_token_ids, _, finish_reason, _, log_probs) in enumerate(zip(*inference_results)):
                 tree_idx, node_idx, parent_node, split_idx = task_mapping[i]
+
+                kwargs = {
+                    'evaluation_strategy': self.evaluation_strategy,
+                    'question': problems[tree_idx],
+                    'declaration': parsed_declarations[tree_idx] if parsed_declarations else None,
+                    'parent_implication': parent_node.get_prefix_implication(split_idx)
+                }
 
                 # split the current node at split_idx
                 new_node = TreeNode(
@@ -350,7 +375,8 @@ class EntropyGuidedChainLocalManager:
                     parent_node=parent_node,
                     parent_node_idx=node_idx,
                     parent_node_split_idx=split_idx,
-                    finish_reason=finish_reason
+                    finish_reason=finish_reason,
+                    **kwargs
                 )
 
                 # build the parent-child relationship
@@ -372,82 +398,68 @@ class EntropyGuidedChainLocalManager:
         #                 problem_str,
         #                 response_str,
         #                 answer_str,
-        #                 checker_urls=self.evaluator_urls,
-        #                 extractor_urls=self.extractor_urls
         #             )[-1]
         #             pass_k_result.append(score)
         #             node.binary_score = score
         #         else:
         #             pass_k_result.append(0)
         #             node.binary_score = 0
-        #         if args["use_pure_binary"]:
-        #             node.score = node.binary_score
-        #         else:
-        #             value = get_qwen_remote_reward_model_value(
-        #                 urls=args["entropy_rm_urls"], question=problem_str, response=node.total_str)
-        #             if args["use_pure_RM"]:
-        #                 a = 0.5
-        #                 b = -2.898
-        #                 x = a*(value-b)
-        #                 result = 1/(1+math.exp(-x))
-        #                 print("entropy rm_score", value, result)
-        #                 node.score = result
-        #             else:
-        #                 sigmoid_value = 1 / (1 + math.exp(-value))
-        #                 coeff = 0.5
-        #                 value = node.binary_score + coeff * sigmoid_value
-        #                 node.score = value
-        # paths['pass_k_result'] = pass_k_result
-        # paths['eval_time_use'] = time.time() - eval_time_start
-        # paths['time_use'] = time.time() - time_start
 
         # above is serial evaluation, below is parallel evaluation
         eval_time_start = time.time()
-        paths['pass_k_result'] = self.evaluate_trees(
-            problem_str,
-            answer_str,
-            args
-        )
-        paths['eval_time_use'] = time.time() - eval_time_start
-        paths['time_use'] = time.time() - time_start
-
-        # print('eval_time_use: ',
-        #       paths['eval_time_use'], '\ttime_use: ', paths['time_use'])
+        results_per_tree = self.evaluate_trees(problems, answers, args)
+        pass_k_results = [
+            [
+                item
+                for j in range(M)
+                for item in results_per_tree[i * M + j]
+            ]
+            for i in range(batch_size)
+        ]
+        self.paths['pass_k_result'] = pass_k_results
+        self.paths['eval_time_use'] = time.time() - eval_time_start
+        self.paths['time_use'] = time.time() - time_start
 
         # serialize the tree structure
-        paths['tree_structures'] = [
+        self.paths['tree_structures'] = [
             self.serialize_tree_list(tree_list) for tree_list in self.tree_lists
         ]
-        root, selected_terminals = build_into_tree_format(
-            self.tree_lists,
-            self.decode_fn,
-            args['num_traces'],
-            args["balance_ratio"],
-            args["average_one_generation"],
-            use_weighted_value=args["use_weighted_value"],
-            use_all_terminals=args["use_all_terminals"],
-            weighted_value_style=args["weighted_value_style"],
-            overall_norm_style=args["overall_norm_style"],
-            inner_repetition_penalty=args["inner_repetition_penalty"],
-        )
+        path_lst = []
+        for i in range(batch_size):
+            root, selected_terminals = build_into_tree_format(
+                self.tree_lists[i * M:(i + 1) * M],
+                self.decode_fn,
+                args['num_traces'],
+                args["balance_ratio"],
+                args["average_one_generation"],
+                use_weighted_value=args["use_weighted_value"],
+                use_all_terminals=args["use_all_terminals"],
+                weighted_value_style=args["weighted_value_style"],
+                overall_norm_style=args["overall_norm_style"],
+                inner_repetition_penalty=args["inner_repetition_penalty"],
+            )
+            # from parallel_mcts import visualize_tree
+            # visualize_tree(root)
 
-        paths = gather_paths(
-            root=root,
-            selected_terminals=selected_terminals,
-            pass_k=args['num_traces'],
-            use_orm_reward=args['use_orm_reward'],
-            use_chain_reward=args["use_chain_reward"],
-            step_level_norm=args["step_level_norm"],
-            use_state_value_reward=args["use_state_value_reward"],
-            use_value_only=args["use_value_only"],
-            average_one_generation=args["average_one_generation"],
-            advantage_mix_allancestor=args["advantage_mix_allancestor"]
-        )
+            paths = gather_paths(
+                root=root,
+                selected_terminals=selected_terminals,
+                pass_k=args['num_traces'],
+                use_orm_reward=args['use_orm_reward'],
+                use_chain_reward=args["use_chain_reward"],
+                step_level_norm=args["step_level_norm"],
+                use_state_value_reward=args["use_state_value_reward"],
+                use_value_only=args["use_value_only"],
+                average_one_generation=args["average_one_generation"],
+                advantage_mix_allancestor=args["advantage_mix_allancestor"]
+            )
+
+            path_lst.append(paths)
         if args["training_type"] == "general":
-            return paths,root.reward_raw
-        return paths
+            return path_lst, [sum(result_list) / len(result_list) for result_list in pass_k_results] # root.reward_raw
+        return path_lst
 
-    def serialize_tree_list(self, tree_list):
+    def serialize_tree_list(self, tree_list: List[TreeNode]) -> List[Dict[str, Any]]:
         """
         serialize the single tree list.
         """
@@ -470,21 +482,22 @@ class EntropyGuidedChainLocalManager:
         :param item: the data item, containing 'problem' and 'golden_answer'.
         :return: the processed paths and results.
         """
-        problem = item["problem"]
-        answer = item["golden_answer"]
+        problems = item["problem"]
+        answers = item["golden_answer"]
         system_prompt = args.get("system_prompt", None)
 
         if args["training_type"] == "general":
-            paths, raw_avg_reward = self.entropy_guided_chain(problem, answer, system_prompt=system_prompt, args=args)
+            paths, raw_avg_reward = self.entropy_guided_chain(problems, answers, system_prompt=system_prompt, args=args)
         else:
-            paths = self.entropy_guided_chain(problem, answer, system_prompt=system_prompt, args=args)
-        result = {
-            "problem": problem,
-            "golden_answer": answer,
+            paths = self.entropy_guided_chain(problems, answers, system_prompt=system_prompt, args=args)
+        
+        results = {
+            "problem": problems,
+            "golden_answer": answers,
             "paths": paths,
             "raw_avg_reward": raw_avg_reward if args["training_type"] == "general" else None
         }
-        return result
+        return results
 
     def select_diverse_tokens(self, token_indices, scores, n):
         """
