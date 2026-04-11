@@ -124,7 +124,9 @@ logs
 log
 outputs
 
-
+.nv/
+.cache/
+.cursor/
 .config/
 .netrc/
 .triton/
