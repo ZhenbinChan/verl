@@ -4,7 +4,8 @@
 - 2025.08: 新增 Evaluation 方法
 - 2025.09: 新增对于 PRM 的支持
 - 2025.10: 新增 LLM-as-Judege 作为 Process Reward Model
-- 2024.02: 新增对于 Tree Search 的支持（复现 TreeRL）
+- 2024.02: 新增对于 Tree Search 的支持（复现 TreeRL，但是是 step-level）
+- 2024.04: 将 TreeRL 的官方代码整合到训练阶段；整合 FOL 翻译和验证的代码；
 
 ## Table of Contents
 
@@ -66,6 +67,10 @@ python3 examples/data_preprocess/logiqa.py --local_dir data/logiqa
 ```
 python3 examples/data_preprocess/logiqa_tree.py --local_dir data/logiqa_tree
 ```
+### LogiQA for TreeRL
+```
+python3 examples/data_preprocess/logiqa_action.py --local_dir data/logiqa_action
+```
 
 
 # Evaluation
@@ -76,6 +81,7 @@ python3 examples/data_preprocess/logiqa_tree.py --local_dir data/logiqa_tree
 ```
 sh bash_scripts/eval.sh
 ```
+
 
 # LLM-as-Judge & PRM
 If you need to use LLM-as-Judge as a Process Reward Model (Generative PRM), you need to start an LLM service first and then call it via the vllm API.
@@ -104,6 +110,13 @@ reward_model.worker_type = 'async_judge'
 
 
 # Tree Sampling for RL Training
+
+## TreeRL for Training
+
+```sh bash_scripts/EntropyChain_LogiQA_smoke.sh```
+
+
+
 ## Step-level TreeRL
 
 We use LogiQA as the training set, please pre-processing the dataset before start training.
@@ -130,11 +143,6 @@ trainer.step_reward_type='treerl'
 
 
 
+
 # TODO
-1. 结点选择问题：
-  - 使用步骤的平均熵作为扩展结点的选择标准并不 make sense；
-  - 使用 Tree Sampling 的目的：(1) 对于同一个 prompt， 不同的 Tree 我们希望它是不同的思路，然后在同一个 Tree 里面的 node 的 state value 不应该全为 1/0 （使用 GRPO） 的情况下，才能充分学习和比对不同的思路的不同步骤。
-  - 不鼓励使用叶子结点进行扩展（不少的样本使用叶子结点进行 expansion）
-2. FOL Reward 的脆弱性：在 Response 质量非常差的情况下，外部调用的 LLM 无法翻译成功（由于没有 OpenAI 的key，这里使用的阿里 Qwen-plus 的 API），导致无法提供一个准确的 Reward；
-   - 怎么才能使得翻译更加通用并且鲁棒？
-3. 优势估计部分：根据 Tree Sampling 的策略进行指定吧。
+1. 将 MCTS sampling 和 FOL as PRM 整合到训练流程
