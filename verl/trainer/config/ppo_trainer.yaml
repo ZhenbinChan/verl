@@ -206,6 +206,19 @@ reward_model:
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
   reward_manager: naive
+  # Extra kwargs passed to the reward manager ctor (e.g. EntropyRewardManager: reward_style).
+  # Must exist for Hydra struct-mode overrides like reward_model.reward_kwargs.reward_style=...
+  reward_kwargs:
+    reward_style: state_value
+    # EntropyRewardManager: print value tree after back-prop (verbose; use local rank gate in multi-worker)
+    print_entropy_tree: false
+    print_entropy_tree_max_preview_chars: 80
+    print_entropy_tree_local_rank_only: true
+    # EntropyRewardManager: save one PNG per tree via Graphviz: {prompt_idx}_{global_entropy_tree_idx}.png
+    entropy_tree_graphviz_dir: null
+    entropy_tree_graphviz_view: false
+    entropy_tree_graphviz_max_label_chars: 48
+    entropy_tree_graphviz_local_rank_only: true
   launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
 
 custom_reward_function:
@@ -235,11 +248,21 @@ trainer:
   log_val_generations: 0
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   validation_data_dir: null # directory for logging the validation data, no dump if null
-  tree_sampling: false   # enable entropy-guided tree sampling
+  # --- Sampling strategy ---
+  sampling_strategy: null # Accepted values: null | tree_search | treerl | mcts (not yet implemented)
+  # tree_search-specific settings
   branch_level: step    # step: previous implementation; token: per-token node expansion
   step_reward_type: random  # random | fol | format
   tree_rounds: 1        # number of tree expansion rounds
   tree_top_k: 1         # branches per sample when branch_level=step (token mode always picks top-1)
+  # treerl-specific settings (entropy chain)
+  entropy_chain_config:
+    N: 4   # top-N entropy tokens per tree per round
+    L: 3   # expansion rounds
+    T: 1   # sampling times per expansion point
+    max_token_num: 4096
+    evaluation_strategy: token-entropy
+    enforce_uniform_per_prompt: true  # truncate to same sample count for each prompt
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

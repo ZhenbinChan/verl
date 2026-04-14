@@ -24,15 +24,18 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 # from verl.trainer.ppo.reward import load_reward_manager
 
 
-# Vscode debug 使用
-import debugpy
-try:
-   # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
-   debugpy.listen(("localhost", 9501))
-   print("Waiting for debugger attach")
-   debugpy.wait_for_client()
-except Exception as e:
-   print(f"Debugpy failed to start: {e}")   
+# # Vscode debug 使用
+# import debugpy
+# try:
+#    # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#    debugpy.listen(("localhost", 9501))
+#    print("Waiting for debugger attach")
+#    debugpy.wait_for_client()
+# except Exception as e:
+#    print(f"Debugpy failed to start: {e}")   
+
+
+
 # 同时在vscode debuger 加入：
 #{
 #            "name": "sh_file_debug",
@@ -201,44 +204,32 @@ class TaskRunner:
         if reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
             reward_manager_cls = NaiveRewardManager
-
         elif reward_manager_name == "prime":
             from verl.workers.reward_manager import PrimeRewardManager
             reward_manager_cls = PrimeRewardManager
-
         elif reward_manager_name == "batch":
             from verl.workers.reward_manager import BatchRewardManager
             reward_manager_cls = BatchRewardManager
-
         elif reward_manager_name == "dapo":
             from verl.workers.reward_manager import DAPORewardManager
             reward_manager_cls = DAPORewardManager
-
         elif reward_manager_name == "naive_plus":
             from verl.workers.reward_manager import NaivePlusRewardManager
             reward_manager_cls = NaivePlusRewardManager
-
         elif reward_manager_name == "naive_math220k":
             from verl.workers.reward_manager import NaiveMath220KRewardManager
             reward_manager_cls = NaiveMath220KRewardManager
-
         elif reward_manager_name == "tree":
             from verl.workers.reward_manager import TreeRewardManager
             reward_manager_cls = TreeRewardManager
-
+        elif reward_manager_name == "entropy":
+            from verl.workers.reward_manager import EntropyRewardManager
+            reward_manager_cls = EntropyRewardManager
         else:
             raise NotImplementedError
 
         compute_score = get_custom_reward_fn(config)
         reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, reward_fn_key=config.data.reward_fn_key, **config.reward_model.get("reward_kwargs", {}))
-        # reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-
-        # validation reward function
-        # if reward_manager_name == "prm":
-        #     from verl.workers.reward_manager import NaivePlusRewardManager
-
-        #     val_reward_fn = NaivePlusRewardManager(tokenizer=tokenizer, num_examine=1, compute_score=compute_score, reward_fn_key=config.data.reward_fn_key)
-        # val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1)
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score, reward_fn_key=config.data.reward_fn_key, **config.reward_model.get("reward_kwargs", {}))
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)

@@ -131,9 +131,13 @@ outputs
 .netrc/
 .triton/
 .netrc
+.tmp_*
 
 eval_output/
 eval/
+
+visualization/
+ckpt/
 
 output_models/
 results/

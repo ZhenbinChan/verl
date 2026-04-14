@@ -109,6 +109,20 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
+def compute_entropy_reinforce_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    """TreeRL-aligned dense reward as advantage.
+
+    In TreeRL's reinforce path, token-level rewards are used directly in the
+    clipped policy objective. We mimic that behavior by treating masked
+    token-level rewards as both advantages and returns.
+    """
+    advantages = token_level_rewards * response_mask
+    return advantages, advantages
+
+
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,

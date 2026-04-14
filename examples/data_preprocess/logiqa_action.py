@@ -24,17 +24,9 @@ import datasets
 from verl.utils.hdfs_io import copy, makedirs
 
 
-def extract_solution(solution_str):
-    solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
-    assert solution is not None
-    final_solution = solution.group(0)
-    final_solution = final_solution.split("#### ")[1].replace(",", "")
-    return final_solution
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="~/data/gsm8k")
+    parser.add_argument("--local_dir", default="/home/chenzhb/Workspaces/verl/data/logiqa_action/")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
@@ -49,7 +41,9 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]
 
-    instruction_following = 'Please reason step by step with steps separated by "\n\n", and put the index of the correct answer within \\boxed{{}}.'
+    with open("/home/chenzhb/Workspaces/verl/mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
+        instruction_following = f.read()
+    instruction_following = str(instruction_following)
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):

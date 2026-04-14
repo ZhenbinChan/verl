@@ -60,7 +60,6 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.utils.tree_structure import TreeManager
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 WorkerType = Type[Worker]
@@ -94,6 +93,7 @@ class AdvantageEstimator(str, Enum):
     STEP_GRPO = "step_grpo"
     Tree_GRPO = "tree_grpo"
     Tree_GAE = "tree_gae"
+    ENTROPY_REINFORCE = "entropy_reinforce"
 
 
 @dataclass
@@ -193,8 +193,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
-    # prepare response group
-    # TODO: add other ways to estimate advantages
+    
     if adv_estimator == AdvantageEstimator.GAE:
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -206,7 +205,6 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO:
-        # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
         if multi_turn:
             # If multi-turn, replace the mask with the relevant part of loss_mask
@@ -294,6 +292,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             lam=lam,
         )
         data.batch["values"] = values
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.ENTROPY_REINFORCE:
+        advantages, returns = core_algos.compute_entropy_reinforce_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+        )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     else:
@@ -395,15 +400,12 @@ class RayPPOTrainer:
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
-        self.tree_sampling = bool(config.trainer.get("tree_sampling", True))
-        self.branch_level = config.trainer.get("branch_level", "step")
-        self.step_reward_type = config.trainer.get("step_reward_type", "random")
+        from verl.trainer.ppo.sampling import create_sampling_strategy
 
-        self.tree_manager = TreeManager(
-            tokenizer=self.tokenizer,
-            pad_token_id=getattr(self.tokenizer, "pad_token_id", 0),
-            branch_level=self.branch_level,
-            step_reward_type=self.step_reward_type,
+        self.sampling_strategy = create_sampling_strategy(config, self.tokenizer)
+        # tree_search strategy requires tree-specific reward manager / adv estimator
+        self.tree_sampling = (
+            str(config.trainer.get("sampling_strategy", "")).lower() == "tree_search"
         )
 
         self.record_table = None
@@ -424,6 +426,7 @@ class RayPPOTrainer:
             AdvantageEstimator.STEP_GRPO,
             AdvantageEstimator.Tree_GRPO,
             AdvantageEstimator.Tree_GAE,
+            AdvantageEstimator.ENTROPY_REINFORCE,
         ]:
             self.use_critic = False
         else:
@@ -556,6 +559,15 @@ class RayPPOTrainer:
                 f"tree_sampling=True requires algorithm.adv_estimator to be 'tree_grpo' or 'tree_gae', "
                 f"but got '{config.algorithm.adv_estimator}'. "
                 f"Standard advantage estimators do not consume tree structure data (state_value_scores, step_q_scores, etc.)."
+            )
+
+        # treerl (entropy chain) strategy requires entropy reward manager
+        if str(config.trainer.get("sampling_strategy", "")).lower() == "treerl":
+            reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            assert reward_manager_name == "entropy", (
+                f"sampling_strategy='treerl' requires reward_model.reward_manager='entropy', "
+                f"but got '{reward_manager_name}'. "
+                f"Use EntropyRewardManager for tree-level value back-propagation rewards."
             )
 
         print("[validate_config] All configuration checks passed successfully!")
@@ -754,15 +766,16 @@ class RayPPOTrainer:
                     val_reward_dict = {f"val_{k}": v for k, v in result["reward_detail"].items()}
 
                     # 更新 validation table
-                    for i in range(len(result["ground_truth"])):
-                        self.validation_table.add_data(
-                            self.global_eps,
-                            self.global_steps,
-                            str(result["prompt"][i]),
-                            str(result["response"][i]),
-                            str(result["ground_truth"][i]),
-                            str(result["outcome_reward"][i])
-                        )
+                    if self.validation_table is not None:
+                        for i in range(len(result["ground_truth"])):
+                            self.validation_table.add_data(
+                                self.global_eps,
+                                self.global_steps,
+                                str(result["prompt"][i]),
+                                str(result["response"][i]),
+                                str(result["ground_truth"][i]),
+                                str(result["outcome_reward"][i])
+                            )
                     pprint(result["reward_detail"])
             else:
                 pprint("Detail Reward Info is None !")
@@ -1072,44 +1085,27 @@ class RayPPOTrainer:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)# torch.Size([batch size *n, 2560])
                             self.async_rollout_manager.sleep()
-
-                    # ---------------------- Tree Sampling 相关逻辑 ---------------------- #
-                    if self.tree_sampling:
-                        self.tree_manager.branch_level = self.branch_level
-                        # 将初步生成的结果写入 tree manager 中，进行树的初始化
-                        self.tree_manager.initialize_trees(
-                            gen_batch=gen_batch,
-                            gen_batch_output=gen_batch_output,
-                            compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
-                        )
-
-                        # 多轮 Top-K 扩展：每轮挑选最高熵的 k 个步骤进行扩展
-                        tree_rounds = self.config.trainer.get("tree_rounds", 1)
-                        tree_top_k = self.config.trainer.get("tree_top_k", 1)
-                        for _ in range(max(1, tree_rounds)):
-                            top_k_nodes = self.tree_manager.get_top_k_entropy_nodes(tree_top_k)# 计算 Top k 的熵节点，返回节点信息（包含生成输入等）
-                            branch_plan = self.tree_manager.prepare_branches(target_nodes=top_k_nodes)# 根据节点信息准备生成输入，比如 input_ids、attention_mask 等，并打包成 branch_batch
-                            if branch_plan is not None and branch_plan.branch_batch is not None and branch_plan.batch_size > 0:
-                                with _timer("gen_branch", timing_raw):
-                                    branch_gen_output = self.actor_rollout_wg.generate_sequences(branch_plan.branch_batch)
-                                self.tree_manager.commit_branch_outputs(branch_gen_output, branch_plan, compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob)
-                                
-
-                        # ------- print tree for debugging ------- #
-                        for i in range(len(self.tree_manager.trees)):
-                            self.tree_manager.pretty_print_tree(i)
-                        # --------------------------------------- #
-                        self.tree_manager.backpropagate_correctness()# MCTS-style correctness backpropagation / TreeRL Node Value
-                        self.tree_manager.compute_q_values(gamma=self.config.algorithm.get("gamma", 1))# Return / Q Value Calculation
-                        self.tree_manager.apply_treerl_rewards()# TreeRL Reward Calculation
-                        # Bulid response batch from tree, replace gen_batch_output for later reward computation and advantage estimation
-                        tree_batch_output = self.tree_manager.build_response_batch(
-                            batch_index_list=None, 
-                            gen_batch_output=gen_batch_output
-                        )
-                        if tree_batch_output is not None:
-                            gen_batch_output = tree_batch_output
-     
+                    # -------------------- Sampling strategy (tree / entropy_chain) -------------------- #
+                    if self.sampling_strategy is not None:
+                        if self.async_rollout_mode:
+                            self.async_rollout_manager.wake_up()
+                        try:
+                            _generate_fn = (
+                                self.async_rollout_manager.generate_sequences
+                                if self.async_rollout_mode
+                                else self.actor_rollout_wg.generate_sequences
+                            )
+                            sampling_result = self.sampling_strategy.run(
+                                gen_batch=gen_batch,
+                                gen_batch_output=gen_batch_output,
+                                generate_fn=_generate_fn,
+                                compute_log_prob_fn=self.actor_rollout_wg.compute_log_prob,
+                                timing_raw=timing_raw,
+                            )
+                            gen_batch_output = sampling_result.gen_batch_output
+                        finally:
+                            if self.async_rollout_mode:
+                                self.async_rollout_manager.sleep()
                     # --------------------------------------------------------------------------- #
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
@@ -1128,21 +1124,16 @@ class RayPPOTrainer:
                             del gen_baseline_batch, gen_baseline_output
 
                     
-                    # ------------   Repeat batch for Tree Sampling & union the response ------------- #
-                    repeat_times = self.config.actor_rollout_ref.rollout.n
-                    if self.tree_sampling:
-                        # 因为进行了 Tree Search，重复的次数要重新计算
-                        repeat_times = int(gen_batch_output.batch.batch_size[0]) // int(gen_batch.batch.batch_size[0])
-                        if not isinstance(repeat_times, int) or repeat_times < 1:
-                            raise ValueError(f"Invalid repeat times calculated from tree sampling: {repeat_times}")
-                        # print(f"Tree sampling enabled, repeating batch {repeat_times} times to align with generated responses")
+                    # -------- Repeat batch to align with (possibly expanded) responses -------- #
+                    if self.sampling_strategy is not None:
+                        repeat_times = sampling_result.repeat_times
+                    else:
+                        repeat_times = self.config.actor_rollout_ref.rollout.n
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)
                     batch = batch.union(gen_batch_output)
                     # --------------------------------------------------------------------------------- #
-
-
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1154,14 +1145,7 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     with _timer("reward", timing_raw):
-                        # using_tree_rewards = "reward_fn_scores" in batch.batch
-                        # using_tree_rewards = self.tree_sampling
-                        
-                        # [info] 对每一步使用 Outcome Reward 加权使用
-                        # reward_dict = self.reward_fn(batch, return_dict=True)
-                        # batch.union(DataProto.from_dict({"outcome_reward":reward_dict["reward_tensor"]}))
-
-                        # compute reward model score 使用 Reward Model
+                        # If use_rm is True, It will compute reward model score using RewardModelWorker and update batch with 'rm_scores' key
                         if self.use_rm:
                             import time
                             start = time.perf_counter()
@@ -1170,8 +1154,7 @@ class RayPPOTrainer:
                             end = time.perf_counter()
                             print(f"[Info] Compute PRM cost {end - start} seconds, per sample cost {(end-start)/len(batch)}, {len(batch)} samples in total!!")
                         
-                        # 使用 Tree Structure 里面的 Reward
-                        # if using_tree_rewards:
+                        # Reward Function Manager
                         if self.tree_sampling:
                             reward_fn_tensor = batch.batch.get("reward_fn_scores")
                             if reward_fn_tensor is None:
@@ -1181,26 +1164,27 @@ class RayPPOTrainer:
                                 verifiable_rewards = reward_fn_tensor.sum(-1)
                                 batch.union(DataProto.from_dict({"verifiable_rewards": verifiable_rewards}))
                             reward_tensor = reward_fn_tensor
-                            reward_dict = self.reward_fn(batch, return_dict=True) # reward fn = reward manager cls / compute score / __call__
+                            reward_dict = self.reward_fn(batch, return_dict=True)
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
-                                for i in range(len(reward_dict["ground_truth"])):
-                                    self.record_table.add_data(
-                                        epoch,
-                                        self.global_steps,
-                                        str(reward_dict["prompt"][i]),
-                                        str(reward_dict["response"][i]),
-                                        str(reward_dict["ground_truth"][i]),
-                                        str(reward_dict["outcome_reward"][i])
-                                    )
+                                if self.record_table is not None:
+                                    for i in range(len(reward_dict["ground_truth"])):
+                                        self.record_table.add_data(
+                                            epoch,
+                                            self.global_steps,
+                                            str(reward_dict["prompt"][i]),
+                                            str(reward_dict["response"][i]),
+                                            str(reward_dict["ground_truth"][i]),
+                                            str(reward_dict["outcome_reward"][i])
+                                        )
                         else:
-                            # if self.config.reward_model.launch_reward_fn_async:
-                            #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                            # else:
-                            reward_dict = self.reward_fn(batch, return_dict=True) #[info] 上面如果不先计算 ORM，解除注释这一行
+                            if self.config.reward_model.launch_reward_fn_async:
+                                future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                            else:
+                                reward_dict = self.reward_fn(batch, return_dict=True)
                             
                             # PRM: function reward
-                            reward_fn_tensor = reward_dict["reward_tensor"]# Outcome Reward
+                            reward_fn_tensor = reward_dict["reward_tensor"]
                             if not self.use_rm:
                                 reward_tensor = reward_fn_tensor
                             reward_fn_dict = DataProto.from_dict({
@@ -1215,15 +1199,16 @@ class RayPPOTrainer:
                             #     print(reward_dict["reward_detail"])
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
-                                for i in range(len(reward_dict["ground_truth"])):
-                                    self.record_table.add_data(
-                                        epoch,
-                                        self.global_steps,
-                                        str(reward_dict["prompt"][i]),
-                                        str(reward_dict["response"][i]),
-                                        str(reward_dict["ground_truth"][i]),
-                                        str(reward_dict["outcome_reward"][i])
-                                    )
+                                if self.record_table is not None:
+                                    for i in range(len(reward_dict["ground_truth"])):
+                                        self.record_table.add_data(
+                                            epoch,
+                                            self.global_steps,
+                                            str(reward_dict["prompt"][i]),
+                                            str(reward_dict["response"][i]),
+                                            str(reward_dict["ground_truth"][i]),
+                                            str(reward_dict["outcome_reward"][i])
+                                        )
                             ##########################################################
 
 
