@@ -26,6 +26,21 @@ export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
 export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
 export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
 
+# 1. 建立隧道 (利用动态变量)
+pkill -f "L 7897:127.0.0.1:7897" || true
+sleep 2
+ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -f -L 7897:127.0.0.1:7897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
+sleep 2
+
+# 2. 设置代理变量
+export http_proxy=http://127.0.0.1:7897
+export https_proxy=http://127.0.0.1:7897
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+
+# 3. 运行 Python
+
+python test_gemini_api.py
 # Step-GDPO normal training (对标 one_epoch_dapo.sh)
 # 变化点 vs DAPO:
 #   algorithm.adv_estimator: grpo -> step_gdpo
@@ -37,6 +52,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \
     +algorithm.fol_max_tries=1 \
+    +algorithm.fol_timeout=10 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \

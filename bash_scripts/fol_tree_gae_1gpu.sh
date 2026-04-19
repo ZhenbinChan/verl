@@ -73,6 +73,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=fol \
     +algorithm.fol_max_tries=1 \
+    +algorithm.fol_timeout=10 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
