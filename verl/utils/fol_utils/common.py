@@ -11,8 +11,10 @@ import concurrent.futures
 import contextlib
 import io
 import json
+import logging
 import multiprocessing
 import os
+import random
 import re
 import signal
 import string
@@ -28,6 +30,42 @@ from string import Template
 from typing import Any, Optional, Union
 
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+# Error-message fragments that indicate a transient Gemini API failure worth retrying.
+# Kept as substrings (case-sensitive against upstream messages) so we can fall back
+# to string matching when google.genai.errors types are unavailable or subclassed oddly.
+_GEMINI_TRANSIENT_MARKERS = (
+    "503",
+    "502",
+    "500",
+    "429",
+    "UNAVAILABLE",
+    "RESOURCE_EXHAUSTED",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+    "overloaded",
+)
+
+
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    try:
+        from google.genai import errors as genai_errors  # type: ignore
+
+        for cls_name in ("ServerError", "ServiceUnavailableError", "ResourceExhaustedError"):
+            cls = getattr(genai_errors, cls_name, None)
+            if cls is not None and isinstance(exc, cls):
+                return True
+        api_error_cls = getattr(genai_errors, "APIError", None)
+        if api_error_cls is not None and isinstance(exc, api_error_cls):
+            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            if code in (429, 500, 502, 503, 504):
+                return True
+    except Exception:
+        pass
+    msg = str(exc)
+    return any(marker in msg for marker in _GEMINI_TRANSIENT_MARKERS)
 
 # ---------------------------------------------------------------------------
 # Prompt path constants
@@ -69,7 +107,7 @@ def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
                 api_key=api_key,
                 base_url=base_url,
                 timeout=timeout,
-                max_retries=1,
+                max_retries=3,
             )
             _client_cache[cache_key] = client
         return client
@@ -202,15 +240,35 @@ def call_gemini(
     thinking_budget = cfg.get("thinking_budget", 0)
     if thinking_budget > 0:
         config.thinking_config = types.ThinkingConfig(include_thoughts=True)
-        # Note: thinking_budget is not yet standardized across SDK versions, 
+        # Note: thinking_budget is not yet standardized across SDK versions,
         # using a common setting if available.
 
-    response = client.models.generate_content(
-        model=cfg["model"],
-        contents=user_prompt,
-        config=config,
-    )
-    return response.text
+    # Independent from Z3 correct_loop `max_tries`: this is Gemini API-level
+    # transient-error retry (429 / 5xx / UNAVAILABLE), not logical retries.
+    max_retries = int(cfg.get("gemini_api_max_retries", 5))
+    base_delay = float(cfg.get("gemini_api_retry_base_delay", 2.0))
+    max_delay = float(cfg.get("gemini_api_retry_max_delay", 60.0))
+
+    attempt = 0
+    while True:
+        try:
+            response = client.models.generate_content(
+                model=cfg["model"],
+                contents=user_prompt,
+                config=config,
+            )
+            text = getattr(response, "text", None)
+            return text or ""
+        except Exception as exc:
+            if attempt >= max_retries or not _is_transient_gemini_error(exc):
+                raise
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            logger.warning(
+                "Gemini transient error (attempt %d/%d), sleeping %.1fs: %s",
+                attempt + 1, max_retries, delay, str(exc)[:200],
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 def call_llm_structured(
