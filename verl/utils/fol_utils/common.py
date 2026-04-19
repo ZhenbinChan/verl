@@ -37,15 +37,18 @@ logger = logging.getLogger(__name__)
 # Kept as substrings (case-sensitive against upstream messages) so we can fall back
 # to string matching when google.genai.errors types are unavailable or subclassed oddly.
 _GEMINI_TRANSIENT_MARKERS = (
-    "503",
-    "502",
-    "500",
-    "429",
-    "UNAVAILABLE",
-    "RESOURCE_EXHAUSTED",
-    "DEADLINE_EXCEEDED",
-    "INTERNAL",
-    "overloaded",
+    # HTTP status / google API status
+    "503", "502", "500", "504", "429",
+    "UNAVAILABLE", "RESOURCE_EXHAUSTED",
+    "DEADLINE_EXCEEDED", "INTERNAL", "overloaded",
+    # httpx / connection-level (proxy flap, tunnel drop, keep-alive expired,
+    # 机场 RST under concurrent-connection limits)
+    "Server disconnected", "disconnected without sending",
+    "RemoteProtocolError", "ConnectError", "ConnectTimeout",
+    "ReadError", "ReadTimeout", "WriteError", "WriteTimeout",
+    "PoolTimeout", "Connection reset", "Connection aborted",
+    "ProxyError", "SSLError", "Errno 104",
+    "timed out", "Timeout",
 )
 
 
@@ -95,6 +98,14 @@ _gemini_client_cache: dict[str, Any] = {}
 _client_cache_lock = threading.Lock()
 _gemini_last_call = 0.0
 _gemini_rate_lock = threading.Lock()
+# Process-wide cap on concurrent in-flight Gemini calls. Prevents one worker's
+# 16-thread pool from bursting 16 simultaneous TCP connections through a
+# low-capacity proxy (Clash/机场 typically limits concurrent connections per
+# account). Override with env FOL_GEMINI_MAX_INFLIGHT if mihomo + your 机场
+# can handle more (or less).
+_gemini_inflight_sem = threading.Semaphore(
+    int(os.environ.get("FOL_GEMINI_MAX_INFLIGHT", "8"))
+)
 
 
 def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
@@ -244,19 +255,22 @@ def call_gemini(
         # using a common setting if available.
 
     # Independent from Z3 correct_loop `max_tries`: this is Gemini API-level
-    # transient-error retry (429 / 5xx / UNAVAILABLE), not logical retries.
-    max_retries = int(cfg.get("gemini_api_max_retries", 5))
+    # transient-error retry (429 / 5xx / UNAVAILABLE / conn-reset), not logical retries.
+    # Default 3 instead of 5: sustained link outages (>30s) are not fixed by more retries,
+    # just waste wall-clock time per failing call (5 retries = ~65s, 3 retries = ~14s).
+    max_retries = int(cfg.get("gemini_api_max_retries", 3))
     base_delay = float(cfg.get("gemini_api_retry_base_delay", 2.0))
-    max_delay = float(cfg.get("gemini_api_retry_max_delay", 60.0))
+    max_delay = float(cfg.get("gemini_api_retry_max_delay", 30.0))
 
     attempt = 0
     while True:
         try:
-            response = client.models.generate_content(
-                model=cfg["model"],
-                contents=user_prompt,
-                config=config,
-            )
+            with _gemini_inflight_sem:
+                response = client.models.generate_content(
+                    model=cfg["model"],
+                    contents=user_prompt,
+                    config=config,
+                )
             text = getattr(response, "text", None)
             return text or ""
         except Exception as exc:

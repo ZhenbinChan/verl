@@ -23,20 +23,54 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # These env vars are the default fallback; can also be overridden via
 # +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
-export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
+# OPENAI_BASE_URL: only matters for non-Gemini models. Gemini models route
+# through google-genai SDK and ignore this. Leave unset for direct Gemini.
+# export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
+export FOL_MODEL=${FOL_MODEL:-"gemini-2.5-flash-lite"}
+# Per-worker rate limit (calls/min). 6 workers * 60 = 360 RPM aggregate,
+# well within mihomo + 机场 capacity (measured ~50 concurrent burst, ~25 TPS sustained).
+export FOL_RPM=${FOL_RPM:-60}
+# Process-wide cap on in-flight Gemini calls per RewardLoopWorker.
+# Each worker has a 16-thread pool — without this cap a single worker can burst
+# 16 simultaneous TCP connections through the proxy, triggering 机场 RST limits.
+export FOL_GEMINI_MAX_INFLIGHT=${FOL_GEMINI_MAX_INFLIGHT:-8}
 
-# 1. 建立隧道 (利用动态变量)
-pkill -f "L 7897:127.0.0.1:7897" || true
+# 1. 建立隧道到 login node 上的 mihomo (端口 7897)
+#    KeepAlive 防止训练长时间空闲后隧道被中间设备断开
+echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:7897 ..."
+pkill -f "L 7897:127.0.0.1:7897" 2>/dev/null || true
 sleep 2
-ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -f -L 7897:127.0.0.1:7897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
+ssh -i ~/.ssh/id_ed25519 \
+    -o StrictHostKeyChecking=no \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes \
+    -N -f -L 7897:127.0.0.1:7897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
 sleep 2
 
-# 2. 设置代理变量
+# 验证隧道是否建立成功
+if ! ss -tln 2>/dev/null | grep -q ':7897'; then
+    echo "ERROR: SSH tunnel to 7897 failed to bind. Aborting." >&2
+    exit 1
+fi
+echo "Tunnel up. Verifying mihomo proxy ..."
+PROXY_TEST=$(curl -s -x http://127.0.0.1:7897 -o /dev/null \
+    -w "%{http_code}" --max-time 10 \
+    https://generativelanguage.googleapis.com/v1beta/models 2>/dev/null || echo "000")
+echo "Proxy probe → HTTP ${PROXY_TEST} (expect 400/403 = proxy ok, key not used)"
+if [ "$PROXY_TEST" = "000" ]; then
+    echo "ERROR: Proxy unreachable through tunnel. Check mihomo on ${SLURM_SUBMIT_HOST}." >&2
+    exit 1
+fi
+
+# 2. 设置代理变量 (除 NO_PROXY 内的目标外都走代理)
 export http_proxy=http://127.0.0.1:7897
 export https_proxy=http://127.0.0.1:7897
 export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
+export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
+export no_proxy="$NO_PROXY"
 
 # 3. 运行 Python
 
