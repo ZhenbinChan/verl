@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-# import time
+import time
 import traceback
 from functools import wraps
 from pathlib import Path
@@ -53,7 +53,10 @@ def load_prompt(path: Union[str, Path]) -> str:
 # OpenAI client management (connection pooling)
 # ---------------------------------------------------------------------------
 _client_cache: dict[tuple, OpenAI] = {}
+_gemini_client_cache: dict[str, Any] = {}
 _client_cache_lock = threading.Lock()
+_gemini_last_call = 0.0
+_gemini_rate_lock = threading.Lock()
 
 
 def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
@@ -72,6 +75,26 @@ def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
         return client
 
 
+def get_gemini_client(api_key: str) -> Any:
+    """Return a cached Gemini client (google-genai SDK). Lazy import."""
+    if api_key in _gemini_client_cache:
+        return _gemini_client_cache[api_key]
+
+    try:
+        from google import genai
+    except ImportError:
+        raise ImportError(
+            "The 'google-genai' package is required for Gemini models. "
+            "Please install it with 'pip install google-genai'."
+        )
+
+    with _client_cache_lock:
+        if api_key not in _gemini_client_cache:
+            client = genai.Client(api_key=api_key)
+            _gemini_client_cache[api_key] = client
+        return _gemini_client_cache[api_key]
+
+
 # ---------------------------------------------------------------------------
 # LLM call wrappers
 # ---------------------------------------------------------------------------
@@ -82,6 +105,7 @@ def _get_default_api_config() -> dict:
         "model": os.environ.get("FOL_MODEL", os.environ.get("FOL_SLM_MODEL", "gpt-4o-mini")),
         "api_key": os.environ.get("OPENAI_API_KEY", "EMPTY"),
         "base_url": os.environ.get("OPENAI_BASE_URL", os.environ.get("FOL_SLM_BASE_URL", None)),
+        "rpm": float(os.environ.get("FOL_RPM", 10)),
         "temperature": 0.2,
         "max_tokens": 4096,
         "top_p": 0.8,
@@ -128,6 +152,8 @@ def call_llm(
     # _prompt_preview = user_prompt[:80].replace('\n', '\\n')
     # print(f"[LLM][{_tid}] #{call_id} → {cfg['model']}@{cfg.get('base_url','?')}  prompt={_prompt_preview!r}...", flush=True)
     # _t = time.time()
+    if cfg["model"].startswith("gemini"):
+        return call_gemini(user_prompt, cfg, system_prompt=system_prompt)
 
     client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
     completion = client.chat.completions.create(
@@ -144,6 +170,47 @@ def call_llm(
     # print(f"[LLM][{_tid}] #{call_id} ← {time.time()-_t:.2f}s  {_tok}  resp_len={len(_resp)}", flush=True)
     # return _resp
     return completion.choices[0].message.content or ""
+
+
+def call_gemini(
+    user_prompt: str,
+    cfg: dict,
+    system_prompt: Optional[str] = None,
+) -> str:
+    """Call Google Gemini API with rate limiting."""
+    global _gemini_last_call
+
+    client = get_gemini_client(cfg["api_key"])
+    rpm = cfg.get("rpm", 10)
+    min_interval = 60.0 / max(rpm, 0.1)
+
+    with _gemini_rate_lock:
+        dt = time.time() - _gemini_last_call
+        if dt < min_interval:
+            time.sleep(min_interval - dt)
+        _gemini_last_call = time.time()
+
+    from google.genai import types
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=cfg.get("temperature", 0.2),
+        max_output_tokens=cfg.get("max_tokens", 4096),
+        top_p=cfg.get("top_p", 0.8),
+    )
+
+    # thinking_budget support
+    thinking_budget = cfg.get("thinking_budget", 0)
+    if thinking_budget > 0:
+        config.thinking_config = types.ThinkingConfig(include_thoughts=True)
+        # Note: thinking_budget is not yet standardized across SDK versions, 
+        # using a common setting if available.
+
+    response = client.models.generate_content(
+        model=cfg["model"],
+        contents=user_prompt,
+        config=config,
+    )
+    return response.text
 
 
 def call_llm_structured(
