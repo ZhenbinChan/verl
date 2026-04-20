@@ -238,9 +238,9 @@ def call_llm(
             _openai_last_call = time.time()
 
     client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
-    max_retries = int(cfg.get("api_max_retries", 3))
-    base_delay = float(cfg.get("api_retry_base_delay", 5.0))
-    max_delay = float(cfg.get("api_retry_max_delay", 60.0))
+    max_retries = int(cfg.get("api_max_retries", 5))
+    base_delay = float(cfg.get("api_retry_base_delay", 10.0))
+    max_delay = float(cfg.get("api_retry_max_delay", 300.0))
 
     attempt = 0
     while True:
@@ -258,12 +258,13 @@ def call_llm(
         except Exception as exc:
             if attempt >= max_retries or not _is_transient_openai_error(exc):
                 logger.error("Max retries exceeded at OpenAI SDK. Rewarding 0.0.")
+                exit()
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
-            logger.warning(
-                "OpenAI API transient error (attempt %d/%d), sleeping %.1fs: %s",
-                attempt + 1, max_retries, delay, str(exc)[:200],
-            )
+            # logger.warning(
+            #     "OpenAI API transient error (attempt %d/%d), sleeping %.1fs: %s",
+            #     attempt + 1, max_retries, delay, str(exc)[:200],
+            # )
             time.sleep(delay)
             attempt += 1
 
