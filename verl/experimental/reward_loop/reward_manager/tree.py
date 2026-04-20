@@ -182,11 +182,14 @@ class TreeRewardManager(RewardManagerBase):
             use_xml_cfg = algo_cfg.get("use_xml_steps", None)
         self.use_xml = bool(use_xml_cfg) if use_xml_cfg is not None else False
 
-        # Thread pool for parallel API calls (mirrors StepRewardManager).
-        # Without this, every LLM-based step reward (self_eval / fol) is
-        # invoked serially per response, which makes tree_gae validation
-        # ~N_steps× slower than step_gdpo.
-        self._executor = ThreadPoolExecutor(max_workers=16)
+        max_workers = reward_cfg_fol.get(
+            "step_reward_max_workers",
+            algo_cfg_fol.get("step_reward_max_workers", os.environ.get("VERL_STEP_REWARD_MAX_WORKERS")),
+        )
+        if max_workers is None:
+            uses_llm_step_reward = any(rt in {"fol", "self_eval"} for rt in self.step_reward_types)
+            max_workers = 4 if uses_llm_step_reward else min(16, os.cpu_count() or 4)
+        self._executor = ThreadPoolExecutor(max_workers=max(1, int(max_workers)))
 
     def _get_step_token_positions(self, response_text: str, valid_response_ids, valid_response_length: int):
         """Map character-level step boundaries to token positions.
@@ -286,6 +289,20 @@ class TreeRewardManager(RewardManagerBase):
                 if reward_fn is None:
                     raise ValueError(f"Unknown step reward type: {reward_type}")
 
+                fol_shared_state = None
+                if reward_type == "fol":
+                    from verl.utils.reward_score.fol import prepare_fol_shared_state
+
+                    loop = asyncio.get_event_loop()
+                    fol_shared_state = await loop.run_in_executor(
+                        self._executor,
+                        lambda: prepare_fol_shared_state(
+                            prompt_text,
+                            api_config=self.api_config,
+                            extra_info=extra_info,
+                        ),
+                    )
+
                 # Pre-build all step histories so calls can run in parallel
                 # (same pattern as StepRewardManager). For LLM-based reward
                 # functions (self_eval / fol) this is the difference between
@@ -302,6 +319,7 @@ class TreeRewardManager(RewardManagerBase):
                         lambda args=args: reward_fn(
                             args[0], args[1], args[2],
                             api_config=self.api_config, extra_info=extra_info,
+                            **({"fol_shared_state": fol_shared_state} if reward_type == "fol" else {}),
                         ),
                     )
                     for args in call_args
