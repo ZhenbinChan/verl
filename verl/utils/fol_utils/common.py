@@ -110,6 +110,8 @@ _gemini_inflight_sem = threading.Semaphore(
 _openai_inflight_sem = threading.Semaphore(
     int(os.environ.get("FOL_OPENAI_MAX_INFLIGHT", "32"))
 )
+_openai_last_call = 0.0
+_openai_rate_lock = threading.Lock()
 
 _OPENAI_TRANSIENT_MARKERS = ("429", "rate limit", "502", "503", "504", "connection", "timeout")
 
@@ -223,6 +225,17 @@ def call_llm(
     # _t = time.time()
     if cfg["model"].startswith("gemini"):
         return call_gemini(user_prompt, cfg, system_prompt=system_prompt)
+
+    # RPM rate limiting (same as Gemini path)
+    rpm = cfg.get("rpm", 0)
+    if rpm > 0:
+        global _openai_last_call
+        min_interval = 60.0 / max(rpm, 0.1)
+        with _openai_rate_lock:
+            dt = time.time() - _openai_last_call
+            if dt < min_interval:
+                time.sleep(min_interval - dt)
+            _openai_last_call = time.time()
 
     client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
     max_retries = int(cfg.get("api_max_retries", 3))
