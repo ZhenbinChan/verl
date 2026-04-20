@@ -30,10 +30,6 @@ export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.5-35B-A3B"}
 # Per-worker rate limit (calls/min). 6 workers * 60 = 360 RPM aggregate,
 # well within mihomo + 机场 capacity (measured ~50 concurrent burst, ~25 TPS sustained).
 export FOL_RPM=${FOL_RPM:-200}
-# Process-wide cap on in-flight Gemini calls per RewardLoopWorker.
-# Each worker has a 16-thread pool — without this cap a single worker can burst
-# 16 simultaneous TCP connections through the proxy, triggering 机场 RST limits.
-export FOL_GEMINI_MAX_INFLIGHT=${FOL_GEMINI_MAX_INFLIGHT:-8}
 
 # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
 #    KeepAlive 防止训练长时间空闲后隧道被中间设备断开

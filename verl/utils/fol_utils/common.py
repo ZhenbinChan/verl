@@ -257,6 +257,7 @@ def call_llm(
             return completion.choices[0].message.content or ""
         except Exception as exc:
             if attempt >= max_retries or not _is_transient_openai_error(exc):
+                logger.error("Max retries exceeded at OpenAI SDK. Rewarding 0.0.")
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
             logger.warning(
@@ -320,6 +321,8 @@ def call_gemini(
             text = getattr(response, "text", None)
             return text or ""
         except Exception as exc:
+            if attempt >= max_retries:
+                logger.error("Gemini transient error: Max retries exceeded, rewarding 0.0")
             if attempt >= max_retries or not _is_transient_gemini_error(exc):
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
