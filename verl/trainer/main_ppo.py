@@ -225,6 +225,9 @@ class TaskRunner:
         elif reward_manager_name == "entropy":
             from verl.workers.reward_manager import EntropyRewardManager
             reward_manager_cls = EntropyRewardManager
+        elif reward_manager_name == "mcts":
+            from verl.workers.reward_manager import MCTSRewardManager
+            reward_manager_cls = MCTSRewardManager
         else:
             raise NotImplementedError
 

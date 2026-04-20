@@ -94,6 +94,7 @@ class AdvantageEstimator(str, Enum):
     Tree_GRPO = "tree_grpo"
     Tree_GAE = "tree_gae"
     ENTROPY_REINFORCE = "entropy_reinforce"
+    MCTS_GRPO = "mcts_grpo"
 
 
 @dataclass
@@ -301,6 +302,23 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.MCTS_GRPO:
+        grpo_mask = data.batch["response_mask"]
+        step_correctness = data.batch.get(
+            "step_correctness_scores", data.batch["reward_fn_scores"]
+        )
+        advantages, returns = core_algos.compute_mcts_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=grpo_mask,
+            index=data.non_tensor_batch["uid"],
+            score_idx=data.batch["score_ids"],
+            reward_mask=data.batch["reward_mask"],
+            step_correctness_scores=step_correctness,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -427,6 +445,7 @@ class RayPPOTrainer:
             AdvantageEstimator.Tree_GRPO,
             AdvantageEstimator.Tree_GAE,
             AdvantageEstimator.ENTROPY_REINFORCE,
+            AdvantageEstimator.MCTS_GRPO,
         ]:
             self.use_critic = False
         else:
@@ -442,7 +461,16 @@ class RayPPOTrainer:
 
         # 1. Check total batch size for data correctness
         # real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n * (config.trainer.tree_rounds+1) * config.trainer.tree_top_k # consider tree sampling
+        # For tree_search / treerl: use (tree_rounds+1) * tree_top_k
+        # For parallel_mcts: use num_traces from parallel_mcts_config
+        if config.trainer.get("sampling_strategy") == "parallel_mcts":
+            mcts_cfg = config.trainer.get("parallel_mcts_config", {})
+            tree_multiplier = mcts_cfg.get("num_traces", config.trainer.get("tree_rounds", 1) + 1) * mcts_cfg.get("tree_top_k", 1)
+            if tree_multiplier == 1:  # num_traces is standalone, not paired
+                tree_multiplier = mcts_cfg.get("num_traces", 1)
+        else:
+            tree_multiplier = (config.trainer.get("tree_rounds", 0) + 1) * config.trainer.get("tree_top_k", 1)
+        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n * tree_multiplier
         assert real_train_batch_size % n_gpus == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
@@ -1090,11 +1118,7 @@ class RayPPOTrainer:
                         if self.async_rollout_mode:
                             self.async_rollout_manager.wake_up()
                         try:
-                            _generate_fn = (
-                                self.async_rollout_manager.generate_sequences
-                                if self.async_rollout_mode
-                                else self.actor_rollout_wg.generate_sequences
-                            )
+                            _generate_fn = (self.async_rollout_manager.generate_sequences if self.async_rollout_mode else self.actor_rollout_wg.generate_sequences)
                             sampling_result = self.sampling_strategy.run(
                                 gen_batch=gen_batch,
                                 gen_batch_output=gen_batch_output,
@@ -1122,8 +1146,6 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
-
-                    
                     # -------- Repeat batch to align with (possibly expanded) responses -------- #
                     if self.sampling_strategy is not None:
                         repeat_times = sampling_result.repeat_times
@@ -1185,12 +1207,14 @@ class RayPPOTrainer:
                             
                             # PRM: function reward
                             reward_fn_tensor = reward_dict["reward_tensor"]
-                            if not self.use_rm:
-                                reward_tensor = reward_fn_tensor
-                            reward_fn_dict = DataProto.from_dict({
-                                "verifiable_rewards": reward_fn_tensor.sum(-1),
-                                "reward_fn_scores": reward_fn_tensor,
-                            })
+                            reward_tensor = reward_fn_tensor
+                            fn_dict = {
+                                "reward_fn_scores": reward_fn_tensor, # FRM rewards
+                            }
+                            if "verifiable_rewards" in reward_dict.keys():
+                                fn_dict["verifiable_rewards"] = reward_dict["verifiable_rewards"].sum(-1)# ORM rewards
+                            reward_fn_dict = DataProto.from_dict(fn_dict)
+                            import pdb;pdb.set_trace()
                             batch.union(reward_fn_dict)
                             # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
                             ################# 新增功能：打印 reward 和具体细节 ##########

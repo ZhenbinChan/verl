@@ -487,9 +487,9 @@ Now, solve the following problem.
     
     # process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, evaluator_urls, extractor_urls, tokenize_fn, system_prompt=system_prompt_2)
 
-    process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, EOS_TOKENS, tokenize_fn, system_prompt=system_prompt_2)
+    # process_single_data_for_each_gpu(data_batches[0][:], 0, MODEL_PATH, EOS_TOKENS, tokenize_fn, system_prompt=system_prompt_2)
 
-    # process_single_data_for_each_gpu_mcts(data_batches[0][:], 0, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, system_prompt=system_prompt_2)
+    process_single_data_for_each_gpu_mcts(data_batches[0][:], 0, MODEL_PATH, tokenize_fn, decode_fn, EOS_TOKENS, system_prompt=system_prompt_2)
     
     # for gpu_id, data_batch in enumerate(data_batches):
     #     p = Process(target=process_single_data_for_each_gpu, args=(

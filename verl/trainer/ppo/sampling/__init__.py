@@ -23,9 +23,9 @@ __all__ = [
 
 # Canonical strategy names -> strategy classes (lazy-imported).
 _STRATEGY_REGISTRY = {
-    "tree_search": "verl.trainer.ppo.sampling.tree_sampling.TreeSamplingStrategy",
-    "treerl": "verl.trainer.ppo.sampling.entropy_chain.EntropyChainStrategy",
-    # "mcts": "verl.trainer.ppo.sampling.mcts.MCTSStrategy",  # reserved
+    "tree_search":   "verl.trainer.ppo.sampling.tree_sampling.TreeSamplingStrategy",
+    "treerl":        "verl.trainer.ppo.sampling.entropy_chain.EntropyChainStrategy",
+    "parallel_mcts": "verl.trainer.ppo.sampling.parallel_mcts.ParallelMCTSStrategy",
 }
 
 
@@ -33,10 +33,10 @@ def create_sampling_strategy(config, tokenizer) -> Optional[SamplingStrategy]:
     """Instantiate the sampling strategy specified by ``trainer.sampling_strategy``.
 
     Accepted values (case-insensitive):
-      - ``null`` / ``None`` / ``"none"`` -> no strategy (plain rollout)
-      - ``"tree_search"`` -> :class:`TreeSamplingStrategy`
-      - ``"treerl"``      -> :class:`EntropyChainStrategy`
-      - ``"mcts"``        -> (reserved, not yet implemented)
+      - ``null`` / ``None`` / ``"none"``  -> no strategy (plain rollout)
+      - ``"tree_search"``                 -> :class:`TreeSamplingStrategy`
+      - ``"treerl"``                      -> :class:`EntropyChainStrategy`
+      - ``"parallel_mcts"``               -> :class:`ParallelMCTSStrategy`
 
     """
     name = config.trainer.get("sampling_strategy", None)

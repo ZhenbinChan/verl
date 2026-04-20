@@ -249,7 +249,7 @@ trainer:
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   validation_data_dir: null # directory for logging the validation data, no dump if null
   # --- Sampling strategy ---
-  sampling_strategy: null # Accepted values: null | tree_search | treerl | mcts (not yet implemented)
+  sampling_strategy: null # Accepted values: null | tree_search | treerl | parallel_mcts
   # tree_search-specific settings
   branch_level: step    # step: previous implementation; token: per-token node expansion
   step_reward_type: random  # random | fol | format
@@ -263,6 +263,24 @@ trainer:
     max_token_num: 4096
     evaluation_strategy: token-entropy
     enforce_uniform_per_prompt: true  # truncate to same sample count for each prompt
+  # parallel_mcts-specific settings
+  parallel_mcts_config:
+    max_nodes: 20               # max tree nodes per prompt before stopping
+    max_depth: 40               # max step depth
+    max_children: 3             # expansions per selected node per round
+    concurrent_num: 4           # nodes selected per tree per round
+    pass_k: 4                   # stop when every tree has this many terminal leaves
+    num_traces: 4               # paths selected per tree for training output
+    exploration_constant: 1.0
+    gamma: 0.9                  # discount factor for UCT backpropagation
+    max_token_num: 512          # max new tokens per step generation
+    backprop: true
+    random_pick: false          # random node selection (true) or UCT (false)
+    selection_policy: importance_sampling  # greedy | importance_sampling
+    prm: format                 # process reward model: format | fol
+    use_weighted_value: false    # use weighted update for accumulated_value
+    normalize_style: step        # step | token normalization for accumulated_value
+    average_one_generation: false
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

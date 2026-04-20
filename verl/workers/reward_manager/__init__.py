@@ -15,10 +15,11 @@
 from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .entropy import EntropyRewardManager
+from .mcts import MCTSRewardManager
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
 from .naive_math220k import NaiveMath220KRewardManager
 from .naive_plus import NaivePlusRewardManager
 from .tree import TreeRewardManager
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "EntropyRewardManager", "NaiveRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager", "TreeRewardManager"]
+__all__ = ["BatchRewardManager", "DAPORewardManager", "EntropyRewardManager", "MCTSRewardManager", "NaiveRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager", "TreeRewardManager"]
