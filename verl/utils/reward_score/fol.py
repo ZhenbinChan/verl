@@ -19,6 +19,9 @@ Exports:
 """
 
 import logging
+import os
+import threading
+from collections import OrderedDict
 # import threading
 # import time
 
@@ -31,6 +34,10 @@ from verl.utils.fol_utils.engine import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FOL_SHARED_STATE_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_SHARED_PREPROCESS_CACHE_SIZE", "512")))
+_fol_shared_state_cache: OrderedDict[tuple, dict] = OrderedDict()
+_fol_shared_state_cache_lock = threading.Lock()
 
 
 def _build_fol_config(api_config: dict | None = None) -> FOLConfig:
@@ -69,13 +76,40 @@ def prepare_fol_shared_state(
         return None
 
     fol_config = _build_fol_config(api_config)
+    cache_key = (
+        context,
+        question,
+        options or "",
+        fol_config.preprocess.value,
+        (fol_config.api_config or {}).get("model"),
+        (fol_config.api_config or {}).get("base_url"),
+        (fol_config.api_config or {}).get("temperature"),
+        (fol_config.api_config or {}).get("max_tokens"),
+        (fol_config.api_config or {}).get("top_p"),
+    )
+
+    with _fol_shared_state_cache_lock:
+        cached = _fol_shared_state_cache.get(cache_key)
+        if cached is not None:
+            _fol_shared_state_cache.move_to_end(cache_key)
+            return cached
+
     engine = FOLEngine(fol_config)
     processed_ctx, declarations = engine.preprocess(context, question, options or "")
-    return {
+    shared_state = {
         "config": fol_config,
         "processed_context": processed_ctx,
         "declarations": declarations,
     }
+    with _fol_shared_state_cache_lock:
+        existing = _fol_shared_state_cache.get(cache_key)
+        if existing is not None:
+            _fol_shared_state_cache.move_to_end(cache_key)
+            return existing
+        _fol_shared_state_cache[cache_key] = shared_state
+        if len(_fol_shared_state_cache) > _FOL_SHARED_STATE_CACHE_MAX_SIZE:
+            _fol_shared_state_cache.popitem(last=False)
+    return shared_state
 
 
 def compute_step_reward_format_fol(
