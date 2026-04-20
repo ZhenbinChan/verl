@@ -106,6 +106,26 @@ _gemini_rate_lock = threading.Lock()
 _gemini_inflight_sem = threading.Semaphore(
     int(os.environ.get("FOL_GEMINI_MAX_INFLIGHT", "8"))
 )
+# Same pattern for OpenAI-compatible APIs (SiliconFlow, vLLM, etc.)
+_openai_inflight_sem = threading.Semaphore(
+    int(os.environ.get("FOL_OPENAI_MAX_INFLIGHT", "32"))
+)
+
+_OPENAI_TRANSIENT_MARKERS = ("429", "rate limit", "502", "503", "504", "connection", "timeout")
+
+
+def _is_transient_openai_error(exc: BaseException) -> bool:
+    """Check if an OpenAI-compatible API error is transient and retryable."""
+    try:
+        from openai import RateLimitError, APIStatusError
+        if isinstance(exc, RateLimitError):
+            return True
+        if isinstance(exc, APIStatusError) and exc.status_code in (429, 500, 502, 503, 504):
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _OPENAI_TRANSIENT_MARKERS)
 
 
 def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
@@ -205,20 +225,33 @@ def call_llm(
         return call_gemini(user_prompt, cfg, system_prompt=system_prompt)
 
     client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
-    completion = client.chat.completions.create(
-        model=cfg["model"],
-        messages=messages,
-        temperature=cfg.get("temperature", 0.2),
-        max_tokens=cfg.get("max_tokens", 4096),
-        top_p=top_p,
-        n=1,
-    )
-    # _resp = completion.choices[0].message.content or ""
-    # _usage = getattr(completion, 'usage', None)
-    # _tok = f"in={_usage.prompt_tokens}/out={_usage.completion_tokens}" if _usage else "no_usage"
-    # print(f"[LLM][{_tid}] #{call_id} ← {time.time()-_t:.2f}s  {_tok}  resp_len={len(_resp)}", flush=True)
-    # return _resp
-    return completion.choices[0].message.content or ""
+    max_retries = int(cfg.get("api_max_retries", 3))
+    base_delay = float(cfg.get("api_retry_base_delay", 5.0))
+    max_delay = float(cfg.get("api_retry_max_delay", 60.0))
+
+    attempt = 0
+    while True:
+        try:
+            with _openai_inflight_sem:
+                completion = client.chat.completions.create(
+                    model=cfg["model"],
+                    messages=messages,
+                    temperature=cfg.get("temperature", 0.2),
+                    max_tokens=cfg.get("max_tokens", 1024),
+                    top_p=top_p,
+                    n=1,
+                )
+            return completion.choices[0].message.content or ""
+        except Exception as exc:
+            if attempt >= max_retries or not _is_transient_openai_error(exc):
+                raise
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            logger.warning(
+                "OpenAI API transient error (attempt %d/%d), sleeping %.1fs: %s",
+                attempt + 1, max_retries, delay, str(exc)[:200],
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 def call_gemini(

@@ -75,7 +75,13 @@ def _get_default_api_config() -> dict:
 
 
 def _call_llm(prompt: str, *, api_config: Optional[dict] = None, system_prompt: Optional[str] = None) -> str:
-    """Call an OpenAI-compatible chat API (vLLM / SGLang / OpenAI)."""
+    """Call an OpenAI-compatible chat API with retry on transient errors."""
+    from verl.utils.fol_utils.common import (
+        get_client,
+        _openai_inflight_sem,
+        _is_transient_openai_error,
+    )
+
     cfg = _get_default_api_config()
     if api_config:
         cfg.update({k: v for k, v in api_config.items() if v is not None})
@@ -86,19 +92,35 @@ def _call_llm(prompt: str, *, api_config: Optional[dict] = None, system_prompt: 
     messages.append({"role": "user", "content": prompt})
 
     timeout = cfg.pop("api_timeout", 200)
-    client = OpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        timeout=timeout,
-        max_retries=1,
-    )
-    completion = client.chat.completions.create(
-        model=cfg["model"],
-        messages=messages,
-        temperature=cfg.get("temperature", 0.0),
-        max_tokens=cfg.get("max_tokens", 1024),
-    )
-    return completion.choices[0].message.content or ""
+    max_retries = int(cfg.get("api_max_retries", 3))
+    base_delay = float(cfg.get("api_retry_base_delay", 5.0))
+    max_delay = float(cfg.get("api_retry_max_delay", 60.0))
+
+    client = get_client(cfg["api_key"], cfg.get("base_url"), timeout)
+
+    import random
+    attempt = 0
+    while True:
+        try:
+            with _openai_inflight_sem:
+                completion = client.chat.completions.create(
+                    model=cfg["model"],
+                    messages=messages,
+                    temperature=cfg.get("temperature", 0.0),
+                    max_tokens=cfg.get("max_tokens", 1024),
+                )
+            return completion.choices[0].message.content or ""
+        except Exception as exc:
+            if attempt >= max_retries or not _is_transient_openai_error(exc):
+                raise
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            logger.warning(
+                "Self-eval API transient error (attempt %d/%d), sleeping %.1fs: %s",
+                attempt + 1, max_retries, delay, str(exc)[:200],
+            )
+            import time
+            time.sleep(delay)
+            attempt += 1
 
 
 # ---------------------------------------------------------------------------
