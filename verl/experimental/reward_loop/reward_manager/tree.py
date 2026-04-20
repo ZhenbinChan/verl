@@ -103,9 +103,12 @@ class TreeRewardManager(RewardManagerBase):
         max_tries = reward_cfg_fol.get("fol_max_tries", algo_cfg_fol.get("fol_max_tries", None))
         if max_tries is not None:
             self.api_config["max_tries"] = int(max_tries)
-        llm_timeout = reward_cfg_fol.get("fol_timeout", algo_cfg_fol.get("fol_timeout", None))
-        if llm_timeout is not None:
-            self.api_config["timeout"] = int(llm_timeout)
+        z3_timeout = reward_cfg_fol.get("fol_timeout", algo_cfg_fol.get("fol_timeout", None))
+        if z3_timeout is not None:
+            self.api_config["timeout"] = int(z3_timeout)
+        api_timeout = reward_cfg_fol.get("api_timeout", algo_cfg_fol.get("api_timeout", None))
+        if api_timeout is not None:
+            self.api_config["api_timeout"] = int(api_timeout)
         cumulative = reward_cfg_fol.get("fol_verify_with_cumulative_steps", algo_cfg_fol.get("fol_verify_with_cumulative_steps", False))
         self.api_config["cumulative"] = bool(cumulative)
         print(f"FOL config 'fol_verify_with_cumulative_steps' is set to: {self.api_config['cumulative']}")

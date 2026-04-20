@@ -79,7 +79,7 @@ def compute_step_reward_fol(
     fol_config = FOLConfig(
         preprocess=preprocess,
         translation=translation,
-        max_tries=int(cfg.get("max_tries", 3)),
+        max_tries=int(cfg.get("max_tries", 1)),
         timeout=float(cfg.get("timeout", 30.0)),
         cumulative=bool(cfg.get("cumulative", False)),
         api_config=cfg,

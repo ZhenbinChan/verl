@@ -89,9 +89,12 @@ class StepRewardManager(RewardManagerBase):
         max_tries = reward_cfg.get("fol_max_tries", algo_cfg.get("fol_max_tries", None))
         if max_tries is not None:
             self.api_config["max_tries"] = int(max_tries)
-        llm_timeout = reward_cfg.get("fol_timeout", algo_cfg.get("fol_timeout", None))
-        if llm_timeout is not None:
-            self.api_config["timeout"] = int(llm_timeout)
+        z3_timeout = reward_cfg.get("fol_timeout", algo_cfg.get("fol_timeout", None))
+        if z3_timeout is not None:
+            self.api_config["timeout"] = int(z3_timeout)
+        api_timeout = reward_cfg.get("api_timeout", algo_cfg.get("api_timeout", None))
+        if api_timeout is not None:
+            self.api_config["api_timeout"] = int(api_timeout)
         cumulative = reward_cfg.get("fol_verify_with_cumulative_steps", algo_cfg.get("fol_verify_with_cumulative_steps", False))
         self.api_config["cumulative"] = bool(cumulative)
         print(f"FOL config 'fol_verify_with_cumulative_steps' is set to: {self.api_config['cumulative']}")
@@ -164,8 +167,8 @@ class StepRewardManager(RewardManagerBase):
             use_xml_cfg = algo_cfg.get("use_xml_steps", None)
         self.use_xml = bool(use_xml_cfg) if use_xml_cfg is not None else False
 
-        # Thread pool for parallel API calls
-        self._executor = ThreadPoolExecutor(max_workers=16)
+        # Thread pool for parallel API calls (high count for slow remote APIs)
+        self._executor = ThreadPoolExecutor(max_workers=64)
 
     def _get_step_token_positions(self, response_text: str, valid_response_ids, valid_response_length: int):
         """Map character-level step boundaries to token positions.

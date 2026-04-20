@@ -156,7 +156,7 @@ def _get_default_api_config() -> dict:
         "base_url": os.environ.get("OPENAI_BASE_URL", os.environ.get("FOL_SLM_BASE_URL", None)),
         "rpm": float(os.environ.get("FOL_RPM", 10)),
         "temperature": 0.2,
-        "max_tokens": 4096,
+        "max_tokens": 1024,
         "top_p": 0.8,
     }
 
@@ -194,7 +194,7 @@ def call_llm(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_prompt})
 
-    timeout = cfg.pop("timeout", 120)
+    timeout = cfg.pop("api_timeout", 200)
     top_p = cfg.pop("top_p", 0.8)
 
     # _tid = threading.current_thread().name

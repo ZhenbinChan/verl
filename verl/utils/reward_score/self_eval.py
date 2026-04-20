@@ -85,7 +85,7 @@ def _call_llm(prompt: str, *, api_config: Optional[dict] = None, system_prompt: 
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    timeout = cfg.pop("timeout", 120)
+    timeout = cfg.pop("api_timeout", 200)
     client = OpenAI(
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),

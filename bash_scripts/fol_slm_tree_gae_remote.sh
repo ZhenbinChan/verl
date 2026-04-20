@@ -66,7 +66,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.fol_translation=assertion \
     +algorithm.fol_max_tries=1 \
     +algorithm.fol_timeout=10 \
-    +algorithm.fol_api_timeout=200 \
+    +algorithm.api_timeout=200 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \

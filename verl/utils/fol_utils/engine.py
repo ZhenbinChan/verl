@@ -59,7 +59,7 @@ class TranslationMode(Enum):
 class FOLConfig:
     preprocess: PreprocessPipeline = PreprocessPipeline.DIRECT
     translation: TranslationMode = TranslationMode.IMPLICATION
-    max_tries: int = 3
+    max_tries: int = 1
     timeout: float = 30.0
     cumulative: bool = False
     api_config: dict = field(default_factory=dict)
