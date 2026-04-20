@@ -24,8 +24,35 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # These env vars are the default fallback; can also be overridden via
 # +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
-export FOL_MODEL=${FOL_MODEL:-"gpt-4o-mini-2024-07-18"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.siliconflow.cn/v1"}
+export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.5-35B-A3B"}
+export FOL_RPM=${FOL_RPM:-200}
+
+# 1. 建立隧道到 login node 上的 mihomo (端口 17897)
+echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:17897 ..."
+pkill -f "L 17897:127.0.0.1:17897" 2>/dev/null || true
+sleep 2
+ssh -i ~/.ssh/id_ed25519 \
+    -o StrictHostKeyChecking=no \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes \
+    -N -f -L 17897:127.0.0.1:17897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
+sleep 2
+
+if ! ss -tln 2>/dev/null | grep -q ':17897'; then
+    echo "ERROR: SSH tunnel to 17897 failed to bind. Aborting." >&2
+    exit 1
+fi
+echo "Tunnel up."
+
+export http_proxy=http://127.0.0.1:17897
+export https_proxy=http://127.0.0.1:17897
+export HTTP_PROXY=http://127.0.0.1:17897
+export HTTPS_PROXY=http://127.0.0.1:17897
+export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
+export no_proxy="$NO_PROXY"
 
 # Tree-GAE training (remote API for FOL-SLM rewards)
 # Uses structured preprocessing (rephrase + object/predicate extraction) and
@@ -39,6 +66,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.fol_translation=assertion \
     +algorithm.fol_max_tries=1 \
     +algorithm.fol_timeout=10 \
+    +algorithm.fol_api_timeout=200 \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
