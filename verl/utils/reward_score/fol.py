@@ -22,6 +22,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from hashlib import sha1
 # import threading
 # import time
 
@@ -38,6 +39,9 @@ logger = logging.getLogger(__name__)
 _FOL_SHARED_STATE_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_SHARED_PREPROCESS_CACHE_SIZE", "512")))
 _fol_shared_state_cache: OrderedDict[tuple, dict] = OrderedDict()
 _fol_shared_state_cache_lock = threading.Lock()
+_FOL_VERIFY_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_VERIFY_CACHE_SIZE", "4096")))
+_fol_verify_cache: OrderedDict[tuple, float] = OrderedDict()
+_fol_verify_cache_lock = threading.Lock()
 
 
 def _build_fol_config(api_config: dict | None = None) -> FOLConfig:
@@ -112,6 +116,36 @@ def prepare_fol_shared_state(
     return shared_state
 
 
+def _digest_text(text: str) -> str:
+    """Return a stable digest for large cache-key strings."""
+    return sha1(text.encode("utf-8")).hexdigest()
+
+
+def _build_verify_cache_key(
+    *,
+    shared_state: dict,
+    fol_config: FOLConfig,
+    step_to_translate: str,
+) -> tuple:
+    """Build a strict cache key for one FOL verify_step call."""
+    api_cfg = fol_config.api_config or {}
+    return (
+        _digest_text(shared_state["processed_context"]),
+        _digest_text(shared_state["declarations"]),
+        _digest_text(step_to_translate),
+        fol_config.preprocess.value,
+        fol_config.translation.value,
+        fol_config.max_tries,
+        fol_config.timeout,
+        fol_config.cumulative,
+        api_cfg.get("model"),
+        api_cfg.get("base_url"),
+        api_cfg.get("temperature"),
+        api_cfg.get("max_tokens"),
+        api_cfg.get("top_p"),
+    )
+
+
 def compute_step_reward_format_fol(
     step_text: str, prompt_text: str, step_history: list[str], **kwargs,
 ) -> float:
@@ -155,6 +189,17 @@ def compute_step_reward_fol(
         else:
             step_to_translate = step_text
 
+        verify_cache_key = _build_verify_cache_key(
+            shared_state=shared_state,
+            fol_config=fol_config,
+            step_to_translate=step_to_translate,
+        )
+        with _fol_verify_cache_lock:
+            cached_reward = _fol_verify_cache.get(verify_cache_key)
+            if cached_reward is not None:
+                _fol_verify_cache.move_to_end(verify_cache_key)
+                return cached_reward
+
         # print(f"[FOL][{_tid}] → verify_step({fol_config.translation.value})...", flush=True)
         # _t2 = time.time()
         reward = engine.verify_step(
@@ -162,8 +207,17 @@ def compute_step_reward_fol(
             shared_state["declarations"],
             step_to_translate,
         )
+        reward = float(reward)
+        with _fol_verify_cache_lock:
+            existing_reward = _fol_verify_cache.get(verify_cache_key)
+            if existing_reward is not None:
+                _fol_verify_cache.move_to_end(verify_cache_key)
+                return existing_reward
+            _fol_verify_cache[verify_cache_key] = reward
+            if len(_fol_verify_cache) > _FOL_VERIFY_CACHE_MAX_SIZE:
+                _fol_verify_cache.popitem(last=False)
         # print(f"[FOL][{_tid}] ◀ done  reward={reward}  verify={time.time()-_t2:.2f}s  total={time.time()-_t0:.2f}s", flush=True)
-        return float(reward)
+        return reward
     except Exception as e:
         # print(f"[FOL][{_tid}] ✗ EXCEPTION after {time.time()-_t0:.2f}s: {e}", flush=True)
         logger.warning("FOL reward computation failed: %s", e)
