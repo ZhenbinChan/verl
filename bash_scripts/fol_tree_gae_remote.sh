@@ -111,7 +111,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_fol" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

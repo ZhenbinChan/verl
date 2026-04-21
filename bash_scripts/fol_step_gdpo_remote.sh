@@ -27,7 +27,7 @@ export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 export FOL_MODEL="Qwen/Qwen3.5-35B-A3B"
 export FOL_RPM=200
 export FOL_OPENAI_TPM=60000
-export FOL_OPENAI_MAX_INFLIGHT=4
+export FOL_OPENAI_MAX_INFLIGHT=6
 
 # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
 #    KeepAlive 防止训练长时间空闲后隧道被中间设备断开
@@ -116,15 +116,16 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}_fol" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=9999 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=9999 \
     trainer.total_epochs=1 \
+    trainer.val_before_train=false \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@
