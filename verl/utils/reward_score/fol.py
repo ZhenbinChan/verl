@@ -42,6 +42,8 @@ _fol_shared_state_cache_lock = threading.Lock()
 _FOL_VERIFY_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_VERIFY_CACHE_SIZE", "4096")))
 _fol_verify_cache: OrderedDict[tuple, float] = OrderedDict()
 _fol_verify_cache_lock = threading.Lock()
+_fol_verify_cache_stats = {"hits": 0, "misses": 0}
+_fol_verify_cache_stats_lock = threading.Lock()
 
 
 def _build_fol_config(api_config: dict | None = None) -> FOLConfig:
@@ -146,6 +148,27 @@ def _build_verify_cache_key(
     )
 
 
+def _log_verify_cache_event(hit: bool, step_to_translate: str) -> None:
+    """Print per-step verify-cache hit statistics."""
+    if str(os.environ.get("FOL_VERIFY_CACHE_LOG", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    with _fol_verify_cache_stats_lock:
+        stat_key = "hits" if hit else "misses"
+        _fol_verify_cache_stats[stat_key] += 1
+        hits = _fol_verify_cache_stats["hits"]
+        misses = _fol_verify_cache_stats["misses"]
+    total = hits + misses
+    hit_rate = hits / total if total > 0 else 0.0
+    preview = " ".join(step_to_translate.strip().split())
+    preview = preview[:160]
+    print(
+        f"[FOLVerifyCache][pid={os.getpid()}] {'HIT' if hit else 'MISS'} "
+        f"hits={hits} misses={misses} hit_rate={hit_rate:.1%} step={preview}",
+        flush=True,
+    )
+
+
 def compute_step_reward_format_fol(
     step_text: str, prompt_text: str, step_history: list[str], **kwargs,
 ) -> float:
@@ -161,7 +184,8 @@ def compute_step_reward_fol(
     api_config: dict | None = None,
     extra_info: dict | None = None,
     fol_shared_state: dict | None = None,
-) -> float:
+    return_debug: bool = False,
+) -> float | dict:
     """Unified FOL entailment process reward.
 
     Configurable via api_config:
@@ -174,11 +198,18 @@ def compute_step_reward_fol(
     # print(f"[FOL][{_tid}] ▶ enter  step={step_text[:60]!r}...", flush=True)
 
     try:
+        debug_info = {
+            "cache_hit": False,
+            "translation_response": None,
+            "correction_attempts": 0,
+            "z3_output": None,
+            "z3_error": None,
+        }
         shared_state = fol_shared_state or prepare_fol_shared_state(
             prompt_text, api_config=api_config, extra_info=extra_info
         )
         if shared_state is None:
-            return 0.0
+            return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
 
         fol_config = shared_state["config"]
         engine = FOLEngine(fol_config)
@@ -198,7 +229,10 @@ def compute_step_reward_fol(
             cached_reward = _fol_verify_cache.get(verify_cache_key)
             if cached_reward is not None:
                 _fol_verify_cache.move_to_end(verify_cache_key)
-                return cached_reward
+                debug_info["cache_hit"] = True
+                _log_verify_cache_event(True, step_to_translate)
+                return {"score": cached_reward, "debug": debug_info} if return_debug else cached_reward
+        _log_verify_cache_event(False, step_to_translate)
 
         # print(f"[FOL][{_tid}] → verify_step({fol_config.translation.value})...", flush=True)
         # _t2 = time.time()
@@ -206,19 +240,32 @@ def compute_step_reward_fol(
             shared_state["processed_context"],
             shared_state["declarations"],
             step_to_translate,
+            debug_info=debug_info,
         )
         reward = float(reward)
         with _fol_verify_cache_lock:
             existing_reward = _fol_verify_cache.get(verify_cache_key)
             if existing_reward is not None:
                 _fol_verify_cache.move_to_end(verify_cache_key)
-                return existing_reward
+                debug_info["cache_hit"] = True
+                return {"score": existing_reward, "debug": debug_info} if return_debug else existing_reward
             _fol_verify_cache[verify_cache_key] = reward
             if len(_fol_verify_cache) > _FOL_VERIFY_CACHE_MAX_SIZE:
                 _fol_verify_cache.popitem(last=False)
         # print(f"[FOL][{_tid}] ◀ done  reward={reward}  verify={time.time()-_t2:.2f}s  total={time.time()-_t0:.2f}s", flush=True)
-        return reward
+        return {"score": reward, "debug": debug_info} if return_debug else reward
     except Exception as e:
         # print(f"[FOL][{_tid}] ✗ EXCEPTION after {time.time()-_t0:.2f}s: {e}", flush=True)
         logger.warning("FOL reward computation failed: %s", e)
+        if return_debug:
+            return {
+                "score": 0.0,
+                "debug": {
+                    "cache_hit": False,
+                    "translation_response": None,
+                    "correction_attempts": 0,
+                    "z3_output": None,
+                    "z3_error": str(e),
+                },
+            }
         return 0.0

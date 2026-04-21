@@ -1782,6 +1782,28 @@ class RayPPOTrainer:
                                     sr_sample.append({k: v[0]})
                             if sr_sample:
                                 print(f"[Step Rewards]: {sr_sample}")
+                            fol_debug = reward_extra_infos_dict.get("fol_debug")
+                            if fol_debug is not None and len(fol_debug) > 0 and fol_debug[0]:
+                                print("\n[FOL Debug]")
+                                for step_idx, step_debug in enumerate(fol_debug[0]):
+                                    cache_hit = step_debug.get("cache_hit")
+                                    correction_attempts = step_debug.get("correction_attempts")
+                                    print(
+                                        f"\nStep {step_idx}: cache_hit={cache_hit}, "
+                                        f"correction_attempts={correction_attempts}"
+                                    )
+                                    translation_response = step_debug.get("translation_response")
+                                    if translation_response:
+                                        print("[FOL Translation Response]")
+                                        print(translation_response)
+                                    z3_output = step_debug.get("z3_output")
+                                    if z3_output:
+                                        print("[FOL Z3 Output]")
+                                        print(z3_output)
+                                    z3_error = step_debug.get("z3_error")
+                                    if z3_error:
+                                        print("[FOL Z3 Error]")
+                                        print(z3_error)
                             print("=" * 90 + "\n")
                     # --- End of Custom Logging ---
 

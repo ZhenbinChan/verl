@@ -179,7 +179,7 @@ def get_gemini_client(api_key: str) -> Any:
 
 def _get_default_api_config() -> dict:
     """Build default API config from environment variables."""
-    cfg = {
+    return {
         "model": os.environ.get("FOL_MODEL", os.environ.get("FOL_SLM_MODEL", "gpt-4o-mini")),
         "api_key": os.environ.get("OPENAI_API_KEY", "EMPTY"),
         "base_url": os.environ.get("OPENAI_BASE_URL", os.environ.get("FOL_SLM_BASE_URL", None)),
@@ -189,31 +189,10 @@ def _get_default_api_config() -> dict:
         "max_tokens": 1024,
         "top_p": 0.8,
     }
-    optional_int_envs = {
-        "fol_declaration_max_tokens": "FOL_DECLARATION_MAX_TOKENS",
-        "fol_translation_max_tokens": "FOL_TRANSLATION_MAX_TOKENS",
-        "fol_correction_max_tokens": "FOL_CORRECTION_MAX_TOKENS",
-        "fol_rephrase_max_tokens": "FOL_REPHRASE_MAX_TOKENS",
-        "fol_object_extract_max_tokens": "FOL_OBJECT_EXTRACT_MAX_TOKENS",
-        "fol_predicate_extract_max_tokens": "FOL_PREDICATE_EXTRACT_MAX_TOKENS",
-    }
-    for cfg_key, env_key in optional_int_envs.items():
-        env_value = os.environ.get(env_key)
-        if env_value is not None:
-            cfg[cfg_key] = int(env_value)
-
-    token_probe = os.environ.get("FOL_TOKEN_PROBE")
-    if token_probe is not None:
-        cfg["fol_token_probe"] = token_probe
-    probe_path = os.environ.get("FOL_TOKEN_PROBE_PATH")
-    if probe_path:
-        cfg["fol_token_probe_path"] = probe_path
-    return cfg
 
 
 _llm_call_counter = 0
 _llm_call_counter_lock = threading.Lock()
-_llm_probe_lock = threading.Lock()
 
 
 def _extract_message_text(content: Any) -> str:
@@ -235,45 +214,6 @@ def _extract_message_text(content: Any) -> str:
     return str(content)
 
 
-def _flag_enabled(value: Any) -> bool:
-    """Best-effort parsing of flexible bool-like config values."""
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "no", "off"}
-    return bool(value)
-
-
-def _resolve_stage_max_tokens(cfg: dict[str, Any], stage: Optional[str]) -> int:
-    """Resolve the output token cap for a specific FOL LLM stage."""
-    stage_keys = {
-        "declaration": ("fol_declaration_max_tokens", "declaration_max_tokens"),
-        "translation": ("fol_translation_max_tokens", "translation_max_tokens"),
-        "correction": ("fol_correction_max_tokens", "correction_max_tokens"),
-        "structured_rephrase": (
-            "fol_rephrase_max_tokens",
-            "rephrase_max_tokens",
-            "fol_declaration_max_tokens",
-            "declaration_max_tokens",
-        ),
-        "structured_object_extract": (
-            "fol_object_extract_max_tokens",
-            "object_extract_max_tokens",
-            "fol_declaration_max_tokens",
-            "declaration_max_tokens",
-        ),
-        "structured_predicate_extract": (
-            "fol_predicate_extract_max_tokens",
-            "predicate_extract_max_tokens",
-            "fol_declaration_max_tokens",
-            "declaration_max_tokens",
-        ),
-    }
-    for key in stage_keys.get(stage, ()):
-        value = cfg.get(key)
-        if value is not None:
-            return int(value)
-    return int(cfg.get("max_tokens", 1024))
-
-
 def _estimate_openai_request_tokens(messages: list[dict[str, Any]], max_output_tokens: int) -> int:
     """Conservatively estimate prompt + completion tokens for TPM admission."""
     prompt_chars = 0
@@ -283,58 +223,6 @@ def _estimate_openai_request_tokens(messages: list[dict[str, Any]], max_output_t
     prompt_tokens = max(1, (prompt_chars + 3) // 4)
     overhead_tokens = 8 * max(len(messages), 1)
     return prompt_tokens + overhead_tokens + max(0, int(max_output_tokens))
-
-
-def _record_token_probe(
-    *,
-    stage: Optional[str],
-    cfg: dict[str, Any],
-    provider: str,
-    messages: list[dict[str, Any]],
-    max_output_tokens: int,
-    estimated_tokens: int,
-    prompt_tokens: int | None,
-    completion_tokens: int | None,
-    total_tokens: int | None,
-) -> None:
-    """Append one per-request token usage record to the configured JSONL file."""
-    if not _flag_enabled(cfg.get("fol_token_probe", cfg.get("token_probe", False))):
-        return
-
-    probe_path_value = cfg.get("fol_token_probe_path", cfg.get("token_probe_path"))
-    if not probe_path_value:
-        return
-
-    prompt_chars = 0
-    for message in messages:
-        prompt_chars += len(message.get("role", ""))
-        prompt_chars += len(_extract_message_text(message.get("content")))
-
-    record = {
-        "ts": time.time(),
-        "pid": os.getpid(),
-        "thread": threading.current_thread().name,
-        "provider": provider,
-        "model": cfg.get("model"),
-        "stage": stage or "unspecified",
-        "request_max_tokens": int(max_output_tokens),
-        "estimated_tokens": int(estimated_tokens),
-        "prompt_chars": int(prompt_chars),
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-    }
-
-    probe_path = Path(str(probe_path_value))
-    probe_path.parent.mkdir(parents=True, exist_ok=True)
-    with _llm_probe_lock:
-        with probe_path.open("a", encoding="utf-8") as fp:
-            if fcntl is not None:
-                fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-            fp.write(json.dumps(record, ensure_ascii=True) + "\n")
-            fp.flush()
-            if fcntl is not None:
-                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
 
 
 def _get_openai_tpm_state_path() -> Path:
@@ -479,31 +367,11 @@ def _get_openai_total_tokens(completion: Any) -> int | None:
         return None
 
 
-def _get_openai_usage_tokens(completion: Any) -> tuple[int | None, int | None, int | None]:
-    """Extract prompt/completion/total tokens from an OpenAI completion if available."""
-    usage = getattr(completion, "usage", None)
-    if usage is None:
-        return None, None, None
-
-    def _to_int(value: Any) -> int | None:
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    return (
-        _to_int(getattr(usage, "prompt_tokens", None)),
-        _to_int(getattr(usage, "completion_tokens", None)),
-        _to_int(getattr(usage, "total_tokens", None)),
-    )
-
-
 def call_llm(
     user_prompt: str,
     *,
     api_config: Optional[dict] = None,
     system_prompt: Optional[str] = None,
-    stage: Optional[str] = None,
 ) -> str:
     """Call an OpenAI-compatible chat API with connection pooling.
 
@@ -511,7 +379,6 @@ def call_llm(
         user_prompt: User message content.
         api_config: Dict with keys: model, api_key, base_url, temperature, max_tokens, top_p.
         system_prompt: Optional system message.
-        stage: Optional logical stage name for per-stage token limits/probe logs.
 
     Returns:
         The assistant's response text.
@@ -538,7 +405,7 @@ def call_llm(
     # print(f"[LLM][{_tid}] #{call_id} → {cfg['model']}@{cfg.get('base_url','?')}  prompt={_prompt_preview!r}...", flush=True)
     # _t = time.time()
     if cfg["model"].startswith("gemini"):
-        return call_gemini(user_prompt, cfg, system_prompt=system_prompt, stage=stage)
+        return call_gemini(user_prompt, cfg, system_prompt=system_prompt)
 
     # RPM rate limiting (same as Gemini path)
     rpm = cfg.get("rpm", 0)
@@ -556,7 +423,7 @@ def call_llm(
     base_delay = float(cfg.get("api_retry_base_delay", 10.0))
     max_delay = float(cfg.get("api_retry_max_delay", 300.0))
     tpm_limit = float(cfg.get("tpm", 0) or 0)
-    max_output_tokens = _resolve_stage_max_tokens(cfg, stage)
+    max_output_tokens = int(cfg.get("max_tokens", 1024))
     estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
 
     attempt = 0
@@ -573,32 +440,15 @@ def call_llm(
                     top_p=top_p,
                     n=1,
                 )
-            prompt_tokens, completion_tokens, total_tokens = _get_openai_usage_tokens(completion)
-            _record_token_probe(
-                stage=stage,
-                cfg=cfg,
-                provider="openai",
-                messages=messages,
-                max_output_tokens=max_output_tokens,
-                estimated_tokens=estimated_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-            )
             _update_openai_tpm_budget(
                 reservation,
-                total_tokens or estimated_tokens,
+                _get_openai_total_tokens(completion) or estimated_tokens,
             )
             return completion.choices[0].message.content or ""
         except Exception as exc:
             _update_openai_tpm_budget(reservation, release=True)
             if attempt >= max_retries or not _is_transient_openai_error(exc):
-                logger.error(
-                    "Max retries exceeded at OpenAI SDK (stage=%s, model=%s): %s",
-                    stage or "unspecified",
-                    cfg.get("model"),
-                    str(exc)[:500],
-                )
+                logger.error("Max retries exceeded at OpenAI SDK. Rewarding 0.0.")
                 exit()
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
@@ -614,7 +464,6 @@ def call_gemini(
     user_prompt: str,
     cfg: dict,
     system_prompt: Optional[str] = None,
-    stage: Optional[str] = None,
 ) -> str:
     """Call Google Gemini API with rate limiting."""
     global _gemini_last_call
@@ -630,11 +479,10 @@ def call_gemini(
         _gemini_last_call = time.time()
 
     from google.genai import types
-    max_output_tokens = _resolve_stage_max_tokens(cfg, stage)
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=cfg.get("temperature", 0.2),
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=cfg.get("max_tokens", 4096),
         top_p=cfg.get("top_p", 0.8),
     )
 
@@ -663,21 +511,6 @@ def call_gemini(
                     config=config,
                 )
             text = getattr(response, "text", None)
-            usage_metadata = getattr(response, "usage_metadata", None)
-            _record_token_probe(
-                stage=stage,
-                cfg=cfg,
-                provider="gemini",
-                messages=[{"role": "user", "content": user_prompt}],
-                max_output_tokens=max_output_tokens,
-                estimated_tokens=_estimate_openai_request_tokens(
-                    [{"role": "user", "content": user_prompt}],
-                    max_output_tokens,
-                ),
-                prompt_tokens=getattr(usage_metadata, "prompt_token_count", None),
-                completion_tokens=getattr(usage_metadata, "candidates_token_count", None),
-                total_tokens=getattr(usage_metadata, "total_token_count", None),
-            )
             return text or ""
         except Exception as exc:
             if attempt >= max_retries:
@@ -697,13 +530,12 @@ def call_llm_structured(
     user_prompt: str,
     *,
     api_config: Optional[dict] = None,
-    stage: Optional[str] = None,
 ) -> Optional[dict]:
     """Call LLM and parse response as JSON dict.
 
     Falls back to regex extraction if structured parsing is unavailable.
     """
-    response = call_llm(user_prompt, api_config=api_config, stage=stage)
+    response = call_llm(user_prompt, api_config=api_config)
     json_pattern = re.compile(r"\{[\s\S]*\}", re.DOTALL)
     match = json_pattern.search(response)
     if match:
@@ -969,7 +801,7 @@ def correct_z3_code(
     """
     template = load_prompt(CORRECT_CODE_PROMPT)
     prompt = Template(template).safe_substitute(code=code, error=error)
-    fix_output = call_llm(prompt, api_config=api_config, stage="correction")
+    fix_output = call_llm(prompt, api_config=api_config)
     return extract_python_block(fix_output)
 
 
@@ -979,6 +811,7 @@ def correct_loop(
     api_config: Optional[dict] = None,
     max_tries: int = 3,
     timeout: float = 30.0,
+    debug_info: Optional[dict] = None,
 ) -> dict:
     """Execute Z3 code with auto-correction loop.
 
@@ -1007,6 +840,9 @@ def correct_loop(
         # print(f"[Z3LOOP][{_tid}]   run_code {time.time()-_tr:.2f}s  success={res['success']}  out={res.get('output','')[:80]!r}", flush=True)
         tries += 1
         cfg["temperature"] = cfg.get("temperature", 0.1) + 0.05
+
+    if debug_info is not None:
+        debug_info["correction_attempts"] = tries
 
     # if tries > 0:
     #     print(f"[Z3LOOP][{_tid}] ✓ loop done after {tries} retries, total={time.time()-_t:.2f}s", flush=True)
@@ -1073,7 +909,7 @@ def rephrase(
     prompt = Template(template).safe_substitute(
         context=context, question=question, options=options
     )
-    return call_llm(prompt, api_config=api_config, stage="structured_rephrase")
+    return call_llm(prompt, api_config=api_config)
 
 
 def object_extract(
@@ -1085,7 +921,7 @@ def object_extract(
     prompt = Template(template).safe_substitute(
         context=context, question=question, options=options
     )
-    result = call_llm_structured(prompt, api_config=api_config, stage="structured_object_extract")
+    result = call_llm_structured(prompt, api_config=api_config)
     if result and isinstance(result, dict):
         return result
     return {}
@@ -1102,7 +938,7 @@ def predicate_extract(
     prompt = Template(template).safe_substitute(
         context=context, question=question, options=options, obj_list=obj_list
     )
-    result = call_llm_structured(prompt, api_config=api_config, stage="structured_predicate_extract")
+    result = call_llm_structured(prompt, api_config=api_config)
     if result and isinstance(result, dict):
         return result
     return {}

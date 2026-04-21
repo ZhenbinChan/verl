@@ -301,6 +301,7 @@ class StepRewardManager(RewardManagerBase):
                     lambda args=args: reward_fn(
                         args[0], args[1], args[2],
                         api_config=self.api_config, extra_info=extra_info,
+                        **({"return_debug": True} if reward_type == "fol" else {}),
                         **({"fol_shared_state": fol_shared_state} if reward_type == "fol" else {}),
                     ),
                 )
@@ -308,13 +309,20 @@ class StepRewardManager(RewardManagerBase):
             ]
             scores = await asyncio.gather(*futures)
 
-            step_rewards = [
-                (int(args[3]), float(score))
-                for args, score in zip(call_args, scores)
-            ]
+            step_rewards = []
+            fol_debug = []
+            for args, score_item in zip(call_args, scores):
+                if reward_type == "fol" and isinstance(score_item, dict):
+                    score_value = float(score_item.get("score", 0.0))
+                    fol_debug.append(score_item.get("debug", {}))
+                else:
+                    score_value = float(score_item)
+                step_rewards.append((int(args[3]), score_value))
 
             key = f"{reward_type}_step_reward"
             reward_extra_info[key] = step_rewards
+            if reward_type == "fol" and fol_debug:
+                reward_extra_info["fol_debug"] = fol_debug
 
         # Store number of steps for debugging
         reward_extra_info["num_steps"] = len(step_positions)

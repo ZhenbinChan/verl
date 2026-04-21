@@ -83,7 +83,7 @@ def _preprocess_direct(
     if options:
         user_input += f"\n<Options>{options}</Options>"
 
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt, stage="declaration")
+    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
     declarations = extract_python_block(response, strategy="all")
     return context, declarations
 
@@ -127,6 +127,7 @@ def _translate_implication(
     step_text: str,
     *,
     api_config: Optional[dict] = None,
+    debug_info: Optional[dict] = None,
 ) -> str:
     """Implication-mode translation.
 
@@ -144,7 +145,9 @@ def _translate_implication(
         f"Context:\n{context}\n\n"
         f"Reasoning Step:\n{step_text}"
     )
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt, stage="translation")
+    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+    if debug_info is not None:
+        debug_info["translation_response"] = response
     z3_code = extract_python_block(response, strategy="all")
 
     # Parse for premises_N / conclusion_N
@@ -203,6 +206,7 @@ def _translate_assertion(
     step_text: str,
     *,
     api_config: Optional[dict] = None,
+    debug_info: Optional[dict] = None,
 ) -> str:
     """Assertion-mode translation.
 
@@ -218,7 +222,9 @@ def _translate_assertion(
     prompt = Template(template).safe_substitute(
         context=context, declaration=declarations, step=step_text
     )
-    trans_output = call_llm(prompt, api_config=api_config, stage="translation")
+    trans_output = call_llm(prompt, api_config=api_config)
+    if debug_info is not None:
+        debug_info["translation_response"] = trans_output
     trans_code = extract_python_block(trans_output)
     return _wrap_assertion_z3_code(declarations, trans_code)
 
@@ -282,7 +288,7 @@ class FOLEngine:
             )
 
     def verify_step(
-        self, processed_context: str, declarations: str, step_text: str,
+        self, processed_context: str, declarations: str, step_text: str, debug_info: Optional[dict] = None,
     ) -> float:
         """Translate step to Z3, execute with correction loop, return reward.
 
@@ -295,11 +301,13 @@ class FOLEngine:
                 z3_code = _translate_implication(
                     processed_context, declarations, step_text,
                     api_config=self.config.api_config,
+                    debug_info=debug_info,
                 )
             else:
                 z3_code = _translate_assertion(
                     processed_context, declarations, step_text,
                     api_config=self.config.api_config,
+                    debug_info=debug_info,
                 )
 
             # Step 2: Execute with auto-correction loop
@@ -308,7 +316,11 @@ class FOLEngine:
                 api_config=self.config.api_config,
                 max_tries=self.config.max_tries,
                 timeout=self.config.timeout,
+                debug_info=debug_info,
             )
+            if debug_info is not None:
+                debug_info["z3_output"] = result.get("output")
+                debug_info["z3_error"] = result.get("error")
 
             # Step 3: Parse result
             if result["success"] and result.get("output"):
