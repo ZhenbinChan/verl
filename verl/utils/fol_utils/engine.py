@@ -7,6 +7,7 @@ is always entailment: UNSAT of (premises AND NOT conclusion) -> 1.0.
 """
 
 import concurrent.futures
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -39,6 +40,242 @@ from verl.utils.fol_utils.common import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DECLARATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sorts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "enum_values": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["name", "enum_values"],
+                "additionalProperties": False,
+            },
+        },
+        "variables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"},
+                },
+                "required": ["name", "sort"],
+                "additionalProperties": False,
+            },
+        },
+        "constants": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"},
+                },
+                "required": ["name", "sort"],
+                "additionalProperties": False,
+            },
+        },
+        "functions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "arg_sorts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "return_sort": {"type": "string"},
+                },
+                "required": ["name", "arg_sorts", "return_sort"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["sorts", "variables", "constants", "functions"],
+    "additionalProperties": False,
+}
+
+_IMPLICATION_TRANSLATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "new_variables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"},
+                },
+                "required": ["name", "sort"],
+                "additionalProperties": False,
+            },
+        },
+        "premises": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "conclusion": {"type": "string"},
+    },
+    "required": ["new_variables", "premises", "conclusion"],
+    "additionalProperties": False,
+}
+
+_ASSERTION_TRANSLATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "new_variables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"},
+                },
+                "required": ["name", "sort"],
+                "additionalProperties": False,
+            },
+        },
+        "premise_fol": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "conclusion_fol": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["new_variables", "premise_fol", "conclusion_fol"],
+    "additionalProperties": False,
+}
+
+
+def _judge_use_outlines(api_config: Optional[dict]) -> bool:
+    """Whether to request structured JSON output from the FOL judge."""
+    if not api_config:
+        return False
+    value = api_config.get("fol_judge_use_outlines", False)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _render_const_declarations(items: list[dict], *, section_name: str) -> str:
+    """Render variable / constant declarations from schema payload."""
+    lines = [f"# {section_name}"]
+    for item in items:
+        name = item.get("name")
+        sort = item.get("sort")
+        if isinstance(name, str) and isinstance(sort, str):
+            lines.append(f"{name} = Const('{name}', {sort})")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _render_declarations_from_schema(payload: Optional[dict]) -> str:
+    """Render Z3 declaration code from a structured declaration schema."""
+    if not isinstance(payload, dict):
+        return ""
+
+    lines = ["from z3 import *", "", "# Declare Sorts & Enums"]
+    for sort_item in payload.get("sorts", []):
+        if not isinstance(sort_item, dict):
+            continue
+        name = sort_item.get("name")
+        enum_values = sort_item.get("enum_values", [])
+        if not isinstance(name, str):
+            continue
+        if isinstance(enum_values, list) and len(enum_values) > 0 and all(isinstance(v, str) for v in enum_values):
+            enum_names = ", ".join(enum_values)
+            enum_literals = ", ".join(f"'{value}'" for value in enum_values)
+            lines.append(f"{name}, ({enum_names}) = EnumSort('{name}', [{enum_literals}])")
+        else:
+            lines.append(f"{name} = DeclareSort('{name}')")
+
+    variable_block = _render_const_declarations(payload.get("variables", []), section_name="Declare Variables")
+    if variable_block:
+        lines.extend(["", variable_block])
+
+    constant_block = _render_const_declarations(payload.get("constants", []), section_name="Declare Constants")
+    if constant_block:
+        lines.extend(["", constant_block])
+
+    lines.extend(["", "# Declare Functions"])
+    for func_item in payload.get("functions", []):
+        if not isinstance(func_item, dict):
+            continue
+        name = func_item.get("name")
+        arg_sorts = func_item.get("arg_sorts", [])
+        return_sort = func_item.get("return_sort")
+        if not isinstance(name, str) or not isinstance(return_sort, str) or not isinstance(arg_sorts, list):
+            continue
+        if not all(isinstance(sort, str) for sort in arg_sorts):
+            continue
+        signature = ", ".join([*arg_sorts, return_sort])
+        lines.append(f"{name} = Function('{name}', {signature})")
+
+    return "\n".join(lines).strip()
+
+
+def _render_structured_implication(
+    payload: Optional[dict],
+    declarations: str,
+) -> str:
+    """Render complete entailment code from implication schema payload."""
+    if not isinstance(payload, dict):
+        return ""
+
+    var_block = _render_const_declarations(payload.get("new_variables", []), section_name="New Variables")
+    premises = payload.get("premises", [])
+    conclusion = payload.get("conclusion")
+    if not isinstance(premises, list) or not all(isinstance(item, str) for item in premises):
+        return ""
+    if not isinstance(conclusion, str) or not conclusion.strip():
+        return ""
+
+    full_declarations = declarations
+    if var_block:
+        full_declarations = f"{declarations}\n\n{var_block}"
+    return _build_entailment_code(full_declarations, premises, conclusion)
+
+
+def _render_structured_assertion(
+    payload: Optional[dict],
+    declarations: str,
+) -> str:
+    """Render assertion-mode helper code from structured schema payload."""
+    if not isinstance(payload, dict):
+        return ""
+
+    premise_fol = payload.get("premise_fol", [])
+    conclusion_fol = payload.get("conclusion_fol", [])
+    if not isinstance(premise_fol, list) or not all(isinstance(item, str) for item in premise_fol):
+        return ""
+    if not isinstance(conclusion_fol, list) or not all(isinstance(item, str) for item in conclusion_fol):
+        return ""
+
+    expression_lines = []
+    var_block = _render_const_declarations(payload.get("new_variables", []), section_name="New Variables")
+    if var_block:
+        expression_lines.append(var_block)
+        expression_lines.append("")
+    expression_lines.append("premise_fol = [")
+    for expr in premise_fol:
+        expression_lines.append(f"    {expr},")
+    expression_lines.append("]")
+    expression_lines.append("")
+    expression_lines.append("conclusion_fol = [")
+    for expr in conclusion_fol:
+        expression_lines.append(f"    {expr},")
+    expression_lines.append("]")
+    return _wrap_assertion_z3_code(declarations, "\n".join(expression_lines))
 
 
 # ---------------------------------------------------------------------------
@@ -83,8 +320,31 @@ def _preprocess_direct(
     if options:
         user_input += f"\n<Options>{options}</Options>"
 
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
-    declarations = extract_python_block(response, strategy="all")
+    if _judge_use_outlines(api_config):
+        structured_input = (
+            f"{user_input}\n\n"
+            "Return a JSON object that follows the provided schema exactly. "
+            "Use empty arrays instead of omitted fields."
+        )
+        payload = call_llm_structured(
+            structured_input,
+            api_config=api_config,
+            system_prompt=system_prompt,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "fol-z3-declarations",
+                    "schema": _DECLARATION_SCHEMA,
+                },
+            },
+        )
+        declarations = _render_declarations_from_schema(payload)
+        if not declarations:
+            response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+            declarations = extract_python_block(response, strategy="all")
+    else:
+        response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+        declarations = extract_python_block(response, strategy="all")
     return context, declarations
 
 
@@ -145,7 +405,36 @@ def _translate_implication(
         f"Context:\n{context}\n\n"
         f"Reasoning Step:\n{step_text}"
     )
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+    if _judge_use_outlines(api_config):
+        structured_input = (
+            f"{user_input}\n\n"
+            "Return a JSON object that follows the provided schema exactly. "
+            "Use only strings built from the provided Z3 declarations."
+        )
+        payload = call_llm_structured(
+            structured_input,
+            api_config=api_config,
+            system_prompt=system_prompt,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "fol-implication-translation",
+                    "schema": _IMPLICATION_TRANSLATION_SCHEMA,
+                },
+            },
+        )
+        if debug_info is not None and payload is not None:
+            debug_info["translation_response"] = json.dumps(payload, ensure_ascii=False, indent=2)
+        structured_code = _render_structured_implication(payload, declarations)
+        if structured_code:
+            return structured_code
+        if debug_info is not None and debug_info.get("translation_response") is None:
+            debug_info["translation_response"] = None
+        response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+        if not response:
+            response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+    else:
+        response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
     if debug_info is not None:
         debug_info["translation_response"] = response
     z3_code = extract_python_block(response, strategy="all")
@@ -222,7 +511,33 @@ def _translate_assertion(
     prompt = Template(template).safe_substitute(
         context=context, declaration=declarations, step=step_text
     )
-    trans_output = call_llm(prompt, api_config=api_config)
+    if _judge_use_outlines(api_config):
+        structured_prompt = (
+            f"{prompt}\n\n"
+            "Return a JSON object that follows the provided schema exactly. "
+            "Use empty arrays instead of omitted fields."
+        )
+        payload = call_llm_structured(
+            structured_prompt,
+            api_config=api_config,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "fol-assertion-translation",
+                    "schema": _ASSERTION_TRANSLATION_SCHEMA,
+                },
+            },
+        )
+        if debug_info is not None and payload is not None:
+            debug_info["translation_response"] = json.dumps(payload, ensure_ascii=False, indent=2)
+        structured_code = _render_structured_assertion(payload, declarations)
+        if structured_code:
+            return structured_code
+        trans_output = ""
+        if not trans_output:
+            trans_output = call_llm(prompt, api_config=api_config)
+    else:
+        trans_output = call_llm(prompt, api_config=api_config)
     if debug_info is not None:
         debug_info["translation_response"] = trans_output
     trans_code = extract_python_block(trans_output)

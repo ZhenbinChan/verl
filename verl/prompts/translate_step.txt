@@ -20,10 +20,11 @@ Given the natural language problem context, problem description, a single reason
 - Please Negate the conclusion for verifying its correctness！（VERY IMPORTANT）
 
 ## Output Format
-1. IMPORTANT: The output must be executable Python code, strictly following Python syntax and Z3 API coding conventions.
-2. The output is divided into two parts:
-- Declaration of new variables: If new variables are needed, declare them using the Const function and specify their type, for example: ```x = Const('x', student)```, where `student` is a type already defined in the Declaration code.
-- Expression lists: Each sentence must be translated into one or more expressions, and these expressions must be appended to the corresponding list.
+1. IMPORTANT: The output must be a single JSON object. No Markdown, no Python code fences, and no natural language commentary.
+2. The JSON object must have exactly these fields:
+- `new_variables`: array of objects `{"name": string, "sort": string}`. Use an empty array if no new variables are needed.
+- `premise_fol`: array of strings, where each string is one Z3 expression.
+- `conclusion_fol`: array of strings, where each string is one Z3 expression. Keep the conclusion negated for verification.
 
 ---
 Here is an example:
@@ -73,21 +74,21 @@ join = Function('join', partner, year)
 
 
 ## Output
-```python
-# Define required variables (ensure no conflict with Declaration)
-x, y, z = Consts('x y z', partner)
-
-# Translated premise Python code
-premise_fol = [
-    ForAll([x, y, z], Implies( And(JoinedEarlier(x, y), JoinedEarlier(y, z)), JoinedEarlier(x, z))), # axiom_1
-    join(Hodges) < join(Nader),  # premise in reasoning step: Hodges joined earlier than Nader
-    join(Nader) < join(Owens), # premise in reasoning step: Nader joined earlier than Owens
-]
-
-conclusion_fol = [
-    Not(join(Hodges) < join(Owens)), # Negate the conclusion for verifying: Hodges doesn‘t joined earlier than Owens
-]
-```
+{
+  "new_variables": [
+    {"name": "x", "sort": "partner"},
+    {"name": "y", "sort": "partner"},
+    {"name": "z", "sort": "partner"}
+  ],
+  "premise_fol": [
+    "ForAll([x, y, z], Implies(And(JoinedEarlier(x, y), JoinedEarlier(y, z)), JoinedEarlier(x, z)))",
+    "join(Hodges) < join(Nader)",
+    "join(Nader) < join(Owens)"
+  ],
+  "conclusion_fol": [
+    "Not(join(Hodges) < join(Owens))"
+  ]
+}
 Now, Please covert the following content to the python code we want:
 
 <Context>

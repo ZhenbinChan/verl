@@ -120,6 +120,11 @@ class TreeRewardManager(RewardManagerBase):
         fol_translation = reward_cfg_fol.get("fol_translation", algo_cfg_fol.get("fol_translation", None))
         if fol_translation is not None:
             self.api_config["fol_translation"] = str(fol_translation)
+        fol_judge_use_outlines = reward_cfg_fol.get(
+            "fol_judge_use_outlines",
+            algo_cfg_fol.get("fol_judge_use_outlines", False),
+        )
+        self.api_config["fol_judge_use_outlines"] = bool(fol_judge_use_outlines)
 
         # Step reward type: explicit parameter > reward config > algorithm config > None
         if step_reward_type is not None:

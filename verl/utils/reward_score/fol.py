@@ -18,6 +18,7 @@ Exports:
   - compute_step_reward_fol
 """
 
+import atexit
 import logging
 import os
 import threading
@@ -44,6 +45,8 @@ _fol_verify_cache: OrderedDict[tuple, float] = OrderedDict()
 _fol_verify_cache_lock = threading.Lock()
 _fol_verify_cache_stats = {"hits": 0, "misses": 0}
 _fol_verify_cache_stats_lock = threading.Lock()
+_fol_verify_cache_step_stats: OrderedDict[int, dict[str, int]] = OrderedDict()
+_fol_verify_cache_summary_registered = False
 
 
 def _build_fol_config(api_config: dict | None = None) -> FOLConfig:
@@ -92,6 +95,7 @@ def prepare_fol_shared_state(
         (fol_config.api_config or {}).get("temperature"),
         (fol_config.api_config or {}).get("max_tokens"),
         (fol_config.api_config or {}).get("top_p"),
+        bool((fol_config.api_config or {}).get("fol_judge_use_outlines", False)),
     )
 
     with _fol_shared_state_cache_lock:
@@ -145,28 +149,64 @@ def _build_verify_cache_key(
         api_cfg.get("temperature"),
         api_cfg.get("max_tokens"),
         api_cfg.get("top_p"),
+        bool(api_cfg.get("fol_judge_use_outlines", False)),
     )
 
 
-def _log_verify_cache_event(hit: bool, step_to_translate: str) -> None:
-    """Print per-step verify-cache hit statistics."""
-    if str(os.environ.get("FOL_VERIFY_CACHE_LOG", "1")).strip().lower() in {"0", "false", "no", "off"}:
+def _verify_cache_log_enabled() -> bool:
+    """Whether verify-cache summary logging is enabled."""
+    return str(os.environ.get("FOL_VERIFY_CACHE_LOG", "0")).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _print_verify_cache_summary() -> None:
+    """Print a one-shot verify-cache summary when the worker process exits."""
+    if not _verify_cache_log_enabled():
         return
 
     with _fol_verify_cache_stats_lock:
-        stat_key = "hits" if hit else "misses"
-        _fol_verify_cache_stats[stat_key] += 1
         hits = _fol_verify_cache_stats["hits"]
         misses = _fol_verify_cache_stats["misses"]
+        step_items = list(_fol_verify_cache_step_stats.items())
     total = hits + misses
-    hit_rate = hits / total if total > 0 else 0.0
-    preview = " ".join(step_to_translate.strip().split())
-    preview = preview[:160]
+    if total <= 0:
+        return
+
+    per_step_parts = []
+    for step_idx, stats in step_items:
+        step_total = stats["hits"] + stats["misses"]
+        if step_total <= 0:
+            continue
+        step_rate = stats["hits"] / step_total
+        per_step_parts.append(f"step{step_idx}: {stats['hits']}/{step_total}={step_rate:.1%}")
+    suffix = f" | {', '.join(per_step_parts)}" if per_step_parts else ""
     print(
-        f"[FOLVerifyCache][pid={os.getpid()}] {'HIT' if hit else 'MISS'} "
-        f"hits={hits} misses={misses} hit_rate={hit_rate:.1%} step={preview}",
+        f"[FOLVerifyCacheSummary][pid={os.getpid()}] "
+        f"hits={hits} misses={misses} hit_rate={hits / total:.1%}{suffix}",
         flush=True,
     )
+
+
+def _register_verify_cache_summary() -> None:
+    """Register the summary printer exactly once."""
+    global _fol_verify_cache_summary_registered
+    with _fol_verify_cache_stats_lock:
+        if _fol_verify_cache_summary_registered:
+            return
+        atexit.register(_print_verify_cache_summary)
+        _fol_verify_cache_summary_registered = True
+
+
+def _log_verify_cache_event(hit: bool, step_index: int) -> None:
+    """Accumulate verify-cache hit statistics by logical step index."""
+    if not _verify_cache_log_enabled():
+        return
+
+    _register_verify_cache_summary()
+    with _fol_verify_cache_stats_lock:
+        stat_key = "hits" if hit else "misses"
+        _fol_verify_cache_stats[stat_key] += 1
+        step_stats = _fol_verify_cache_step_stats.setdefault(step_index, {"hits": 0, "misses": 0})
+        step_stats[stat_key] += 1
 
 
 def compute_step_reward_format_fol(
@@ -219,6 +259,7 @@ def compute_step_reward_fol(
             step_to_translate = "\n".join(step_history)
         else:
             step_to_translate = step_text
+        step_index = max(0, len(step_history) - 1)
 
         verify_cache_key = _build_verify_cache_key(
             shared_state=shared_state,
@@ -230,9 +271,9 @@ def compute_step_reward_fol(
             if cached_reward is not None:
                 _fol_verify_cache.move_to_end(verify_cache_key)
                 debug_info["cache_hit"] = True
-                _log_verify_cache_event(True, step_to_translate)
+                _log_verify_cache_event(True, step_index)
                 return {"score": cached_reward, "debug": debug_info} if return_debug else cached_reward
-        _log_verify_cache_event(False, step_to_translate)
+        _log_verify_cache_event(False, step_index)
 
         # print(f"[FOL][{_tid}] → verify_step({fol_config.translation.value})...", flush=True)
         # _t2 = time.time()

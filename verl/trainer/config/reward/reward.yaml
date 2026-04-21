@@ -3,6 +3,10 @@
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# Enable structured decoding for the FOL judge on OpenAI-compatible backends
+# (for example local vLLM with structured outputs backend auto/outlines/xgrammar).
+fol_judge_use_outlines: true
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.

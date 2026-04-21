@@ -667,3 +667,7 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+    # FOL judge structured decoding toggle for OpenAI-compatible backends such as local vLLM.
+    # When enabled, FOL translation requests ask the judge model for JSON output via
+    # response_format=json_object, which activates vLLM's structured outputs backend.
+    fol_judge_use_outlines: bool = True

@@ -880,7 +880,18 @@ def thread_safe_cache(func):
     """
     @wraps(func)
     def wrapper(context: str, question: str, options: str = "", *, api_config: Optional[dict] = None):
-        cache_key = (context, question, options)
+        api_signature: tuple = ()
+        if api_config:
+            serialized_items = []
+            for key, value in sorted(api_config.items()):
+                try:
+                    serialized_value = json.dumps(value, sort_keys=True, ensure_ascii=True)
+                except TypeError:
+                    serialized_value = repr(value)
+                serialized_items.append((key, serialized_value))
+            api_signature = tuple(serialized_items)
+
+        cache_key = (context, question, options, api_signature)
         # _tid = threading.current_thread().name
         # _key_hash = hash(cache_key) % 10000
 

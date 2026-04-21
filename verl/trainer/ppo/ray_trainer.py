@@ -1600,6 +1600,11 @@ class RayPPOTrainer:
                                 fol_translation = reward_cfg.get("fol_translation", algo_cfg.get("fol_translation", None))
                                 if fol_translation is not None:
                                     api_config["fol_translation"] = str(fol_translation)
+                                fol_judge_use_outlines = reward_cfg.get(
+                                    "fol_judge_use_outlines",
+                                    algo_cfg.get("fol_judge_use_outlines", False),
+                                )
+                                api_config["fol_judge_use_outlines"] = bool(fol_judge_use_outlines)
                                 cumulative = reward_cfg.get("fol_verify_with_cumulative_steps", algo_cfg.get("fol_verify_with_cumulative_steps", False))
                                 api_config["cumulative"] = bool(cumulative)
 

@@ -42,11 +42,14 @@ Translation Rules (Strict Compliance Required):
 
     5.  Output Format:
 
-        • Output ONLY the Python code.
+        • Output ONLY a JSON object. No Markdown, no Python code fences, and no natural language commentary.
 
-        • Structure the output as # Step N, followed by premises_n = [...] and conclusion_n = ....
+        • The JSON object must have exactly these fields:
+            ◦ "new_variables": array of objects {"name": string, "sort": string}
+            ◦ "premises": array of strings, where each string is one Z3 expression
+            ◦ "conclusion": string, a single Z3 expression
 
-        • Each step must be separated by exactly one newline.
+        • If no new variables are needed, return an empty array for "new_variables".
 
 Example of Expected Behavior:
 
@@ -89,17 +92,14 @@ Reasoning steps:
 </step>
 
 Example Output:
-# Step 1
-a = Const('a', Person)
-premises_1 = [
-    Black(a),
-    Westernized(a)
-]
-conclusion_1 = And(Black(a), Westernized(a))
-
-# Step 2=
-premises_2 = [
-    And(Black(a), Westernized(a)),
-    ForAll([x], Implies(And(Black(x), Westernized(x)), Hypertension(x) == And(HighSaltDiet(x), GeneticAdaptation(x))))
-]
-conclusion_2 = (Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptation(a)))
+{
+  "new_variables": [
+    {"name": "a", "sort": "Person"}
+  ],
+  "premises": [
+    "Black(a)",
+    "Westernized(a)",
+    "ForAll([x], Implies(And(Black(x), Westernized(x)), Hypertension(x) == And(HighSaltDiet(x), GeneticAdaptation(x))))"
+  ],
+  "conclusion": "Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptation(a))"
+}

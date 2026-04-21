@@ -23,8 +23,14 @@ Instructions:
       •  CRITICAL: Do NOT include any `solver.add(...)` or logical axioms. The output must consist ONLY of the structural declarations and signatures.
 
    4.  Output Format:
-      •  Output ONLY a Python code block. No natural language or commentary.
-      •  Organize by category: Sorts/Enums, Variables, Constants, and Functions.
+      •  Output ONLY a JSON object. No Markdown, no Python code fences, and no natural language commentary.
+      •  The JSON object must have exactly these fields:
+         - "sorts": array of objects {"name": string, "enum_values": string[]}. Use empty array for `enum_values` when the sort should be declared with `DeclareSort`.
+         - "variables": array of objects {"name": string, "sort": string}
+         - "constants": array of objects {"name": string, "sort": string}
+         - "functions": array of objects {"name": string, "arg_sorts": string[], "return_sort": string}
+      •  Each identifier must already be a valid Python/Z3 identifier.
+      •  Use empty arrays instead of omitting fields.
 
 Example Input:
 
@@ -42,37 +48,31 @@ Option (D): The blood pressure of Yoruba people in West Africa is not high. Yoru
 
 Example Output:
 
-```python
-from z3 import *
-
-# 1. Declare Sorts & Enums
-Person = DeclareSort('Person')
-Region = DeclareSort('Region')
-Ethnicity, (Black, White, Other) = EnumSort('Ethnicity', ['Black', 'White', 'Other']) # Not Ethnicity = EnumSort('Ethnicity', ['Black', 'White', 'Other'])
-DietCategory, (Western, Traditional, Mixed) = EnumSort('DietCategory', ['Western', 'Traditional', 'Mixed'])
-
-# 2. Declare Variables
-p = Const('p', Person)
-r = Const('r', Region)
-
-# 3. Declare Constants
-senegal = Const('senegal', Region)
-yoruba_people = Const('yoruba_people', Person)
-
-# 4. Declare Functions with varied Return Sorts
-# 4.1 Boolean
-IsWesternized = Function('IsWesternized', Person, BoolSort())
-HasGeneticAdaptation = Function('HasGeneticAdaptation', Person, BoolSort())
-
-# 4.2 Arithmetic
-BloodPressureValue = Function('BloodPressureValue', Person, RealSort())
-SaltIntakeLevel = Function('SaltIntakeLevel', Person, RealSort())
-HistoricalSaltAbundance = Function('HistoricalSaltAbundance', Region, RealSort())
-
-# 4.3 Object Mapping
-OriginRegion = Function('OriginRegion', Person, Region)
-AssignedDiet = Function('AssignedDiet', Person, DietCategory)
-GetEthnicity = Function('GetEthnicity', Person, Ethnicity)
-```
+{
+  "sorts": [
+    {"name": "Person", "enum_values": []},
+    {"name": "Region", "enum_values": []},
+    {"name": "Ethnicity", "enum_values": ["Black", "White", "Other"]},
+    {"name": "DietCategory", "enum_values": ["Western", "Traditional", "Mixed"]}
+  ],
+  "variables": [
+    {"name": "p", "sort": "Person"},
+    {"name": "r", "sort": "Region"}
+  ],
+  "constants": [
+    {"name": "senegal", "sort": "Region"},
+    {"name": "yoruba_people", "sort": "Person"}
+  ],
+  "functions": [
+    {"name": "IsWesternized", "arg_sorts": ["Person"], "return_sort": "BoolSort()"},
+    {"name": "HasGeneticAdaptation", "arg_sorts": ["Person"], "return_sort": "BoolSort()"},
+    {"name": "BloodPressureValue", "arg_sorts": ["Person"], "return_sort": "RealSort()"},
+    {"name": "SaltIntakeLevel", "arg_sorts": ["Person"], "return_sort": "RealSort()"},
+    {"name": "HistoricalSaltAbundance", "arg_sorts": ["Region"], "return_sort": "RealSort()"},
+    {"name": "OriginRegion", "arg_sorts": ["Person"], "return_sort": "Region"},
+    {"name": "AssignedDiet", "arg_sorts": ["Person"], "return_sort": "DietCategory"},
+    {"name": "GetEthnicity", "arg_sorts": ["Person"], "return_sort": "Ethnicity"}
+  ]
+}
 
 Task: given the provided context and options, generate the corresponding rich Z3 declarations.
