@@ -83,7 +83,7 @@ def _preprocess_direct(
     if options:
         user_input += f"\n<Options>{options}</Options>"
 
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt, stage="declaration")
     declarations = extract_python_block(response, strategy="all")
     return context, declarations
 
@@ -144,7 +144,7 @@ def _translate_implication(
         f"Context:\n{context}\n\n"
         f"Reasoning Step:\n{step_text}"
     )
-    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+    response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt, stage="translation")
     z3_code = extract_python_block(response, strategy="all")
 
     # Parse for premises_N / conclusion_N
@@ -218,7 +218,7 @@ def _translate_assertion(
     prompt = Template(template).safe_substitute(
         context=context, declaration=declarations, step=step_text
     )
-    trans_output = call_llm(prompt, api_config=api_config)
+    trans_output = call_llm(prompt, api_config=api_config, stage="translation")
     trans_code = extract_python_block(trans_output)
     return _wrap_assertion_z3_code(declarations, trans_code)
 
