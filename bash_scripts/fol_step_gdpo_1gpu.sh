@@ -17,7 +17,7 @@ set -x
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
+FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen3.6-35B-A3B}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS

@@ -24,7 +24,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # If you need different settings for one run, edit this block or override in CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
 export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
-export FOL_MODEL="Qwen/Qwen3.5-35B-A3B"
+export FOL_MODEL="Qwen/Qwen3.6-35B-A3B"
 export FOL_RPM=200
 export FOL_OPENAI_TPM=60000
 export FOL_OPENAI_MAX_INFLIGHT=4
@@ -67,6 +67,8 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=tree \
+    reward.num_workers=4 \
+    algorithm.step_reward_max_workers=4 \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
