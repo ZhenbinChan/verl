@@ -20,16 +20,14 @@ echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # API configuration for LLM-based step rewards (FOL, self_eval, etc.)
-# These env vars are the default fallback; can also be overridden via
-# +reward.api_config.model=... +reward.api_config.base_url=... in the CLI.
+# Script-local defaults. These intentionally override stale ~/.bashrc values.
+# If you need different settings for one run, edit this block or override in CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-# OPENAI_BASE_URL: only matters for non-Gemini models. Gemini models route
-# through google-genai SDK and ignore this. Leave unset for direct Gemini.
-# export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.openai.com/v1"}
-export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.5-35B-A3B"}
-# Per-worker rate limit (calls/min). 6 workers * 60 = 360 RPM aggregate,
-# well within mihomo + 机场 capacity (measured ~50 concurrent burst, ~25 TPS sustained).
-export FOL_RPM=${FOL_RPM:-200}
+export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
+export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.5-397B-A17B"}
+export FOL_RPM=60
+export FOL_OPENAI_TPM=1500000
+export FOL_OPENAI_MAX_INFLIGHT=4
 
 # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
 #    KeepAlive 防止训练长时间空闲后隧道被中间设备断开

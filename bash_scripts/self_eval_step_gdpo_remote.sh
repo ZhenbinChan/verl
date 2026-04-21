@@ -19,8 +19,9 @@ unset HIP_VISIBLE_DEVICES
 
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:8000/v1"}
+# Script-local defaults. These intentionally override stale ~/.bashrc values.
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
+export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
 
 python3 -u -m verl.trainer.main_ppo \

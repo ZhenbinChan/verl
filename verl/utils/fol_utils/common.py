@@ -24,12 +24,18 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from functools import wraps
 from pathlib import Path
 from string import Template
 from typing import Any, Optional, Union
 
 from openai import OpenAI
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Linux training path uses fcntl
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ _openai_inflight_sem = threading.Semaphore(
 )
 _openai_last_call = 0.0
 _openai_rate_lock = threading.Lock()
+_OPENAI_TPM_WINDOW_SECONDS = 60.0
 
 _OPENAI_TRANSIENT_MARKERS = ("429", "rate limit", "502", "503", "504", "connection", "timeout")
 
@@ -177,6 +184,7 @@ def _get_default_api_config() -> dict:
         "api_key": os.environ.get("OPENAI_API_KEY", "EMPTY"),
         "base_url": os.environ.get("OPENAI_BASE_URL", os.environ.get("FOL_SLM_BASE_URL", None)),
         "rpm": float(os.environ.get("FOL_RPM", 10)),
+        "tpm": float(os.environ.get("FOL_OPENAI_TPM", os.environ.get("FOL_TPM", 0)) or 0),
         "temperature": 0.2,
         "max_tokens": 1024,
         "top_p": 0.8,
@@ -185,6 +193,169 @@ def _get_default_api_config() -> dict:
 
 _llm_call_counter = 0
 _llm_call_counter_lock = threading.Lock()
+
+
+def _extract_message_text(content: Any) -> str:
+    """Best-effort flattening of OpenAI message content into plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _estimate_openai_request_tokens(messages: list[dict[str, Any]], max_output_tokens: int) -> int:
+    """Conservatively estimate prompt + completion tokens for TPM admission."""
+    prompt_chars = 0
+    for message in messages:
+        prompt_chars += len(message.get("role", ""))
+        prompt_chars += len(_extract_message_text(message.get("content")))
+    prompt_tokens = max(1, (prompt_chars + 3) // 4)
+    overhead_tokens = 8 * max(len(messages), 1)
+    return prompt_tokens + overhead_tokens + max(0, int(max_output_tokens))
+
+
+def _get_openai_tpm_state_path() -> Path:
+    """Return the shared TPM state path used across reward worker processes."""
+    path = os.environ.get("FOL_OPENAI_TPM_STATE_PATH", "/tmp/verl_fol_openai_tpm_state.json")
+    return Path(path)
+
+
+def _load_openai_tpm_entries_unlocked(fp) -> list[dict[str, Any]]:
+    """Read and normalize TPM state from an already-locked file handle."""
+    fp.seek(0)
+    raw = fp.read().strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            ts = float(entry.get("ts", 0.0))
+            tokens = max(0.0, float(entry.get("tokens", 0.0)))
+        except (TypeError, ValueError):
+            continue
+        reservation_id = entry.get("id")
+        if not isinstance(reservation_id, str):
+            continue
+        normalized.append({"id": reservation_id, "ts": ts, "tokens": tokens})
+    return normalized
+
+
+def _write_openai_tpm_entries_unlocked(fp, entries: list[dict[str, Any]]) -> None:
+    """Persist TPM state to an already-locked file handle."""
+    fp.seek(0)
+    json.dump({"entries": entries}, fp)
+    fp.truncate()
+    fp.flush()
+
+
+def _prune_openai_tpm_entries(entries: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
+    """Drop expired or empty TPM reservations."""
+    return [
+        entry
+        for entry in entries
+        if entry["tokens"] > 0 and now - entry["ts"] < _OPENAI_TPM_WINDOW_SECONDS
+    ]
+
+
+def _reserve_openai_tpm_budget(tpm_limit: float, estimated_tokens: int) -> dict[str, Any] | None:
+    """Reserve TPM budget across processes before issuing an OpenAI request."""
+    if fcntl is None or tpm_limit <= 0 or estimated_tokens <= 0:
+        return None
+
+    state_path = _get_openai_tpm_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    reservation_id = str(uuid.uuid4())
+
+    while True:
+        with state_path.open("a+", encoding="utf-8") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+            now = time.time()
+            entries = _prune_openai_tpm_entries(_load_openai_tpm_entries_unlocked(fp), now)
+            used_tokens = sum(entry["tokens"] for entry in entries)
+
+            if used_tokens + estimated_tokens <= tpm_limit or not entries:
+                entries.append({"id": reservation_id, "ts": now, "tokens": float(estimated_tokens)})
+                _write_openai_tpm_entries_unlocked(fp, entries)
+                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+                return {"id": reservation_id, "state_path": str(state_path), "estimated_tokens": estimated_tokens}
+
+            tokens_to_free = used_tokens + estimated_tokens - tpm_limit
+            reclaimed = 0.0
+            wake_at = now + _OPENAI_TPM_WINDOW_SECONDS
+            for entry in sorted(entries, key=lambda item: item["ts"]):
+                reclaimed += entry["tokens"]
+                wake_at = entry["ts"] + _OPENAI_TPM_WINDOW_SECONDS
+                if reclaimed >= tokens_to_free:
+                    break
+            _write_openai_tpm_entries_unlocked(fp, entries)
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+        time.sleep(max(0.01, wake_at - now))
+
+
+def _update_openai_tpm_budget(
+    reservation: dict[str, Any] | None,
+    actual_tokens: int | None = None,
+    *,
+    release: bool = False,
+) -> None:
+    """Finalize or release a previously reserved TPM budget entry."""
+    if fcntl is None or reservation is None:
+        return
+
+    state_path = Path(reservation["state_path"])
+    if not state_path.exists():
+        return
+
+    reservation_id = reservation["id"]
+    with state_path.open("a+", encoding="utf-8") as fp:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        now = time.time()
+        entries = _prune_openai_tpm_entries(_load_openai_tpm_entries_unlocked(fp), now)
+        updated_entries = []
+        for entry in entries:
+            if entry["id"] != reservation_id:
+                updated_entries.append(entry)
+                continue
+            if release:
+                continue
+            entry["tokens"] = float(max(0, actual_tokens if actual_tokens is not None else reservation["estimated_tokens"]))
+            updated_entries.append(entry)
+        _write_openai_tpm_entries_unlocked(fp, updated_entries)
+        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+
+def _get_openai_total_tokens(completion: Any) -> int | None:
+    """Extract total token usage from an OpenAI completion object if available."""
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return None
+    total = getattr(usage, "total_tokens", None)
+    try:
+        return int(total) if total is not None else None
+    except (TypeError, ValueError):
+        return None
+
 
 def call_llm(
     user_prompt: str,
@@ -241,21 +412,31 @@ def call_llm(
     max_retries = int(cfg.get("api_max_retries", 5))
     base_delay = float(cfg.get("api_retry_base_delay", 10.0))
     max_delay = float(cfg.get("api_retry_max_delay", 300.0))
+    tpm_limit = float(cfg.get("tpm", 0) or 0)
+    max_output_tokens = int(cfg.get("max_tokens", 1024))
+    estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
 
     attempt = 0
     while True:
+        reservation = None
         try:
+            reservation = _reserve_openai_tpm_budget(tpm_limit, estimated_tokens)
             with _openai_inflight_sem:
                 completion = client.chat.completions.create(
                     model=cfg["model"],
                     messages=messages,
                     temperature=cfg.get("temperature", 0.2),
-                    max_tokens=cfg.get("max_tokens", 1024),
+                    max_tokens=max_output_tokens,
                     top_p=top_p,
                     n=1,
                 )
+            _update_openai_tpm_budget(
+                reservation,
+                _get_openai_total_tokens(completion) or estimated_tokens,
+            )
             return completion.choices[0].message.content or ""
         except Exception as exc:
+            _update_openai_tpm_budget(reservation, release=True)
             if attempt >= max_retries or not _is_transient_openai_error(exc):
                 logger.error("Max retries exceeded at OpenAI SDK. Rewarding 0.0.")
                 exit()
