@@ -310,7 +310,17 @@ def _reserve_openai_tpm_budget(tpm_limit: float, estimated_tokens: int) -> dict[
             _write_openai_tpm_entries_unlocked(fp, entries)
             fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
 
-        time.sleep(max(0.01, wake_at - now))
+        sleep_for = max(0.01, wake_at - now)
+        if sleep_for >= 1.0:
+            logger.warning(
+                "OpenAI TPM limiter waiting %.1fs (used=%.0f, limit=%.0f, est=%d, active=%d)",
+                sleep_for,
+                used_tokens,
+                tpm_limit,
+                estimated_tokens,
+                len(entries),
+            )
+        time.sleep(sleep_for)
 
 
 def _update_openai_tpm_budget(
