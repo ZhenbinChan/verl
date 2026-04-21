@@ -372,6 +372,8 @@ def call_llm(
     *,
     api_config: Optional[dict] = None,
     system_prompt: Optional[str] = None,
+    response_format: Optional[dict[str, Any]] = None,
+    extra_body: Optional[dict[str, Any]] = None,
 ) -> str:
     """Call an OpenAI-compatible chat API with connection pooling.
 
@@ -439,6 +441,8 @@ def call_llm(
                     max_tokens=max_output_tokens,
                     top_p=top_p,
                     n=1,
+                    **({"response_format": response_format} if response_format is not None else {}),
+                    **({"extra_body": extra_body} if extra_body is not None else {}),
                 )
             _update_openai_tpm_budget(
                 reservation,
@@ -448,7 +452,12 @@ def call_llm(
         except Exception as exc:
             _update_openai_tpm_budget(reservation, release=True)
             if attempt >= max_retries or not _is_transient_openai_error(exc):
-                logger.error("Max retries exceeded at OpenAI SDK. Rewarding 0.0.")
+                logger.error(
+                    "Max retries exceeded at OpenAI SDK (model=%s, base_url=%s): %s",
+                    cfg.get("model"),
+                    cfg.get("base_url"),
+                    str(exc)[:500],
+                )
                 exit()
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
@@ -530,12 +539,19 @@ def call_llm_structured(
     user_prompt: str,
     *,
     api_config: Optional[dict] = None,
+    system_prompt: Optional[str] = None,
+    response_format: Optional[dict[str, Any]] = None,
 ) -> Optional[dict]:
     """Call LLM and parse response as JSON dict.
 
     Falls back to regex extraction if structured parsing is unavailable.
     """
-    response = call_llm(user_prompt, api_config=api_config)
+    response = call_llm(
+        user_prompt,
+        api_config=api_config,
+        system_prompt=system_prompt,
+        response_format=response_format,
+    )
     json_pattern = re.compile(r"\{[\s\S]*\}", re.DOTALL)
     match = json_pattern.search(response)
     if match:

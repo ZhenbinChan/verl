@@ -27,13 +27,7 @@ export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 export FOL_MODEL="Qwen/Qwen3.5-35B-A3B"
 export FOL_RPM=200
 export FOL_OPENAI_TPM=60000
-export FOL_OPENAI_MAX_INFLIGHT=4
-export FOL_DECLARATION_MAX_TOKENS=${FOL_DECLARATION_MAX_TOKENS:-640}
-export FOL_TRANSLATION_MAX_TOKENS=${FOL_TRANSLATION_MAX_TOKENS:-384}
-export FOL_CORRECTION_MAX_TOKENS=${FOL_CORRECTION_MAX_TOKENS:-512}
-export FOL_TOKEN_PROBE=${FOL_TOKEN_PROBE:-1}
-export FOL_TOKEN_PROBE_PATH=${FOL_TOKEN_PROBE_PATH:-"./verl_fol_token_probe_${DATA_NAME}.jsonl"}
-echo "FOL token probe: enabled=${FOL_TOKEN_PROBE} path=${FOL_TOKEN_PROBE_PATH}"
+export FOL_OPENAI_MAX_INFLIGHT=6
 
 # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
 #    KeepAlive 防止训练长时间空闲后隧道被中间设备断开
@@ -124,13 +118,14 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["console"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}" \
+    trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}_fol" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=9999 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=100 \
     trainer.total_epochs=1 \
+    trainer.val_before_train=false \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@

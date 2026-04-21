@@ -108,10 +108,11 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_step_gdpo_fol_slm_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=9999 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=100 \
     trainer.total_epochs=1 \
+    trainer.val_before_train=false \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     critic.data_loader_seed=42 $@

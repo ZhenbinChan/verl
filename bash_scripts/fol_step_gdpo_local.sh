@@ -12,6 +12,7 @@ set -x
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
+FOL_JUDGE_USE_OUTLINES=${FOL_JUDGE_USE_OUTLINES:-true}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
 export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -62,9 +63,12 @@ export OPENAI_BASE_URL="http://localhost:${FOL_PORT}/v1"
 
 # ── Step-GDPO training on GPU 0 ──
 # +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation
+# Local vLLM judge: enable structured JSON translation requests to trigger the
+# vLLM structured outputs backend for FOL translation.
 CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=fol \
+    +algorithm.fol_judge_use_outlines=${FOL_JUDGE_USE_OUTLINES} \
     +algorithm.fol_max_tries=1 \
     +algorithm.fol_timeout=10 \
     algorithm.use_xml_steps=true \
