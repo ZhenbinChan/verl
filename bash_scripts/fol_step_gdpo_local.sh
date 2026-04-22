@@ -14,7 +14,9 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen3.6-35B-A3B}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+if [[ -z "${VLLM_ATTENTION_BACKEND+x}" ]]; then
+    export VLLM_ATTENTION_BACKEND=XFORMERS
+fi
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ray stop --force
@@ -34,6 +36,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --port $FOL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 \
+    --enforce-eager \
+    --gdn-prefill-backend triton \
     --no-enable-log-requests > fol_vllm_server.log 2>&1 &
 FOL_VLLM_PID=$!
 echo "FOL vLLM server log: fol_vllm_server.log"
@@ -57,8 +61,13 @@ if [ "$VLLM_READY" -eq 0 ]; then
 fi
 
 # Point FOL API calls to local vLLM server
-export OPENAI_API_KEY="EMPTY"
-export OPENAI_BASE_URL="http://localhost:${FOL_PORT}/v1"
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:${FOL_PORT}/v1"}
+export FOL_RPM=${FOL_RPM:-0}
+export FOL_OPENAI_TPM=${FOL_OPENAI_TPM:-0}
+export FOL_OPENAI_MAX_INFLIGHT=${FOL_OPENAI_MAX_INFLIGHT:-32}
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 # ── Step-GDPO training on GPU 0 ──
 # +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation

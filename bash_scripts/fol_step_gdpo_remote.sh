@@ -10,7 +10,7 @@ HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
 # ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -23,48 +23,54 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Script-local defaults. These intentionally override stale ~/.bashrc values.
 # If you need different settings for one run, edit this block or override in CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
-export FOL_MODEL="Qwen/Qwen3.6-35B-A3B"
-export FOL_RPM=200
-export FOL_OPENAI_TPM=75000
-export FOL_OPENAI_MAX_INFLIGHT=4
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.siliconflow.cn/v1"}
+export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.6-35B-A3B"}
+export FOL_RPM=${FOL_RPM:-200}
+export FOL_OPENAI_TPM=${FOL_OPENAI_TPM:-75000}
+export FOL_OPENAI_MAX_INFLIGHT=${FOL_OPENAI_MAX_INFLIGHT:-4}
 
-# 1. 建立隧道到 login node 上的 mihomo (端口 17897)
-#    KeepAlive 防止训练长时间空闲后隧道被中间设备断开
-echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:17897 ..."
-pkill -f "L 17897:127.0.0.1:17897" 2>/dev/null || true
-sleep 2
-ssh -i ~/.ssh/id_ed25519 \
-    -o StrictHostKeyChecking=no \
-    -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o TCPKeepAlive=yes \
-    -N -f -L 17897:127.0.0.1:17897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
-sleep 2
+if [[ "$OPENAI_BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+    echo "Using local API endpoint at $OPENAI_BASE_URL; skipping SSH tunnel and proxy setup."
+    export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+    export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+else
+    # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
+    #    KeepAlive 防止训练长时间空闲后隧道被中间设备断开
+    echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:17897 ..."
+    pkill -f "L 17897:127.0.0.1:17897" 2>/dev/null || true
+    sleep 2
+    ssh -i ~/.ssh/id_ed25519 \
+        -o StrictHostKeyChecking=no \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o TCPKeepAlive=yes \
+        -N -f -L 17897:127.0.0.1:17897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
+    sleep 2
 
-# 验证隧道是否建立成功
-if ! ss -tln 2>/dev/null | grep -q ':17897'; then
-    echo "ERROR: SSH tunnel to 17897 failed to bind. Aborting." >&2
-    exit 1
+    # 验证隧道是否建立成功
+    if ! ss -tln 2>/dev/null | grep -q ':17897'; then
+        echo "ERROR: SSH tunnel to 17897 failed to bind. Aborting." >&2
+        exit 1
+    fi
+    echo "Tunnel up. Verifying mihomo proxy ..."
+    PROXY_TEST=$(curl -s -x http://127.0.0.1:17897 -o /dev/null \
+        -w "%{http_code}" --max-time 10 \
+        https://generativelanguage.googleapis.com/v1beta/models 2>/dev/null || echo "000")
+    echo "Proxy probe → HTTP ${PROXY_TEST} (expect 400/403 = proxy ok, key not used)"
+    if [ "$PROXY_TEST" = "000" ]; then
+        echo "ERROR: Proxy unreachable through tunnel. Check mihomo on ${SLURM_SUBMIT_HOST}." >&2
+        exit 1
+    fi
+
+    # 2. 设置代理变量 (除 NO_PROXY 内的目标外都走代理)
+    export http_proxy=http://127.0.0.1:17897
+    export https_proxy=http://127.0.0.1:17897
+    export HTTP_PROXY=http://127.0.0.1:17897
+    export HTTPS_PROXY=http://127.0.0.1:17897
+    export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
+    export no_proxy="$NO_PROXY"
 fi
-echo "Tunnel up. Verifying mihomo proxy ..."
-PROXY_TEST=$(curl -s -x http://127.0.0.1:17897 -o /dev/null \
-    -w "%{http_code}" --max-time 10 \
-    https://generativelanguage.googleapis.com/v1beta/models 2>/dev/null || echo "000")
-echo "Proxy probe → HTTP ${PROXY_TEST} (expect 400/403 = proxy ok, key not used)"
-if [ "$PROXY_TEST" = "000" ]; then
-    echo "ERROR: Proxy unreachable through tunnel. Check mihomo on ${SLURM_SUBMIT_HOST}." >&2
-    exit 1
-fi
-
-# 2. 设置代理变量 (除 NO_PROXY 内的目标外都走代理)
-export http_proxy=http://127.0.0.1:17897
-export https_proxy=http://127.0.0.1:17897
-export HTTP_PROXY=http://127.0.0.1:17897
-export HTTPS_PROXY=http://127.0.0.1:17897
-export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
-export no_proxy="$NO_PROXY"
 
 # 3. 运行 Python
 
@@ -85,7 +91,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.step_reward_weights='[0.5, 0.5]' \
     reward_model.reward_manager=step \
     reward.num_workers=4 \
-    algorithm.step_reward_max_workers=4 \
+    +algorithm.step_reward_max_workers=4 \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \

@@ -10,7 +10,9 @@ HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+if [[ -z "${VLLM_ATTENTION_BACKEND+x}" ]]; then
+    export VLLM_ATTENTION_BACKEND=XFORMERS
+fi
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ray stop --force
@@ -52,8 +54,10 @@ if [ "$VLLM_READY" -eq 0 ]; then
     exit 1
 fi
 
-export OPENAI_API_KEY="EMPTY"
-export OPENAI_BASE_URL="http://localhost:${SELF_EVAL_PORT}/v1"
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:${SELF_EVAL_PORT}/v1"}
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \

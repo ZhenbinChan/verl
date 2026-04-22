@@ -11,7 +11,9 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 FOL_SLM_MODEL_PATH=${FOL_SLM_MODEL_PATH:-~/run/models/Qwen2.5-3B-Instruct}
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+if [[ -z "${VLLM_ATTENTION_BACKEND+x}" ]]; then
+    export VLLM_ATTENTION_BACKEND=XFORMERS
+fi
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ray stop --force
@@ -54,8 +56,10 @@ if [ "$VLLM_READY" -eq 0 ]; then
 fi
 
 # FOL-SLM uses these env vars (see nl2fol_slm.py defaults)
-export OPENAI_API_KEY="EMPTY"
-export FOL_SLM_BASE_URL="http://localhost:${FOL_SLM_PORT}/v1"
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
+export FOL_SLM_BASE_URL=${FOL_SLM_BASE_URL:-"http://localhost:${FOL_SLM_PORT}/v1"}
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 # ── Step-GDPO training on GPU 0 ──
 # +algorithm.fol_verify_with_cumulative_steps=true to enable step history on FOL evaluation

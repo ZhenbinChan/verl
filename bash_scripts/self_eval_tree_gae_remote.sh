@@ -12,7 +12,7 @@ HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
 # ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -21,8 +21,12 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # Script-local defaults. These intentionally override stale ~/.bashrc values.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
-export SELF_EVAL_MODEL="Qwen2.5-1.5B-Instruct"
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.siliconflow.cn/v1"}
+export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-"Qwen2.5-1.5B-Instruct"}
+if [[ "$OPENAI_BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+    export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+    export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+fi
 
 # EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
 python3 -u -m verl.trainer.main_ppo \

@@ -11,7 +11,7 @@ HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=logiqa2k
 DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
 # ray stop --force
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -24,37 +24,43 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Script-local defaults. These intentionally override stale ~/.bashrc values.
 # If you need different settings for one run, edit this block or override in CLI.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-YOUR-KEY-HERE"}
-export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
-export FOL_MODEL="Qwen/Qwen3.6-35B-A3B"
-export FOL_RPM=200
-export FOL_OPENAI_TPM=60000
-export FOL_OPENAI_MAX_INFLIGHT=4
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"https://api.siliconflow.cn/v1"}
+export FOL_MODEL=${FOL_MODEL:-"Qwen/Qwen3.6-35B-A3B"}
+export FOL_RPM=${FOL_RPM:-200}
+export FOL_OPENAI_TPM=${FOL_OPENAI_TPM:-60000}
+export FOL_OPENAI_MAX_INFLIGHT=${FOL_OPENAI_MAX_INFLIGHT:-4}
 
-# 1. 建立隧道到 login node 上的 mihomo (端口 17897)
-echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:17897 ..."
-pkill -f "L 17897:127.0.0.1:17897" 2>/dev/null || true
-sleep 2
-ssh -i ~/.ssh/id_ed25519 \
-    -o StrictHostKeyChecking=no \
-    -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o TCPKeepAlive=yes \
-    -N -f -L 17897:127.0.0.1:17897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
-sleep 2
+if [[ "$OPENAI_BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+    echo "Using local API endpoint at $OPENAI_BASE_URL; skipping SSH tunnel and proxy setup."
+    export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+    export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+else
+    # 1. 建立隧道到 login node 上的 mihomo (端口 17897)
+    echo "Building SSH tunnel to ${SLURM_SUBMIT_HOST}:17897 ..."
+    pkill -f "L 17897:127.0.0.1:17897" 2>/dev/null || true
+    sleep 2
+    ssh -i ~/.ssh/id_ed25519 \
+        -o StrictHostKeyChecking=no \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o TCPKeepAlive=yes \
+        -N -f -L 17897:127.0.0.1:17897 scyb676@$SLURM_SUBMIT_HOST 2>/dev/null
+    sleep 2
 
-if ! ss -tln 2>/dev/null | grep -q ':17897'; then
-    echo "ERROR: SSH tunnel to 17897 failed to bind. Aborting." >&2
-    exit 1
+    if ! ss -tln 2>/dev/null | grep -q ':17897'; then
+        echo "ERROR: SSH tunnel to 17897 failed to bind. Aborting." >&2
+        exit 1
+    fi
+    echo "Tunnel up."
+
+    export http_proxy=http://127.0.0.1:17897
+    export https_proxy=http://127.0.0.1:17897
+    export HTTP_PROXY=http://127.0.0.1:17897
+    export HTTPS_PROXY=http://127.0.0.1:17897
+    export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
+    export no_proxy="$NO_PROXY"
 fi
-echo "Tunnel up."
-
-export http_proxy=http://127.0.0.1:17897
-export https_proxy=http://127.0.0.1:17897
-export HTTP_PROXY=http://127.0.0.1:17897
-export HTTPS_PROXY=http://127.0.0.1:17897
-export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,.local,10.*,192.168.*,*.sock"
-export no_proxy="$NO_PROXY"
 
 # Step-GDPO training (remote API for FOL-SLM rewards)
 # Uses structured preprocessing (rephrase + object/predicate extraction) and
