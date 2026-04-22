@@ -244,6 +244,7 @@ def compute_step_reward_fol(
             "correction_attempts": 0,
             "z3_output": None,
             "z3_error": None,
+            "judge_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
         shared_state = fol_shared_state or prepare_fol_shared_state(
             prompt_text, api_config=api_config, extra_info=extra_info
@@ -307,6 +308,7 @@ def compute_step_reward_fol(
                     "correction_attempts": 0,
                     "z3_output": None,
                     "z3_error": str(e),
+                    "judge_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 },
             }
         return 0.0

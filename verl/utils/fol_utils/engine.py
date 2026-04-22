@@ -405,6 +405,12 @@ def _translate_implication(
         f"Context:\n{context}\n\n"
         f"Reasoning Step:\n{step_text}"
     )
+    usage_info = None
+    if debug_info is not None:
+        usage_info = debug_info.setdefault(
+            "judge_usage",
+            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
     if _judge_use_outlines(api_config):
         structured_input = (
             f"{user_input}\n\n"
@@ -422,6 +428,7 @@ def _translate_implication(
                     "schema": _IMPLICATION_TRANSLATION_SCHEMA,
                 },
             },
+            usage_info=usage_info,
         )
         if debug_info is not None and payload is not None:
             debug_info["translation_response"] = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -430,11 +437,26 @@ def _translate_implication(
             return structured_code
         if debug_info is not None and debug_info.get("translation_response") is None:
             debug_info["translation_response"] = None
-        response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+        response = call_llm(
+            user_input,
+            api_config=api_config,
+            system_prompt=system_prompt,
+            usage_info=usage_info,
+        )
         if not response:
-            response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+            response = call_llm(
+                user_input,
+                api_config=api_config,
+                system_prompt=system_prompt,
+                usage_info=usage_info,
+            )
     else:
-        response = call_llm(user_input, api_config=api_config, system_prompt=system_prompt)
+        response = call_llm(
+            user_input,
+            api_config=api_config,
+            system_prompt=system_prompt,
+            usage_info=usage_info,
+        )
     if debug_info is not None:
         debug_info["translation_response"] = response
     z3_code = extract_python_block(response, strategy="all")
@@ -511,6 +533,12 @@ def _translate_assertion(
     prompt = Template(template).safe_substitute(
         context=context, declaration=declarations, step=step_text
     )
+    usage_info = None
+    if debug_info is not None:
+        usage_info = debug_info.setdefault(
+            "judge_usage",
+            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
     if _judge_use_outlines(api_config):
         structured_prompt = (
             f"{prompt}\n\n"
@@ -527,6 +555,7 @@ def _translate_assertion(
                     "schema": _ASSERTION_TRANSLATION_SCHEMA,
                 },
             },
+            usage_info=usage_info,
         )
         if debug_info is not None and payload is not None:
             debug_info["translation_response"] = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -535,9 +564,9 @@ def _translate_assertion(
             return structured_code
         trans_output = ""
         if not trans_output:
-            trans_output = call_llm(prompt, api_config=api_config)
+            trans_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
     else:
-        trans_output = call_llm(prompt, api_config=api_config)
+        trans_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
     if debug_info is not None:
         debug_info["translation_response"] = trans_output
     trans_code = extract_python_block(trans_output)

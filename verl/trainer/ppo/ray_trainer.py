@@ -1809,6 +1809,10 @@ class RayPPOTrainer:
                                     if z3_error:
                                         print("[FOL Z3 Error]")
                                         print(z3_error)
+                                    judge_usage = step_debug.get("judge_usage")
+                                    if judge_usage:
+                                        print("[FOL Judge Usage]")
+                                        print(judge_usage)
                             print("=" * 90 + "\n")
                     # --- End of Custom Logging ---
 
@@ -2041,6 +2045,19 @@ class RayPPOTrainer:
                     metrics["num_steps/mean"] = float(np.mean(ns))
                     metrics["num_steps/max"] = float(np.max(ns))
                     metrics["num_steps/min"] = float(np.min(ns))
+                fol_judge_metric_map = {
+                    "fol_judge_prompt_tokens": "fol_judge/prompt_tokens",
+                    "fol_judge_completion_tokens": "fol_judge/completion_tokens",
+                    "fol_judge_total_tokens": "fol_judge/total_tokens",
+                    "fol_judge_calls": "fol_judge/calls",
+                    "fol_judge_completion_tokens_per_call": "fol_judge/completion_tokens_per_call",
+                }
+                for batch_key, metric_prefix in fol_judge_metric_map.items():
+                    if batch_key in batch.non_tensor_batch:
+                        vals = np.asarray(batch.non_tensor_batch[batch_key], dtype=np.float32)
+                        metrics[f"{metric_prefix}/mean"] = float(np.mean(vals))
+                        metrics[f"{metric_prefix}/max"] = float(np.max(vals))
+                        metrics[f"{metric_prefix}/min"] = float(np.min(vals))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

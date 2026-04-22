@@ -367,6 +367,29 @@ def _get_openai_total_tokens(completion: Any) -> int | None:
         return None
 
 
+def _accumulate_openai_usage(completion: Any, usage_info: Optional[dict[str, int]]) -> None:
+    """Accumulate OpenAI usage counters into a mutable dict in-place."""
+    if usage_info is None:
+        return
+
+    usage_info["calls"] = int(usage_info.get("calls", 0)) + 1
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return
+
+    for src_key, dst_key in (
+        ("prompt_tokens", "prompt_tokens"),
+        ("completion_tokens", "completion_tokens"),
+        ("total_tokens", "total_tokens"),
+    ):
+        value = getattr(usage, src_key, None)
+        try:
+            if value is not None:
+                usage_info[dst_key] = int(usage_info.get(dst_key, 0)) + int(value)
+        except (TypeError, ValueError):
+            continue
+
+
 def call_llm(
     user_prompt: str,
     *,
@@ -374,6 +397,7 @@ def call_llm(
     system_prompt: Optional[str] = None,
     response_format: Optional[dict[str, Any]] = None,
     extra_body: Optional[dict[str, Any]] = None,
+    usage_info: Optional[dict[str, int]] = None,
 ) -> str:
     """Call an OpenAI-compatible chat API with connection pooling.
 
@@ -444,6 +468,7 @@ def call_llm(
                     **({"response_format": response_format} if response_format is not None else {}),
                     **({"extra_body": extra_body} if extra_body is not None else {}),
                 )
+            _accumulate_openai_usage(completion, usage_info)
             _update_openai_tpm_budget(
                 reservation,
                 _get_openai_total_tokens(completion) or estimated_tokens,
@@ -541,6 +566,7 @@ def call_llm_structured(
     api_config: Optional[dict] = None,
     system_prompt: Optional[str] = None,
     response_format: Optional[dict[str, Any]] = None,
+    usage_info: Optional[dict[str, int]] = None,
 ) -> Optional[dict]:
     """Call LLM and parse response as JSON dict.
 
@@ -551,6 +577,7 @@ def call_llm_structured(
         api_config=api_config,
         system_prompt=system_prompt,
         response_format=response_format,
+        usage_info=usage_info,
     )
     json_pattern = re.compile(r"\{[\s\S]*\}", re.DOTALL)
     match = json_pattern.search(response)
@@ -810,6 +837,7 @@ def correct_z3_code(
     error: str,
     *,
     api_config: Optional[dict] = None,
+    usage_info: Optional[dict[str, int]] = None,
 ) -> str:
     """Use LLM to fix erroneous Z3 code.
 
@@ -817,7 +845,7 @@ def correct_z3_code(
     """
     template = load_prompt(CORRECT_CODE_PROMPT)
     prompt = Template(template).safe_substitute(code=code, error=error)
-    fix_output = call_llm(prompt, api_config=api_config)
+    fix_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
     return extract_python_block(fix_output)
 
 
@@ -839,6 +867,12 @@ def correct_loop(
     """
     # _tid = threading.current_thread().name
     cfg = dict(api_config or {})
+    usage_info = None
+    if debug_info is not None:
+        usage_info = debug_info.setdefault(
+            "judge_usage",
+            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
     # print(f"[Z3LOOP][{_tid}] → run_code (initial, timeout={timeout}s)...", flush=True)
     # _t = time.time()
     res = run_code(code, timeout=timeout)
@@ -849,7 +883,7 @@ def correct_loop(
         error_msg = res.get("error", "Unknown error")
         # print(f"[Z3LOOP][{_tid}] ⟳ retry {tries+1}/{max_tries}  err={error_msg[:100]!r}", flush=True)
         # _tc = time.time()
-        code = correct_z3_code(code, error_msg, api_config=cfg)
+        code = correct_z3_code(code, error_msg, api_config=cfg, usage_info=usage_info)
         # print(f"[Z3LOOP][{_tid}]   correct_z3 {time.time()-_tc:.2f}s → run_code...", flush=True)
         # _tr = time.time()
         res = run_code(code, timeout=timeout)
