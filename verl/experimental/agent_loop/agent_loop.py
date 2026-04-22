@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -180,6 +181,10 @@ class AgentLoopMetrics(BaseModel):
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
+    reward_compute: float = 0.0
+    teacher_logprobs: float = 0.0
+    postprocess: float = 0.0
+    postprocess_non_reward: float = 0.0
     num_preempted: int = -1  # -1 means not available
 
 
@@ -624,6 +629,7 @@ class AgentLoopWorker:
 
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
+        postprocess_start = time.perf_counter()
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
@@ -723,6 +729,7 @@ class AgentLoopWorker:
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+        reward_start = time.perf_counter()
         await self._compute_score(
             output,
             prompts=prompt_output["input_ids"],
@@ -732,12 +739,18 @@ class AgentLoopWorker:
             position_ids=position_ids,
             kwargs=kwargs,
         )
+        reward_elapsed = time.perf_counter() - reward_start
+        output.metrics.reward_compute += reward_elapsed
+
+        teacher_start = time.perf_counter()
         await self._compute_teacher_logprobs(
             output,
             prompt_ids=output.prompt_ids,
             response_ids=output.response_ids,
             validate=validate,
         )
+        teacher_elapsed = time.perf_counter() - teacher_start
+        output.metrics.teacher_logprobs += teacher_elapsed
         teacher_ids, teacher_logprobs = (
             output.extra_fields.pop("teacher_ids", None),
             output.extra_fields.pop("teacher_logprobs", None),
@@ -771,7 +784,17 @@ class AgentLoopWorker:
             teacher_ids=teacher_ids,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
-            metrics=output.metrics,
+            metrics=output.metrics.model_copy(
+                update={
+                    "postprocess": output.metrics.postprocess + (time.perf_counter() - postprocess_start),
+                    "postprocess_non_reward": (
+                        output.metrics.postprocess_non_reward
+                        + (time.perf_counter() - postprocess_start)
+                        - reward_elapsed
+                        - teacher_elapsed
+                    ),
+                }
+            ),
             extra_fields=output.extra_fields,
         )
 
@@ -1200,6 +1223,12 @@ class AgentLoopManager:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
+        t_reward_compute = np.array([metric.get("reward_compute", 0.0) for chunk in metrics for metric in chunk])
+        t_teacher_logprobs = np.array([metric.get("teacher_logprobs", 0.0) for chunk in metrics for metric in chunk])
+        t_postprocess = np.array([metric.get("postprocess", 0.0) for chunk in metrics for metric in chunk])
+        t_postprocess_non_reward = np.array(
+            [metric.get("postprocess_non_reward", 0.0) for chunk in metrics for metric in chunk]
+        )
         num_preempted = np.array([metric["num_preempted"] for chunk in metrics for metric in chunk])
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
@@ -1210,12 +1239,28 @@ class AgentLoopManager:
         timing["agent_loop/tool_calls/min"] = t_tool_calls.min()
         timing["agent_loop/tool_calls/max"] = t_tool_calls.max()
         timing["agent_loop/tool_calls/mean"] = t_tool_calls.mean()
+        timing["agent_loop/reward_compute/min"] = t_reward_compute.min()
+        timing["agent_loop/reward_compute/max"] = t_reward_compute.max()
+        timing["agent_loop/reward_compute/mean"] = t_reward_compute.mean()
+        timing["agent_loop/teacher_logprobs/min"] = t_teacher_logprobs.min()
+        timing["agent_loop/teacher_logprobs/max"] = t_teacher_logprobs.max()
+        timing["agent_loop/teacher_logprobs/mean"] = t_teacher_logprobs.mean()
+        timing["agent_loop/postprocess/min"] = t_postprocess.min()
+        timing["agent_loop/postprocess/max"] = t_postprocess.max()
+        timing["agent_loop/postprocess/mean"] = t_postprocess.mean()
+        timing["agent_loop/postprocess_non_reward/min"] = t_postprocess_non_reward.min()
+        timing["agent_loop/postprocess_non_reward/max"] = t_postprocess_non_reward.max()
+        timing["agent_loop/postprocess_non_reward/mean"] = t_postprocess_non_reward.mean()
 
         # batch sequence generation is bounded by the slowest sample
-        slowest = np.argmax(t_generate_sequences + t_tool_calls)
+        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_postprocess)
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
+        timing["agent_loop/slowest/reward_compute"] = t_reward_compute[slowest]
+        timing["agent_loop/slowest/teacher_logprobs"] = t_teacher_logprobs[slowest]
+        timing["agent_loop/slowest/postprocess"] = t_postprocess[slowest]
+        timing["agent_loop/slowest/postprocess_non_reward"] = t_postprocess_non_reward[slowest]
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
 
         if "attention_mask" in output.batch:
