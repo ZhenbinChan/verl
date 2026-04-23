@@ -589,6 +589,36 @@ def call_llm_structured(
     return None
 
 
+_PYTHON_CODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "python_code": {"type": "string"},
+    },
+    "required": ["python_code"],
+    "additionalProperties": False,
+}
+
+
+def use_outlines(api_config: Optional[dict]) -> bool:
+    """Whether structured JSON output is requested for judge-side calls."""
+    if not api_config:
+        return False
+    value = api_config.get("fol_judge_use_outlines", False)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def extract_structured_python_code(payload: Optional[dict]) -> str:
+    """Extract executable Python code from a structured payload."""
+    if not isinstance(payload, dict):
+        return ""
+    python_code = payload.get("python_code")
+    if not isinstance(python_code, str):
+        return ""
+    return python_code.strip()
+
+
 # ---------------------------------------------------------------------------
 # Text extraction utilities
 # ---------------------------------------------------------------------------
@@ -845,6 +875,28 @@ def correct_z3_code(
     """
     template = load_prompt(CORRECT_CODE_PROMPT)
     prompt = Template(template).safe_substitute(code=code, error=error)
+    if use_outlines(api_config):
+        payload = call_llm_structured(
+            (
+                f"{prompt}\n\n"
+                "Return a JSON object with a single field `python_code` containing "
+                "only executable Python/Z3 code. Do not include explanations."
+            ),
+            api_config=api_config,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "fol-z3-correction",
+                    "schema": _PYTHON_CODE_SCHEMA,
+                },
+            },
+            usage_info=usage_info,
+        )
+        corrected = extract_structured_python_code(payload)
+        if corrected:
+            return corrected
+        return ""
+
     fix_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
     return extract_python_block(fix_output)
 

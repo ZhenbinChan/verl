@@ -24,6 +24,7 @@ from verl.utils.fol_utils.common import (
     call_llm_structured,
     # Text extraction
     extract_python_block,
+    extract_structured_python_code,
     load_prompt,
     parse_python_logic_steps,
     # Structured pipeline helpers
@@ -35,6 +36,7 @@ from verl.utils.fol_utils.common import (
     # Execution
     correct_loop,
     run_code,
+    use_outlines,
     # Caching
     thread_safe_cache,
 )
@@ -158,14 +160,55 @@ _ASSERTION_TRANSLATION_SCHEMA = {
 }
 
 
+_PYTHON_CODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "python_code": {"type": "string"},
+    },
+    "required": ["python_code"],
+    "additionalProperties": False,
+}
+
+
 def _judge_use_outlines(api_config: Optional[dict]) -> bool:
     """Whether to request structured JSON output from the FOL judge."""
-    if not api_config:
-        return False
-    value = api_config.get("fol_judge_use_outlines", False)
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "no", "off"}
-    return bool(value)
+    return use_outlines(api_config)
+
+
+def _structured_python_fallback(
+    prompt: str,
+    *,
+    api_config: Optional[dict] = None,
+    system_prompt: Optional[str] = None,
+    usage_info: Optional[dict] = None,
+    debug_info: Optional[dict] = None,
+    response_name: str,
+) -> str:
+    """Request executable Python code via a strict schema.
+
+    This is a fail-closed fallback for translation paths that previously fell
+    back to free-form text, which could leak natural language into run_code().
+    """
+    payload = call_llm_structured(
+        (
+            f"{prompt}\n\n"
+            "Return a JSON object with a single field `python_code` containing "
+            "only executable Python/Z3 code. Do not include explanations."
+        ),
+        api_config=api_config,
+        system_prompt=system_prompt,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_name,
+                "schema": _PYTHON_CODE_SCHEMA,
+            },
+        },
+        usage_info=usage_info,
+    )
+    if debug_info is not None and payload is not None:
+        debug_info["translation_response"] = json.dumps(payload, ensure_ascii=False, indent=2)
+    return extract_structured_python_code(payload)
 
 
 def _render_const_declarations(items: list[dict], *, section_name: str) -> str:
@@ -437,19 +480,14 @@ def _translate_implication(
             return structured_code
         if debug_info is not None and debug_info.get("translation_response") is None:
             debug_info["translation_response"] = None
-        response = call_llm(
+        z3_code = _structured_python_fallback(
             user_input,
             api_config=api_config,
             system_prompt=system_prompt,
             usage_info=usage_info,
+            debug_info=debug_info,
+            response_name="fol-implication-python-fallback",
         )
-        if not response:
-            response = call_llm(
-                user_input,
-                api_config=api_config,
-                system_prompt=system_prompt,
-                usage_info=usage_info,
-            )
     else:
         response = call_llm(
             user_input,
@@ -457,9 +495,9 @@ def _translate_implication(
             system_prompt=system_prompt,
             usage_info=usage_info,
         )
-    if debug_info is not None:
-        debug_info["translation_response"] = response
-    z3_code = extract_python_block(response, strategy="all")
+        if debug_info is not None:
+            debug_info["translation_response"] = response
+        z3_code = extract_python_block(response, strategy="all")
 
     # Parse for premises_N / conclusion_N
     parsed_steps = parse_python_logic_steps(z3_code)
@@ -562,14 +600,18 @@ def _translate_assertion(
         structured_code = _render_structured_assertion(payload, declarations)
         if structured_code:
             return structured_code
-        trans_output = ""
-        if not trans_output:
-            trans_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
+        trans_code = _structured_python_fallback(
+            prompt,
+            api_config=api_config,
+            usage_info=usage_info,
+            debug_info=debug_info,
+            response_name="fol-assertion-python-fallback",
+        )
     else:
         trans_output = call_llm(prompt, api_config=api_config, usage_info=usage_info)
-    if debug_info is not None:
-        debug_info["translation_response"] = trans_output
-    trans_code = extract_python_block(trans_output)
+        if debug_info is not None:
+            debug_info["translation_response"] = trans_output
+        trans_code = extract_python_block(trans_output)
     return _wrap_assertion_z3_code(declarations, trans_code)
 
 
