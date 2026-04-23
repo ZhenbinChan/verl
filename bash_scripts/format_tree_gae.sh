@@ -15,7 +15,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # TreeRL Example: EPTree-based tree search for RL training
 # Based on TreeRL paper (arXiv:2506.11902)
-# EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
+# EPTree params: (M=4, N=1, L=1, T=3) -> 16 leaf paths per prompt
 
 # Tree-GAE training (对标 format_step_gdpo.sh)
 # 变化点 vs Step-GDPO:
@@ -23,7 +23,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 #   reward_model.reward_manager: step -> tree
 #   新增: trainer.tree_sampling, tree_rounds, tree_top_n, tree_branches, tree_mask_tail_ratio
 #   step_reward_weights: [outcome_w, process_w] -> [tree_w, ext_prm_w]
-#   rollout.n: 16 -> 6 (树会分叉扩展，实际评估路径数远大于6)
+#   rollout.n: 16 -> 4，并配合 (top_n=1, branches=3) 理论对齐为 16 leaf paths / prompt
 #
 # Advantage pipeline params (defaults = TreeRL ref code):
 #   tree_step_reward_mode:      la (ref default) | ga_la (paper: GA+LA) | ga | value_only
@@ -62,7 +62,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.rollout.n=6 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.top_p=0.95 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
@@ -71,8 +71,8 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     +trainer.tree_sampling=True \
     +trainer.tree_rounds=1 \
-    +trainer.tree_top_n=2 \
-    +trainer.tree_branches=2 \
+    +trainer.tree_top_n=1 \
+    +trainer.tree_branches=3 \
     +trainer.tree_mask_tail_ratio=0.1 \
     +trainer.tree_step_reward_mode=la \
     +trainer.tree_overall_norm_style=token \
@@ -81,7 +81,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_format" \
+    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_format_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

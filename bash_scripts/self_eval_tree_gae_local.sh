@@ -59,7 +59,7 @@ export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:${SELF_EVAL_PORT}/v1
 export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
-# EPTree params: (M=6, N=2, L=1, T=2) -> 30 leaf paths per prompt
+# EPTree params: (M=4, N=1, L=1, T=3) -> 16 leaf paths per prompt
 CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=self_eval \
@@ -91,7 +91,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.rollout.n=6 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.top_p=0.95 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
@@ -100,8 +100,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     +trainer.tree_sampling=True \
     +trainer.tree_rounds=1 \
-    +trainer.tree_top_n=2 \
-    +trainer.tree_branches=2 \
+    +trainer.tree_top_n=1 \
+    +trainer.tree_branches=3 \
     +trainer.tree_mask_tail_ratio=0.1 \
     +trainer.tree_step_reward_mode=la \
     +trainer.tree_overall_norm_style=token \
@@ -110,7 +110,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
-    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_self_eval" \
+    trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_self_eval_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
