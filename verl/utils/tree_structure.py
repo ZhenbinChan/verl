@@ -29,7 +29,9 @@ Reference: Algorithm 1 in "TreeRL: LLM Reinforcement Learning with On-Policy Tre
 from __future__ import annotations
 
 import math
+import os
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -193,8 +195,14 @@ class TreeManager:
     7. Flattening all leaf paths into a standard DataProto batch
     """
 
-    def __init__(self, config, tokenizer, split_fn: Optional[Callable] = None,
-                 use_xml: bool = False):
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        split_fn: Optional[Callable] = None,
+        use_xml: bool = False,
+        ext_prm_max_workers: Optional[int] = None,
+    ):
         """
         Args:
             config: Trainer config (OmegaConf), needs tree_rounds, tree_top_n, tree_branches, etc.
@@ -239,6 +247,10 @@ class TreeManager:
         self._prompt_lengths: List[int] = []
         self._meta_info = {}
         self._non_tensor_batch_template = {}
+        if ext_prm_max_workers is None:
+            ext_prm_max_workers = min(32, os.cpu_count() or 4)
+        self.ext_prm_max_workers = max(1, int(ext_prm_max_workers))
+        self.ext_prm_profile: dict[str, float] = {}
         
         # TODO: 1. Diverse Sampling as a new anti-degeneration strategy (ref: THUNLP/TreeRL entropy_chain_local_manager.py:255)
 
@@ -785,6 +797,28 @@ class TreeManager:
         if not eval_prms:
             return
 
+        self.ext_prm_profile = {
+            "tasks_total": 0,
+            "fol_tasks": 0,
+            "fol_judge_calls": 0,
+            "fol_judge_prompt_tokens": 0,
+            "fol_judge_completion_tokens": 0,
+            "fol_judge_total_tokens": 0,
+            "fol_translation_s_sum": 0.0,
+            "fol_translation_s_max": 0.0,
+            "fol_correct_loop_s_sum": 0.0,
+            "fol_correct_loop_s_max": 0.0,
+            "fol_z3_run_s_sum": 0.0,
+            "fol_z3_run_s_max": 0.0,
+            "fol_correction_llm_s_sum": 0.0,
+            "fol_correction_llm_s_max": 0.0,
+            "fol_correction_z3_s_sum": 0.0,
+            "fol_correction_z3_s_max": 0.0,
+            "fol_verify_step_s_sum": 0.0,
+            "fol_verify_step_s_max": 0.0,
+        }
+        tasks = []
+
         for tree in self.trees:
             tidx = tree.tree_idx
             # Get prompt text for this tree
@@ -803,21 +837,96 @@ class TreeManager:
                 elif isinstance(ei_vals, list) and tidx < len(ei_vals):
                     extra_info = ei_vals[tidx] or {}
 
+            fol_shared_state = None
+            if "fol" in eval_prms:
+                from verl.utils.reward_score.fol import prepare_fol_shared_state
+
+                fol_shared_state = prepare_fol_shared_state(
+                    prompt_text,
+                    extra_info=extra_info,
+                    api_config=getattr(ext_prm_fns.get("fol"), "keywords", {}).get("api_config"),
+                )
+
             for node in tree.all_nodes:
                 if not node.is_forked:
                     continue
                 for prm_name in eval_prms:
                     if prm_name in node.ext_prm_scores:
                         continue
-                    # Build step_history: all ancestor step texts (root → parent)
                     path = node.path_from_root()
                     step_history = [n.step_text for n in path[:-1]]
-
-                    score = ext_prm_fns[prm_name](
-                        node.step_text, prompt_text, step_history,
-                        extra_info=extra_info,
+                    tasks.append(
+                        (
+                            node,
+                            prm_name,
+                            prompt_text,
+                            step_history,
+                            extra_info,
+                            fol_shared_state,
+                        )
                     )
-                    node.ext_prm_scores[prm_name] = float(score)
+
+        if not tasks:
+            return
+        self.ext_prm_profile["tasks_total"] = len(tasks)
+
+        def _run_task(task):
+            node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
+            reward_fn = ext_prm_fns[prm_name]
+            kwargs = {"extra_info": extra_info}
+            if prm_name == "fol" and fol_shared_state is not None:
+                kwargs["fol_shared_state"] = fol_shared_state
+            score = reward_fn(node.step_text, prompt_text, step_history, **kwargs)
+            debug = None
+            if isinstance(score, dict):
+                debug = score.get("debug", {})
+                score_value = float(score.get("score", 0.0))
+            else:
+                score_value = float(score)
+            return node, prm_name, score_value, debug
+
+        def _record_profile(prm_name, debug):
+            if prm_name != "fol" or not isinstance(debug, dict):
+                return
+            self.ext_prm_profile["fol_tasks"] += 1
+            judge_usage = debug.get("judge_usage", {})
+            if isinstance(judge_usage, dict):
+                self.ext_prm_profile["fol_judge_calls"] += int(judge_usage.get("calls", 0) or 0)
+                self.ext_prm_profile["fol_judge_prompt_tokens"] += int(judge_usage.get("prompt_tokens", 0) or 0)
+                self.ext_prm_profile["fol_judge_completion_tokens"] += int(
+                    judge_usage.get("completion_tokens", 0) or 0
+                )
+                self.ext_prm_profile["fol_judge_total_tokens"] += int(judge_usage.get("total_tokens", 0) or 0)
+
+            timing_map = {
+                "translation_s": "fol_translation_s",
+                "correct_loop_s": "fol_correct_loop_s",
+                "z3_run_s": "fol_z3_run_s",
+                "correction_llm_s": "fol_correction_llm_s",
+                "correction_z3_s": "fol_correction_z3_s",
+                "verify_step_s": "fol_verify_step_s",
+            }
+            for debug_key, metric_prefix in timing_map.items():
+                value = float(debug.get(debug_key, 0.0) or 0.0)
+                self.ext_prm_profile[f"{metric_prefix}_sum"] += value
+                self.ext_prm_profile[f"{metric_prefix}_max"] = max(
+                    self.ext_prm_profile[f"{metric_prefix}_max"],
+                    value,
+                )
+
+        if self.ext_prm_max_workers <= 1 or len(tasks) <= 1:
+            for task in tasks:
+                node, prm_name, score, debug = _run_task(task)
+                node.ext_prm_scores[prm_name] = score
+                _record_profile(prm_name, debug)
+            return
+
+        with ThreadPoolExecutor(max_workers=min(self.ext_prm_max_workers, len(tasks))) as executor:
+            futures = [executor.submit(_run_task, task) for task in tasks]
+            for future in as_completed(futures):
+                node, prm_name, score, debug = future.result()
+                node.ext_prm_scores[prm_name] = score
+                _record_profile(prm_name, debug)
 
     # ------------------------------------------------------------------
     # Step 5: Evaluate Leaves

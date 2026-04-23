@@ -9,6 +9,7 @@ is always entailment: UNSAT of (premises AND NOT conclusion) -> 1.0.
 import concurrent.futures
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from string import Template
@@ -682,7 +683,9 @@ class FOLEngine:
             1.0 if entailed, 0.0 otherwise.
         """
         try:
+            verify_t0 = time.perf_counter()
             # Step 1: Translate to Z3 code
+            translation_t0 = time.perf_counter()
             if self.config.translation == TranslationMode.IMPLICATION:
                 z3_code = _translate_implication(
                     processed_context, declarations, step_text,
@@ -695,6 +698,7 @@ class FOLEngine:
                     api_config=self.config.api_config,
                     debug_info=debug_info,
                 )
+            translation_s = time.perf_counter() - translation_t0
 
             # Step 2: Execute with auto-correction loop
             result = correct_loop(
@@ -705,6 +709,8 @@ class FOLEngine:
                 debug_info=debug_info,
             )
             if debug_info is not None:
+                debug_info["translation_s"] = translation_s
+                debug_info["verify_step_s"] = time.perf_counter() - verify_t0
                 debug_info["z3_output"] = result.get("output")
                 debug_info["z3_error"] = result.get("error")
 

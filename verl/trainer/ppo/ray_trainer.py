@@ -1548,11 +1548,22 @@ class RayPPOTrainer:
                                 reward_cfg.get("use_xml_steps", False)
                                 or algo_cfg.get("use_xml_steps", False)
                             )
+                            tree_ext_prm_max_workers = self.config.trainer.get(
+                                "tree_ext_prm_max_workers",
+                                reward_cfg.get(
+                                    "num_workers",
+                                    reward_cfg.get(
+                                        "step_reward_max_workers",
+                                        algo_cfg.get("step_reward_max_workers", 4),
+                                    ),
+                                ),
+                            )
 
                             tree_mgr = TreeManager(
                                 config=self.config.trainer,
                                 tokenizer=self.tokenizer,
                                 use_xml=use_xml,
+                                ext_prm_max_workers=tree_ext_prm_max_workers,
                             )
 
                             # Get compute_score function for leaf evaluation
@@ -1615,7 +1626,9 @@ class RayPPOTrainer:
                                     elif rt == "fol":
                                         from verl.utils.reward_score.fol import compute_step_reward_fol
                                         ext_prm_fns["fol"] = partial(
-                                            compute_step_reward_fol, api_config=api_config
+                                            compute_step_reward_fol,
+                                            api_config=api_config,
+                                            return_debug=True,
                                         )
                                     elif rt == "fol_old":
                                         from verl.utils.reward_score.fol_old import compute_step_reward_fol as compute_step_reward_fol_old
@@ -1642,6 +1655,45 @@ class RayPPOTrainer:
                             metrics["tree/num_trees"] = total_trees
                             metrics["tree/total_leaves"] = total_leaves
                             metrics["tree/avg_leaves_per_tree"] = total_leaves / max(total_trees, 1)
+                            ext_prm_profile = getattr(tree_mgr, "ext_prm_profile", {}) or {}
+                            if ext_prm_profile:
+                                metrics["tree/ext_prm_tasks"] = ext_prm_profile.get("tasks_total", 0)
+                                metrics["tree/fol_ext_prm_tasks"] = ext_prm_profile.get("fol_tasks", 0)
+                                metrics["tree/fol_ext_prm_judge_calls"] = ext_prm_profile.get(
+                                    "fol_judge_calls", 0
+                                )
+                                metrics["tree/fol_ext_prm_prompt_tokens"] = ext_prm_profile.get(
+                                    "fol_judge_prompt_tokens", 0
+                                )
+                                metrics["tree/fol_ext_prm_completion_tokens"] = ext_prm_profile.get(
+                                    "fol_judge_completion_tokens", 0
+                                )
+                                metrics["tree/fol_ext_prm_total_tokens"] = ext_prm_profile.get(
+                                    "fol_judge_total_tokens", 0
+                                )
+                                fol_judge_calls = ext_prm_profile.get("fol_judge_calls", 0)
+                                if fol_judge_calls:
+                                    metrics["tree/fol_ext_prm_completion_tokens_per_call"] = (
+                                        ext_prm_profile.get("fol_judge_completion_tokens", 0)
+                                        / fol_judge_calls
+                                    )
+                                fol_tasks = ext_prm_profile.get("fol_tasks", 0)
+                                if fol_tasks:
+                                    timing_pairs = {
+                                        "translation_s": "fol_translation_s",
+                                        "correct_loop_s": "fol_correct_loop_s",
+                                        "z3_run_s": "fol_z3_run_s",
+                                        "correction_llm_s": "fol_correction_llm_s",
+                                        "correction_z3_s": "fol_correction_z3_s",
+                                        "verify_step_s": "fol_verify_step_s",
+                                    }
+                                    for suffix, prefix in timing_pairs.items():
+                                        metrics[f"tree/{prefix}/mean"] = (
+                                            ext_prm_profile.get(f"{prefix}_sum", 0.0) / fol_tasks
+                                        )
+                                        metrics[f"tree/{prefix}/max"] = ext_prm_profile.get(
+                                            f"{prefix}_max", 0.0
+                                        )
 
                             # Correctness ratio across all leaves
                             all_leaves = [l for t in tree_mgr.trees for l in t.all_leaves]

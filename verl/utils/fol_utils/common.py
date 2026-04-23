@@ -925,9 +925,15 @@ def correct_loop(
             "judge_usage",
             {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         )
+    loop_t0 = time.perf_counter()
+    z3_run_s = 0.0
+    correction_llm_s = 0.0
+    correction_z3_s = 0.0
     # print(f"[Z3LOOP][{_tid}] → run_code (initial, timeout={timeout}s)...", flush=True)
     # _t = time.time()
+    z3_t0 = time.perf_counter()
     res = run_code(code, timeout=timeout)
+    z3_run_s += time.perf_counter() - z3_t0
     # print(f"[Z3LOOP][{_tid}] ← run_code {time.time()-_t:.2f}s  success={res['success']}  out={res.get('output','')[:80]!r}", flush=True)
     tries = 0
 
@@ -935,16 +941,26 @@ def correct_loop(
         error_msg = res.get("error", "Unknown error")
         # print(f"[Z3LOOP][{_tid}] ⟳ retry {tries+1}/{max_tries}  err={error_msg[:100]!r}", flush=True)
         # _tc = time.time()
+        correction_t0 = time.perf_counter()
         code = correct_z3_code(code, error_msg, api_config=cfg, usage_info=usage_info)
+        correction_llm_s += time.perf_counter() - correction_t0
         # print(f"[Z3LOOP][{_tid}]   correct_z3 {time.time()-_tc:.2f}s → run_code...", flush=True)
         # _tr = time.time()
+        retry_z3_t0 = time.perf_counter()
         res = run_code(code, timeout=timeout)
+        retry_z3_s = time.perf_counter() - retry_z3_t0
+        correction_z3_s += retry_z3_s
+        z3_run_s += retry_z3_s
         # print(f"[Z3LOOP][{_tid}]   run_code {time.time()-_tr:.2f}s  success={res['success']}  out={res.get('output','')[:80]!r}", flush=True)
         tries += 1
         cfg["temperature"] = cfg.get("temperature", 0.1) + 0.05
 
     if debug_info is not None:
         debug_info["correction_attempts"] = tries
+        debug_info["correct_loop_s"] = time.perf_counter() - loop_t0
+        debug_info["z3_run_s"] = z3_run_s
+        debug_info["correction_llm_s"] = correction_llm_s
+        debug_info["correction_z3_s"] = correction_z3_s
 
     # if tries > 0:
     #     print(f"[Z3LOOP][{_tid}] ✓ loop done after {tries} retries, total={time.time()-_t:.2f}s", flush=True)
