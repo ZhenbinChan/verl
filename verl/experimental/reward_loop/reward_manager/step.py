@@ -316,10 +316,22 @@ class StepRewardManager(RewardManagerBase):
 
             step_rewards = []
             fol_debug = []
+            fol_judge_prompt_tokens = 0
+            fol_judge_completion_tokens = 0
+            fol_judge_total_tokens = 0
+            fol_judge_calls = 0
             for args, score_item in zip(call_args, scores):
                 if reward_type == "fol" and isinstance(score_item, dict):
                     score_value = float(score_item.get("score", 0.0))
-                    fol_debug.append(score_item.get("debug", {}))
+                    step_debug = score_item.get("debug", {})
+                    fol_debug.append(step_debug)
+                    if isinstance(step_debug, dict):
+                        judge_usage = step_debug.get("judge_usage", {})
+                        if isinstance(judge_usage, dict):
+                            fol_judge_prompt_tokens += int(judge_usage.get("prompt_tokens", 0) or 0)
+                            fol_judge_completion_tokens += int(judge_usage.get("completion_tokens", 0) or 0)
+                            fol_judge_total_tokens += int(judge_usage.get("total_tokens", 0) or 0)
+                            fol_judge_calls += int(judge_usage.get("calls", 0) or 0)
                 else:
                     score_value = float(score_item)
                 step_rewards.append((int(args[3]), score_value))
@@ -328,6 +340,13 @@ class StepRewardManager(RewardManagerBase):
             reward_extra_info[key] = step_rewards
             if reward_type == "fol" and fol_debug:
                 reward_extra_info["fol_debug"] = fol_debug
+                reward_extra_info["fol_judge_prompt_tokens"] = fol_judge_prompt_tokens
+                reward_extra_info["fol_judge_completion_tokens"] = fol_judge_completion_tokens
+                reward_extra_info["fol_judge_total_tokens"] = fol_judge_total_tokens
+                reward_extra_info["fol_judge_calls"] = fol_judge_calls
+                reward_extra_info["fol_judge_completion_tokens_per_call"] = (
+                    float(fol_judge_completion_tokens) / fol_judge_calls if fol_judge_calls > 0 else 0.0
+                )
 
         # Store number of steps for debugging
         reward_extra_info["num_steps"] = len(step_positions)
