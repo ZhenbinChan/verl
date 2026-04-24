@@ -45,7 +45,7 @@ echo "Waiting for vLLM server to start..."
 VLLM_READY=0
 set +x
 for i in $(seq 1 180); do
-    if curl -s http://localhost:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
+    if curl -s http://127.0.0.1:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
         echo "vLLM server ready after ${i}s"
         VLLM_READY=1
         break
@@ -59,7 +59,9 @@ if [ "$VLLM_READY" -eq 0 ]; then
 fi
 
 export OPENAI_API_KEY="EMPTY"
-export OPENAI_BASE_URL="http://localhost:${SELF_EVAL_PORT}/v1"
+export OPENAI_BASE_URL="http://127.0.0.1:${SELF_EVAL_PORT}/v1"
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 # EPTree params: (M=4, N=1, L=1, T=3) -> 16 leaf paths per prompt
 python3 -u -m verl.trainer.main_ppo \

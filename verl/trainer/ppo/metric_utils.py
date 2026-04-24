@@ -599,10 +599,16 @@ def process_validation_metrics(
 
                 # compute mean and std
                 n_resps = len(var_vals)
-                metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
+                try:
+                    metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
+                except (TypeError, ValueError):
+                    continue
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = float(np_std(var_vals))
+                    try:
+                        metric[f"std@{n_resps}"] = float(np_std(var_vals))
+                    except (TypeError, ValueError):
+                        continue
 
                     # cache ns list
                     if n_resps not in ns_cache:
