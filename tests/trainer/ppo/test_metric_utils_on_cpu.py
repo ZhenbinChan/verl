@@ -541,6 +541,24 @@ class TestProcessValidationMetrics(unittest.TestCase):
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
 
+    def test_process_validation_metrics_skips_structured_debug_values(self):
+        """Structured debug payloads should not break validation reduction."""
+        data_sources = ["source1", "source1"]
+        sample_inputs = ["prompt1", "prompt1"]
+        infos_dict = {
+            "score": [0.8, 0.9],
+            "fol_debug": [
+                [{"judge_usage": {"calls": 1}}],
+                [{"judge_usage": {"calls": 2}}],
+            ],
+        }
+
+        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+
+        self.assertIn("score", result["source1"])
+        self.assertAlmostEqual(result["source1"]["score"]["mean@2"], 0.85)
+        self.assertNotIn("fol_debug", result["source1"])
+
 
 if __name__ == "__main__":
     unittest.main()

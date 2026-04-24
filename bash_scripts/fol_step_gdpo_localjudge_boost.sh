@@ -43,7 +43,7 @@ python3 -u -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=4 \
-    data.val_batch_size=8 \
+    data.val_batch_size=32 \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
@@ -72,7 +72,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}_fol_boost" \
     trainer.n_gpus_per_node=1 \

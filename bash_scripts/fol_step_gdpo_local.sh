@@ -42,12 +42,14 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
 FOL_VLLM_PID=$!
 echo "FOL vLLM server log: fol_vllm_server.log"
 trap "echo 'Killing FOL vLLM server (PID=$FOL_VLLM_PID)'; kill $FOL_VLLM_PID 2>/dev/null" EXIT
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 echo "Waiting for FOL vLLM server to start..."
 VLLM_READY=0
 set +x
-for i in $(seq 1 180); do
-    if curl -s http://localhost:${FOL_PORT}/health > /dev/null 2>&1; then
+for i in $(seq 1 600); do
+    if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${FOL_PORT}/health', timeout=2).read()" > /dev/null 2>&1; then
         echo "FOL vLLM server ready after ${i}s"
         VLLM_READY=1
         break
@@ -56,13 +58,13 @@ for i in $(seq 1 180); do
 done
 set -x
 if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: FOL vLLM server failed to start within 180s"
+    echo "ERROR: FOL vLLM server failed to start within 600s"
     exit 1
 fi
 
 # Point FOL API calls to local vLLM server
 export OPENAI_API_KEY=${OPENAI_API_KEY:-"EMPTY"}
-export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://localhost:${FOL_PORT}/v1"}
+export OPENAI_BASE_URL=${OPENAI_BASE_URL:-"http://127.0.0.1:${FOL_PORT}/v1"}
 export FOL_RPM=${FOL_RPM:-0}
 export FOL_OPENAI_TPM=${FOL_OPENAI_TPM:-0}
 export FOL_OPENAI_MAX_INFLIGHT=${FOL_OPENAI_MAX_INFLIGHT:-32}

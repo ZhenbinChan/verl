@@ -28,6 +28,8 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Launch vLLM judge server on the SAME GPU with low memory budget
 SELF_EVAL_PORT=${SELF_EVAL_PORT:-8199}
 export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 echo "==> Launching local vLLM judge server (port $SELF_EVAL_PORT, same GPU)..."
 python3 -m vllm.entrypoints.openai.api_server \
@@ -44,8 +46,8 @@ trap "echo 'Killing vLLM server (PID=$VLLM_PID)'; kill $VLLM_PID 2>/dev/null" EX
 echo "Waiting for vLLM server to start..."
 VLLM_READY=0
 set +x
-for i in $(seq 1 180); do
-    if curl -s http://127.0.0.1:${SELF_EVAL_PORT}/health > /dev/null 2>&1; then
+for i in $(seq 1 600); do
+    if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${SELF_EVAL_PORT}/health', timeout=2).read()" > /dev/null 2>&1; then
         echo "vLLM server ready after ${i}s"
         VLLM_READY=1
         break
@@ -54,14 +56,12 @@ for i in $(seq 1 180); do
 done
 set -x
 if [ "$VLLM_READY" -eq 0 ]; then
-    echo "ERROR: vLLM server failed to start within 180s"
+    echo "ERROR: vLLM server failed to start within 600s"
     exit 1
 fi
 
 export OPENAI_API_KEY="EMPTY"
 export OPENAI_BASE_URL="http://127.0.0.1:${SELF_EVAL_PORT}/v1"
-export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
-export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
 # EPTree params: (M=4, N=1, L=1, T=3) -> 16 leaf paths per prompt
 python3 -u -m verl.trainer.main_ppo \
