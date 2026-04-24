@@ -109,7 +109,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name='verl-fol' \
     trainer.experiment_name="qwen1.5b_step_gdpo_fol_slm_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \

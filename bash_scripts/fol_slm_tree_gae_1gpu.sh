@@ -29,6 +29,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # ── Launch FOL-SLM vLLM server on the SAME GPU with low memory budget ──
 FOL_SLM_PORT=${FOL_SLM_PORT:-4869}
 export FOL_SLM_MODEL=${FOL_SLM_MODEL:-$(basename $FOL_SLM_MODEL_PATH)}
+FOL_SLM_MAX_MODEL_LEN=${FOL_SLM_MAX_MODEL_LEN:-8192}
 
 echo "==> Launching local FOL-SLM vLLM server (port $FOL_SLM_PORT, same GPU)..."
 python3 -m vllm.entrypoints.openai.api_server \
@@ -37,6 +38,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port $FOL_SLM_PORT \
     --gpu-memory-utilization 0.15 \
     --tensor-parallel-size 1 \
+    --max-model-len $FOL_SLM_MAX_MODEL_LEN \
     --no-enable-log-requests > fol_slm_vllm_server.log 2>&1 &
 FOL_VLLM_PID=$!
 echo "FOL-SLM vLLM server log: fol_slm_vllm_server.log"

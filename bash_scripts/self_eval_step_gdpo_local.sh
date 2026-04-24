@@ -24,6 +24,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Launch vLLM server on GPU 1 with reference model weights
 SELF_EVAL_PORT=${SELF_EVAL_PORT:-8199}
 export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
+SELF_EVAL_MAX_MODEL_LEN=${SELF_EVAL_MAX_MODEL_LEN:-8192}
 
 echo "==> Launching local vLLM server on GPU 1 (port $SELF_EVAL_PORT)..."
 CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
@@ -32,6 +33,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 \
+    --max-model-len $SELF_EVAL_MAX_MODEL_LEN \
     --no-enable-log-requests > vllm_server.log 2>&1 &
 VLLM_PID=$!
 echo "vLLM server log: vllm_server.log"

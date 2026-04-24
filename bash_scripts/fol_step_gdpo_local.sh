@@ -28,6 +28,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # ── Launch FOL vLLM server on GPU 1 ──
 FOL_PORT=${FOL_PORT:-4869}
 export FOL_MODEL=${FOL_MODEL:-$(basename $FOL_MODEL_PATH)}
+FOL_MAX_MODEL_LEN=${FOL_MAX_MODEL_LEN:-8192}
 
 echo "==> Launching FOL vLLM server on GPU 1 (port $FOL_PORT)..."
 CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
@@ -36,6 +37,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
     --port $FOL_PORT \
     --gpu-memory-utilization 0.85 \
     --tensor-parallel-size 1 \
+    --max-model-len $FOL_MAX_MODEL_LEN \
     --enforce-eager \
     --gdn-prefill-backend triton \
     --no-enable-log-requests > fol_vllm_server.log 2>&1 &

@@ -28,6 +28,7 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Launch vLLM judge server on the SAME GPU with low memory budget
 SELF_EVAL_PORT=${SELF_EVAL_PORT:-8199}
 export SELF_EVAL_MODEL=${SELF_EVAL_MODEL:-$(basename $MODEL_PATH)}
+SELF_EVAL_MAX_MODEL_LEN=${SELF_EVAL_MAX_MODEL_LEN:-8192}
 export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 
@@ -38,6 +39,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port $SELF_EVAL_PORT \
     --gpu-memory-utilization 0.15 \
     --tensor-parallel-size 1 \
+    --max-model-len $SELF_EVAL_MAX_MODEL_LEN \
     --no-enable-log-requests > vllm_server.log 2>&1 &
 VLLM_PID=$!
 echo "vLLM server log: vllm_server.log"
