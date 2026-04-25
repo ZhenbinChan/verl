@@ -230,6 +230,7 @@ class TreeRewardManager(RewardManagerBase):
             tokenizer=self.tokenizer,
             use_xml=self.use_xml,
             split_fn=self.split_fn,
+            response_ids=valid_response_ids,
         )
 
     def _init_reward_extra_info(self, score) -> dict:
