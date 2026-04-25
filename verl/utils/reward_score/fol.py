@@ -246,6 +246,12 @@ def compute_step_reward_fol(
             "z3_error": None,
             "judge_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
+
+        # Format precheck: if the step contains <step> but has bad format
+        # (missing <premise>/<conclusion>, mismatched tags, etc.), skip the
+        # expensive FOL judge call and return 0.0 directly.
+        if "<step>" in step_text and not check_step_format_fol(step_text):
+            return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
         shared_state = fol_shared_state or prepare_fol_shared_state(
             prompt_text, api_config=api_config, extra_info=extra_info
         )
