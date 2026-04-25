@@ -295,6 +295,9 @@ class TreeRewardManager(RewardManagerBase):
             score = result
             reward_extra_info["acc"] = score
 
+        reward_extra_info["process_reward_penalized"] = False
+        reward_extra_info["penalty_reason"] = ""
+
         # 2. Compute step-level process rewards (external PRM)
         if self.step_reward_types:
             step_positions = self._get_step_token_positions(

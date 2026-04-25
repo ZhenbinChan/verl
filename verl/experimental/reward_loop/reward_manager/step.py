@@ -281,6 +281,9 @@ class StepRewardManager(RewardManagerBase):
             score = result
             reward_extra_info["acc"] = score
 
+        reward_extra_info["process_reward_penalized"] = False
+        reward_extra_info["penalty_reason"] = ""
+
         # 2. Compute step-level process rewards
         # 2.1 Splitting | get token positions (end pos) of each step for assigning rewards
         step_positions = self._get_step_token_positions(response_str, valid_response_ids, valid_response_length)
