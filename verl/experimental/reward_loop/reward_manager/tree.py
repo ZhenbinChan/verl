@@ -232,6 +232,29 @@ class TreeRewardManager(RewardManagerBase):
             split_fn=self.split_fn,
         )
 
+    def _init_reward_extra_info(self, score) -> dict:
+        """Initialize a stable reward_extra_info schema for this manager."""
+        reward_extra_info = {
+            "acc": score,
+            "num_steps": 0,
+            "process_reward_penalized": False,
+            "penalty_reason": "",
+        }
+        for reward_type in self.step_reward_types:
+            reward_extra_info[f"{reward_type}_step_reward"] = []
+        if "fol" in self.step_reward_types:
+            reward_extra_info.update(
+                {
+                    "fol_debug": [],
+                    "fol_judge_prompt_tokens": 0,
+                    "fol_judge_completion_tokens": 0,
+                    "fol_judge_total_tokens": 0,
+                    "fol_judge_calls": 0,
+                    "fol_judge_completion_tokens_per_call": 0.0,
+                }
+            )
+        return reward_extra_info
+
     async def run_single(self, data: DataProto) -> dict:
         """Compute outcome + optional process rewards for a single data item.
 
@@ -286,17 +309,14 @@ class TreeRewardManager(RewardManagerBase):
                 ),
             )
 
-        reward_extra_info = {}
         if isinstance(result, dict):
             score = result["score"]
-            for key, value in result.items():
-                reward_extra_info[key] = value
         else:
             score = result
-            reward_extra_info["acc"] = score
 
-        reward_extra_info["process_reward_penalized"] = False
-        reward_extra_info["penalty_reason"] = ""
+        reward_extra_info = self._init_reward_extra_info(score)
+        if isinstance(result, dict):
+            reward_extra_info.update(result)
 
         # 2. Compute step-level process rewards (external PRM)
         if self.step_reward_types:
