@@ -187,6 +187,25 @@ class TreeRewardManager(RewardManagerBase):
             use_xml_cfg = algo_cfg.get("use_xml_steps", None)
         self.use_xml = bool(use_xml_cfg) if use_xml_cfg is not None else False
 
+        # --- Anti-reward-hacking penalty config ---
+        reward_cfg = config.get("reward", {})
+        algo_cfg = config.get("algorithm", {})
+        self.penalty_max_steps = int(
+            reward_cfg.get("penalty_max_steps", algo_cfg.get("penalty_max_steps", 0))
+        )
+        self.penalty_on_truncated = bool(
+            reward_cfg.get("penalty_on_truncated", algo_cfg.get("penalty_on_truncated", False))
+        )
+        self.penalty_on_multi_boxed = bool(
+            reward_cfg.get("penalty_on_multi_boxed", algo_cfg.get("penalty_on_multi_boxed", False))
+        )
+        self.penalty_on_bad_format = bool(
+            reward_cfg.get("penalty_on_bad_format", algo_cfg.get("penalty_on_bad_format", False))
+        )
+        self.penalty_score = float(
+            reward_cfg.get("penalty_score", algo_cfg.get("penalty_score", 0.0))
+        )
+
         max_workers = reward_cfg_fol.get(
             "step_reward_max_workers",
             algo_cfg_fol.get("step_reward_max_workers", os.environ.get("VERL_STEP_REWARD_MAX_WORKERS")),
@@ -340,5 +359,51 @@ class TreeRewardManager(RewardManagerBase):
                 reward_extra_info[key] = step_rewards
 
             reward_extra_info["num_steps"] = len(step_positions)
+
+            # --- Anti-reward-hacking penalty ---
+            penalize = False
+            penalty_reason = []
+
+            num_steps = len(step_positions)
+
+            if self.penalty_max_steps > 0 and num_steps > self.penalty_max_steps:
+                penalize = True
+                penalty_reason.append(f"num_steps={num_steps}>{self.penalty_max_steps}")
+
+            if self.penalty_on_truncated and valid_response_length >= response_length:
+                penalize = True
+                penalty_reason.append("truncated")
+
+            if self.penalty_on_multi_boxed:
+                import re as _re
+                boxed_count = len(_re.findall(r'\\boxed\{', response_str))
+                if boxed_count > 1:
+                    penalize = True
+                    penalty_reason.append(f"multi_boxed={boxed_count}")
+
+            if self.penalty_on_bad_format:
+                step_open = response_str.count("<step>")
+                step_close = response_str.count("</step>")
+                has_conclusion_outside_step = False
+                last_step_close = response_str.rfind("</step>")
+                last_conclusion = response_str.rfind("<conclusion>")
+                if last_conclusion > last_step_close and last_step_close != -1:
+                    has_conclusion_outside_step = True
+                if step_open != step_close or has_conclusion_outside_step:
+                    penalize = True
+                    penalty_reason.append(
+                        f"bad_format(open={step_open},close={step_close},conclusion_outside={has_conclusion_outside_step})"
+                    )
+
+            if penalize:
+                penalty_val = self.penalty_score
+                for reward_type in self.step_reward_types:
+                    key = f"{reward_type}_step_reward"
+                    if key in reward_extra_info:
+                        reward_extra_info[key] = [
+                            (pos, penalty_val) for pos, _ in reward_extra_info[key]
+                        ]
+                reward_extra_info["process_reward_penalized"] = True
+                reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
 
         return {"reward_score": score, "reward_extra_info": reward_extra_info}

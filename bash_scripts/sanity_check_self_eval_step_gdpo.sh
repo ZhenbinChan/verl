@@ -73,7 +73,12 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=self_eval \
     algorithm.use_xml_steps=true \
-    +algorithm.step_reward_weights='[0.5, 0.5]' \
+    +algorithm.step_reward_weights='[0.8, 0.2]' \
+    +algorithm.penalty_max_steps=12 \
+    +algorithm.penalty_on_truncated=true \
+    +algorithm.penalty_on_multi_boxed=true \
+    +algorithm.penalty_on_bad_format=true \
+    +algorithm.penalty_score=-1.0 \
     reward_model.reward_manager=step \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
