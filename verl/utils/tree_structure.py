@@ -987,37 +987,39 @@ class TreeManager:
     # Ref: github/THUNLP/TreeRL tree_node.py:377 (leaf_normalize)
 
     def leaf_normalize(self) -> None:
-        """Leave-one-out normalization on all leaves across all trees.
+        """Per-tree leave-one-out normalization on leaves.
 
-        For each leaf i with raw score R(l_i):
+        For each tree (prompt), for each leaf i with raw score R(l_i):
             R_hat(l_i) = R(l_i) - (1/(K-1)) * sum_{j!=i} R(l_j)
+        where K is the number of leaves in that tree.
 
         Result stored in leaf.accumulated_value.
+
+        Ref: THUNLP/TreeRL tree_node.py:377 — LOO is per-prompt, not global.
         """
-        all_leaves = []
         for tree in self.trees:
-            all_leaves.extend(tree.all_leaves)
+            leaves = tree.all_leaves
 
-        if len(all_leaves) <= 1:
-            for leaf in all_leaves:
-                leaf.accumulated_value = 0.0
-            return
+            if len(leaves) <= 1:
+                for leaf in leaves:
+                    leaf.accumulated_value = 0.0
+                continue
 
-        scores = [leaf.correctness if leaf.correctness is not None else 0.0
-                  for leaf in all_leaves]
-        total = sum(scores)
-        K = len(scores)
+            scores = [leaf.correctness if leaf.correctness is not None else 0.0
+                      for leaf in leaves]
+            total = sum(scores)
+            K = len(scores)
 
-        for i, leaf in enumerate(all_leaves):
-            mean_others = (total - scores[i]) / (K - 1)
-            leaf.accumulated_value = scores[i] - mean_others
+            for i, leaf in enumerate(leaves):
+                mean_others = (total - scores[i]) / (K - 1)
+                leaf.accumulated_value = scores[i] - mean_others
 
-        # inner_repetition_penalty: override degenerate leaves after normalization
-        # Ref: THUNLP/TreeRL tree_node.py:392-395
-        if self.inner_repetition_penalty:
-            for leaf in all_leaves:
-                if leaf.finish_reason != "stop":
-                    leaf.accumulated_value = -1.0
+            # inner_repetition_penalty: override degenerate leaves after normalization
+            # Ref: THUNLP/TreeRL tree_node.py:392-395
+            if self.inner_repetition_penalty:
+                for leaf in leaves:
+                    if leaf.finish_reason != "stop":
+                        leaf.accumulated_value = -1.0
 
     # ------------------------------------------------------------------
     # Step 6b: Backpropagate
@@ -1042,12 +1044,12 @@ class TreeManager:
                     parent = parent.parent
 
     # ------------------------------------------------------------------
-    # Step 6c: Global step normalization
+    # Step 6c: Per-tree step normalization
     # ------------------------------------------------------------------
     # Ref: github/THUNLP/TreeRL tree_node.py:421 (normalize_all_steps)
 
     def normalize_all_steps(self) -> None:
-        """Subtract token-weighted (or step-weighted) global mean from accumulated_value.
+        """Per-tree step normalization: subtract token-weighted (or step-weighted) mean.
 
         Token mode (default):
             μ = Σ A(s_n)·|T(s_n)| / Σ |L(s_n)|·|T(s_n)|
@@ -1055,34 +1057,35 @@ class TreeManager:
             μ = Σ A(s_n) / Σ |L(s_n)|
         Then: A(s_n) -= μ · |L(s_n)|
 
-        This is baseline subtraction — makes the expected (token-weighted) advantage zero.
+        This is baseline subtraction — makes the expected (token-weighted) advantage
+        zero within each tree.
+
+        Ref: THUNLP/TreeRL tree_node.py:421 — normalize_all_steps is per-tree.
         """
         if self.overall_norm_style == "none":
             return
 
-        # Collect all nodes with terminal_in_subtree > 0
-        all_steps = []
         for tree in self.trees:
-            for node in tree.all_nodes:
-                if node.terminal_in_subtree > 0:
-                    all_steps.append(node)
+            # Collect all nodes with terminal_in_subtree > 0
+            all_steps = [node for node in tree.all_nodes
+                         if node.terminal_in_subtree > 0]
 
-        if not all_steps:
-            return
+            if not all_steps:
+                continue
 
-        if self.overall_norm_style == "token":
-            num = sum(node.accumulated_value * len(node.token_ids)
-                      for node in all_steps)
-            den = sum(node.terminal_in_subtree * len(node.token_ids)
-                      for node in all_steps)
-        else:  # "step"
-            num = sum(node.accumulated_value for node in all_steps)
-            den = sum(node.terminal_in_subtree for node in all_steps)
+            if self.overall_norm_style == "token":
+                num = sum(node.accumulated_value * len(node.token_ids)
+                          for node in all_steps)
+                den = sum(node.terminal_in_subtree * len(node.token_ids)
+                          for node in all_steps)
+            else:  # "step"
+                num = sum(node.accumulated_value for node in all_steps)
+                den = sum(node.terminal_in_subtree for node in all_steps)
 
-        mean = num / den if den != 0 else 0.0
+            mean = num / den if den != 0 else 0.0
 
-        for node in all_steps:
-            node.accumulated_value -= mean * node.terminal_in_subtree
+            for node in all_steps:
+                node.accumulated_value -= mean * node.terminal_in_subtree
 
     # ------------------------------------------------------------------
     # Step 6d: Reweight (optional)
