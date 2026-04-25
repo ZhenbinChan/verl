@@ -284,6 +284,59 @@ class StepRewardManager(RewardManagerBase):
         # 2. Compute step-level process rewards
         # 2.1 Splitting | get token positions (end pos) of each step for assigning rewards
         step_positions = self._get_step_token_positions(response_str, valid_response_ids, valid_response_length)
+        reward_extra_info["num_steps"] = len(step_positions)
+
+        # --- Anti-reward-hacking precheck ---
+        # If a response already matches a configured penalty condition, skip
+        # expensive process-reward calls and directly assign the penalty score.
+        penalize = False
+        penalty_reason = []
+
+        num_steps = len(step_positions)
+
+        # 1. Too many steps
+        if self.penalty_max_steps > 0 and num_steps > self.penalty_max_steps:
+            penalize = True
+            penalty_reason.append(f"num_steps={num_steps}>{self.penalty_max_steps}")
+
+        # 2. Response truncated (hit max_response_length)
+        if self.penalty_on_truncated and valid_response_length >= response_length:
+            penalize = True
+            penalty_reason.append("truncated")
+
+        # 3. Multiple \boxed{} in response
+        if self.penalty_on_multi_boxed:
+            import re as _re
+
+            boxed_count = len(_re.findall(r'\\boxed\{', response_str))
+            if boxed_count > 1:
+                penalize = True
+                penalty_reason.append(f"multi_boxed={boxed_count}")
+
+        # 4. Bad format: mismatched <step>/<conclusion> tags
+        if self.penalty_on_bad_format:
+            step_open = response_str.count("<step>")
+            step_close = response_str.count("</step>")
+            has_conclusion_outside_step = False
+            # Simple heuristic: <conclusion> after the last </step>
+            last_step_close = response_str.rfind("</step>")
+            last_conclusion = response_str.rfind("<conclusion>")
+            if last_conclusion > last_step_close and last_step_close != -1:
+                has_conclusion_outside_step = True
+            if step_open != step_close or has_conclusion_outside_step:
+                penalize = True
+                penalty_reason.append(
+                    f"bad_format(open={step_open},close={step_close},conclusion_outside={has_conclusion_outside_step})"
+                )
+
+        if penalize:
+            penalty_val = self.penalty_score
+            penalty_rewards = [(int(pos), penalty_val) for _, pos in step_positions]
+            for reward_type in self.step_reward_types:
+                reward_extra_info[f"{reward_type}_step_reward"] = penalty_rewards
+            reward_extra_info["process_reward_penalized"] = True
+            reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
+            return {"reward_score": score, "reward_extra_info": reward_extra_info}
 
         # 2.2 Extract prompt text for reward functions that need it
         raw_prompt = data_item.non_tensor_batch.get("raw_prompt", [])
@@ -367,61 +420,5 @@ class StepRewardManager(RewardManagerBase):
                 reward_extra_info["fol_judge_completion_tokens_per_call"] = (
                     float(fol_judge_completion_tokens) / fol_judge_calls if fol_judge_calls > 0 else 0.0
                 )
-
-        # Store number of steps for debugging
-        reward_extra_info["num_steps"] = len(step_positions)
-
-        # --- Anti-reward-hacking penalty ---
-        # If the response exhibits reward-hacking behavior, zero out (or penalize)
-        # all process rewards to prevent the model from learning to exploit them.
-        penalize = False
-        penalty_reason = []
-
-        num_steps = len(step_positions)
-
-        # 1. Too many steps
-        if self.penalty_max_steps > 0 and num_steps > self.penalty_max_steps:
-            penalize = True
-            penalty_reason.append(f"num_steps={num_steps}>{self.penalty_max_steps}")
-
-        # 2. Response truncated (hit max_response_length)
-        if self.penalty_on_truncated and valid_response_length >= response_length:
-            penalize = True
-            penalty_reason.append("truncated")
-
-        # 3. Multiple \boxed{} in response
-        if self.penalty_on_multi_boxed:
-            import re as _re
-            boxed_count = len(_re.findall(r'\\boxed\{', response_str))
-            if boxed_count > 1:
-                penalize = True
-                penalty_reason.append(f"multi_boxed={boxed_count}")
-
-        # 4. Bad format: mismatched <step>/<conclusion> tags
-        if self.penalty_on_bad_format:
-            step_open = response_str.count("<step>")
-            step_close = response_str.count("</step>")
-            has_conclusion_outside_step = False
-            # Simple heuristic: <conclusion> after the last </step>
-            last_step_close = response_str.rfind("</step>")
-            last_conclusion = response_str.rfind("<conclusion>")
-            if last_conclusion > last_step_close and last_step_close != -1:
-                has_conclusion_outside_step = True
-            if step_open != step_close or has_conclusion_outside_step:
-                penalize = True
-                penalty_reason.append(
-                    f"bad_format(open={step_open},close={step_close},conclusion_outside={has_conclusion_outside_step})"
-                )
-
-        if penalize:
-            penalty_val = self.penalty_score
-            for reward_type in self.step_reward_types:
-                key = f"{reward_type}_step_reward"
-                if key in reward_extra_info:
-                    reward_extra_info[key] = [
-                        (pos, penalty_val) for pos, _ in reward_extra_info[key]
-                    ]
-            reward_extra_info["process_reward_penalized"] = True
-            reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
 
         return {"reward_score": score, "reward_extra_info": reward_extra_info}
