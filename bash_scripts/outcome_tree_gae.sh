@@ -20,6 +20,11 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Outcome-Only Tree-GAE training
 # 相比外接 PRM 的版本，这里去掉了 +algorithm.step_reward_type 和 weights 的注入。
 # 底层会自动退化为只使用基于叶子正确率推导出来的 (GA+LA)/\sqrt{n} 作为唯一的 advantage 信号。
+#
+# Previous checkpoint/eval schedule:
+# trainer.save_freq=-1
+# trainer.max_actor_ckpt_to_keep=0
+# trainer.test_freq=20
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     algorithm.use_xml_steps=true \
@@ -71,9 +76,9 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_outcome_only_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=100 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=50 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \

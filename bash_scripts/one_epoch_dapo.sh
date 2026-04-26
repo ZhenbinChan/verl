@@ -14,6 +14,11 @@ echo "Using $NNODES nodes for training..."
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # overlong_buffer_cfg.len: 超长惩罚，也就是如果超过 max_resp_len - overlong_buffer_len，那么就扣除 超出/overlong_buffer*penalty_factor
 # overlong_buffer_cfg 必须开启，否则模型模式崩溃 重复生成token
+#
+# Previous checkpoint/eval schedule:
+# trainer.save_freq=-1
+# trainer.max_actor_ckpt_to_keep was not set
+# trainer.test_freq=20
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$DATA_DIR/train.parquet \
@@ -59,8 +64,9 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_dapo_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.test_freq=20 \
+    trainer.save_freq=100 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=50 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \

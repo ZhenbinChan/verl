@@ -65,6 +65,11 @@ fi
 export OPENAI_API_KEY="EMPTY"
 export OPENAI_BASE_URL="http://127.0.0.1:${SELF_EVAL_PORT}/v1"
 
+# Previous checkpoint/eval schedule:
+# trainer.save_freq=-1
+# trainer.max_actor_ckpt_to_keep=0
+# trainer.test_freq=20
+
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_gdpo \
     +algorithm.step_reward_type=self_eval \
@@ -113,9 +118,9 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_step_gdpo_1epo_${DATA_NAME}_self_eval_1gpu" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=100 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=50 \
     trainer.total_epochs=1 \
     +reward.api_config.temperature=0.0 \
     ++data.seed=42 \

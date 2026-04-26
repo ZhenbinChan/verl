@@ -31,6 +31,11 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 #   tree_use_weighted_value:    False (default) | True
 #   tree_weighted_value_style:  sqrt (default) | uniform | original  (only when use_weighted_value=True)
 #   tree_ext_reward_dedup:      True (default) | False   (dedup shared-prefix ext PRM scores in bigpool)
+#
+# Previous checkpoint/eval schedule:
+# trainer.save_freq=-1
+# trainer.max_actor_ckpt_to_keep=0
+# trainer.test_freq=20
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=tree_gae \
     +algorithm.step_reward_type=format \
@@ -84,9 +89,9 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_format_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.max_actor_ckpt_to_keep=0 \
-    trainer.test_freq=20 \
+    trainer.save_freq=100 \
+    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.test_freq=50 \
     trainer.total_epochs=1 \
     ++data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
