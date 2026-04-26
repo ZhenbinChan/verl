@@ -1332,8 +1332,12 @@ class TreeManager:
         # is built.  This covers both original-chain nodes (from
         # _map_ext_prm_to_nodes) and forked nodes (from evaluate_branch_ext_prm).
         #
-        # Collect all PRM names that appear on any node
+        # Collect all expected PRM names, including the degenerate case where
+        # every per-node external PRM list is empty for this batch.
         all_prm_names: set = set()
+        for key in self._non_tensor_batch_template:
+            if key.endswith("_step_reward") and key != "treerl_step_reward":
+                all_prm_names.add(key[: -len("_step_reward")])
         for tree in self.trees:
             for node in tree.all_nodes:
                 all_prm_names.update(node.ext_prm_scores.keys())
