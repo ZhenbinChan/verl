@@ -12,44 +12,73 @@ Input Data:
 
 Translation Rules (Strict Compliance Required):
 
+    IMPORTANT: You are a faithful translator, not a proof constructor. Do not
+    add facts merely to make the conclusion provable. Translate source text
+    into symbolic form and keep each premise source separated.
+
     1.  Strict Symbolic Mapping:
 
         • Use ONLY the functions, predicates, and sorts provided in the Z3 Declaration.
 
         • Use ForAll, Exists, And, Or, Not, Implies, and == for logical connectors.
 
-    2.  Explicit Expression Rule (No Pointers):
+    2.  Source Separation Rule:
 
-        • DO NOT refer to previous steps using variable names like conclusion_n or step_n.
+        • background_axioms: definitions, general rules, and common knowledge
+          that are explicitly stated or strongly implied by the Context,
+          Question, or Options. Do not put the current conclusion here.
 
-        • Instead, you must explicitly restate the full Z3 logical expression of that conclusion as a premise in the new step.
+        • previous_conclusions: faithful symbolic restatements of conclusions
+          from earlier <step> blocks only. Do not include the current step's
+          conclusion here.
 
-    3.  Grounded Premises:
+        • current_premises: faithful symbolic translations of only the text
+          inside the current step's <premise> tags. Do not add any statement
+          inferred from the current <conclusion>.
 
-        • Every symbolic statement in premises_n must be derived from:
+        • conclusion: faithful symbolic translation of only the current step's
+          <conclusion> tag.
 
-            ◦ The current step's natural language <premise>.
+        • DO NOT refer to previous steps using variable names like conclusion_n
+          or step_n. Restate previous conclusions in full symbolic form under
+          previous_conclusions.
 
-            ◦ A previous step's <conclusion> (written in full symbolic form).
+    3.  Anti-Leakage Rule:
 
-            ◦ Global background knowledge or definitions implied by the Context.
+        • The conclusion expression must not appear verbatim in
+          background_axioms, previous_conclusions, or current_premises.
 
-    4.  Logical Purity:
+        • If the current <premise> text repeats the current <conclusion>, still
+          translate faithfully; do not invent a different supporting premise.
+
+        • If the given premises do not entail the conclusion, do not repair the
+          argument. Return faithful translations anyway.
+
+    4.  Grounded Premises:
+
+        • Every symbolic statement must be derived from exactly one allowed
+          source category above: background, previous conclusion, current
+          premise, or current conclusion.
+
+    5.  Logical Purity:
 
         • Avoid using True or False as placeholders. Every statement should be a well-formed formula (WFF) using the provided predicates.
 
-        • Ensure the conclusion_n is a direct logical consequence of the premises_n.
+        • Do not force the conclusion to be a direct logical consequence by
+          moving conclusion content into premises.
 
-    5.  Output Format:
+    6.  Output Format:
 
         • Output ONLY a JSON object. No Markdown, no Python code fences, and no natural language commentary.
 
         • The JSON object must have exactly these fields:
             ◦ "new_variables": array of objects {"name": string, "sort": string}
-            ◦ "premises": array of strings, where each string is one Z3 expression
+            ◦ "background_axioms": array of strings, where each string is one Z3 expression
+            ◦ "previous_conclusions": array of strings, where each string is one Z3 expression
+            ◦ "current_premises": array of strings, where each string is one Z3 expression
             ◦ "conclusion": string, a single Z3 expression
 
-        • If no new variables are needed, return an empty array for "new_variables".
+        • If no new variables or premises of a source type are needed, return an empty array for that field.
 
 Example of Expected Behavior:
 
@@ -96,10 +125,15 @@ Example Output:
   "new_variables": [
     {"name": "a", "sort": "Person"}
   ],
-  "premises": [
-    "Black(a)",
-    "Westernized(a)",
-    "ForAll([x], Implies(And(Black(x), Westernized(x)), Hypertension(x) == And(HighSaltDiet(x), GeneticAdaptation(x))))"
+  "background_axioms": [
+    "ForAll([x], Implies(And(Black(x), Westernized(x)), Hypertension(x) == And(HighSaltDiet(x), GeneticAdaptationToLowSalt(x))))"
   ],
-  "conclusion": "Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptation(a))"
+  "previous_conclusions": [
+    "Black(a)",
+    "Westernized(a)"
+  ],
+  "current_premises": [
+    "And(Black(a), Westernized(a))"
+  ],
+  "conclusion": "Hypertension(a) == And(HighSaltDiet(a), GeneticAdaptationToLowSalt(a))"
 }

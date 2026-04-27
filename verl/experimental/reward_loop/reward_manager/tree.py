@@ -103,6 +103,9 @@ class TreeRewardManager(RewardManagerBase):
         max_tries = reward_cfg_fol.get("fol_max_tries", algo_cfg_fol.get("fol_max_tries", None))
         if max_tries is not None:
             self.api_config["max_tries"] = int(max_tries)
+        old_max_tries = reward_cfg_fol.get("fol_old_max_tries", algo_cfg_fol.get("fol_old_max_tries", None))
+        if old_max_tries is not None:
+            self.api_config["old_max_tries"] = int(old_max_tries)
         z3_timeout = reward_cfg_fol.get("fol_timeout", algo_cfg_fol.get("fol_timeout", None))
         if z3_timeout is not None:
             self.api_config["timeout"] = int(z3_timeout)

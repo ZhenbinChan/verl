@@ -10,6 +10,36 @@ Instructions:
       •  Rule: If a group of entities is defined via EnumSort, DO NOT declare a separate Sort or separate Const objects for those entities.
       •  Constants: Only declare Const for specific individuals (e.g., zhao_ming) or unique regions that are not part of a fixed category.
 
+      •  Prefer a small number of general domain sorts such as Person, Object,
+         Action, Statement, Option, Region, or Event. Do NOT create a separate
+         sort for every unary category or property.
+
+      •  Unary categories and properties must usually be Bool predicates over a
+         general domain sort, not their own sorts. For example, represent
+         "cats are animals; Fluffy is a cat" as:
+           sorts: Person or Object
+           constant: fluffy
+           functions: IsCat(Object)->BoolSort(), IsAnimal(Object)->BoolSort()
+         Do NOT represent Cat and Animal as separate DeclareSort domains unless
+         the problem explicitly requires typed objects from two distinct domains.
+
+      •  For class-inclusion statements such as "all cats are animals", "every
+         lawyer is a partner", or "all A are B", declare predicates for BOTH
+         classes over the same general domain sort, for example
+         IsCat(Object)->BoolSort() and IsAnimal(Object)->BoolSort(). Named
+         instances such as "Fluffy" must be constants of that same general
+         domain sort, not of a class sort such as Cat.
+
+      •  If a concept is likely to appear in a reasoning conclusion, include a
+         declaration for it now. The later translation stage may use ONLY these
+         declared names; missing predicates such as IsAnimal will make the step
+         fail closed.
+
+      •  For multiple-choice answers, prefer constants option_a, option_b,
+         option_c, option_d of sort Option or Statement, plus predicates such
+         as SatisfiesDefinition(Option)->BoolSort(), IsCorrect(Option)->BoolSort(),
+         or describes domain-specific properties. Avoid making each option a
+         separate Sort.
 
    2.  Diverse Function Declarations:
       •  Predicates: Functions returning `BoolSort()` for properties (e.g., `IsWesternized`).
@@ -21,6 +51,11 @@ Instructions:
       •  Declare universally quantified variables (e.g., `x`, `y`, `r`) for all defined sorts.
       •  CRITICAL: Each logical concept must have exactly ONE representation. Do not define the same property as both a Predicate and an Enum/Function.
       •  CRITICAL: Do NOT include any `solver.add(...)` or logical axioms. The output must consist ONLY of the structural declarations and signatures.
+      •  CRITICAL: Do NOT use True, False, or vacuous predicates to make later
+         conclusions easy. The declaration stage defines vocabulary only.
+      •  CRITICAL: Every Function argument sort and custom return sort must be
+         declared in "sorts". Built-in return sorts must be exactly BoolSort(),
+         IntSort(), or RealSort().
 
    4.  Output Format:
       •  Output ONLY a JSON object. No Markdown, no Python code fences, and no natural language commentary.

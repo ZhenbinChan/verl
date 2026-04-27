@@ -8,7 +8,8 @@ Verification semantics is always entailment: UNSAT -> 1.0.
 Configurable via api_config keys:
   - fol_preprocess: "direct" (default) | "structured"
   - fol_translation: "implication" (default) | "assertion"
-  - max_tries: int (default 3)
+  - max_tries: int (default 1), used by declaration/expression repair
+  - old_max_tries: int (default 0), used by whole-code correction
   - timeout: float (default 30.0)
   - cumulative: bool (default False)
 
@@ -21,6 +22,7 @@ Exports:
 import atexit
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from hashlib import sha1
@@ -36,6 +38,9 @@ from verl.utils.fol_utils.engine import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PREMISE_PATTERN = re.compile(r"<premise>(.*?)</premise>", re.DOTALL)
+_CONCLUSION_PATTERN = re.compile(r"<conclusion>(.*?)</conclusion>", re.DOTALL)
 
 _FOL_SHARED_STATE_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_SHARED_PREPROCESS_CACHE_SIZE", "512")))
 _fol_shared_state_cache: OrderedDict[tuple, dict] = OrderedDict()
@@ -67,10 +72,27 @@ def _build_fol_config(api_config: dict | None = None) -> FOLConfig:
         preprocess=preprocess,
         translation=translation,
         max_tries=int(cfg.get("max_tries", 1)),
+        old_max_tries=int(cfg.get("old_max_tries", 0)),
         timeout=float(cfg.get("timeout", 30.0)),
         cumulative=bool(cfg.get("cumulative", False)),
         api_config=cfg,
     )
+
+
+def _normalize_step_text(text: str) -> str:
+    """Normalize natural-language step text for conservative duplicate checks."""
+    return " ".join(str(text).strip().lower().split())
+
+
+def _has_student_premise_conclusion_duplicate(step_text: str) -> bool:
+    """Whether actor copied the current conclusion verbatim into a premise."""
+    premises = [_normalize_step_text(item) for item in _PREMISE_PATTERN.findall(step_text or "")]
+    conclusions = [_normalize_step_text(item) for item in _CONCLUSION_PATTERN.findall(step_text or "")]
+    conclusions = [item for item in conclusions if item]
+    if not premises or not conclusions:
+        return False
+    premise_set = {item for item in premises if item}
+    return any(conclusion in premise_set for conclusion in conclusions)
 
 
 def prepare_fol_shared_state(
@@ -106,6 +128,8 @@ def prepare_fol_shared_state(
 
     engine = FOLEngine(fol_config)
     processed_ctx, declarations = engine.preprocess(context, question, options or "")
+    if not declarations:
+        return None
     shared_state = {
         "config": fol_config,
         "processed_context": processed_ctx,
@@ -142,6 +166,7 @@ def _build_verify_cache_key(
         fol_config.preprocess.value,
         fol_config.translation.value,
         fol_config.max_tries,
+        fol_config.old_max_tries,
         fol_config.timeout,
         fol_config.cumulative,
         api_cfg.get("model"),
@@ -251,11 +276,16 @@ def compute_step_reward_fol(
         # (missing <premise>/<conclusion>, mismatched tags, etc.), skip the
         # expensive FOL judge call and return 0.0 directly.
         if "<step>" in step_text and not check_step_format_fol(step_text):
+            debug_info["format_failed_closed"] = True
+            return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
+        if _has_student_premise_conclusion_duplicate(step_text):
+            debug_info["student_premise_conclusion_duplicate"] = True
             return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
         shared_state = fol_shared_state or prepare_fol_shared_state(
             prompt_text, api_config=api_config, extra_info=extra_info
         )
         if shared_state is None:
+            debug_info["declaration_failed_closed"] = True
             return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
 
         fol_config = shared_state["config"]

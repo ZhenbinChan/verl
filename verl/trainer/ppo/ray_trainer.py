@@ -1601,6 +1601,12 @@ class RayPPOTrainer:
                                 max_tries = reward_cfg.get("fol_max_tries", algo_cfg.get("fol_max_tries", None))
                                 if max_tries is not None:
                                     api_config["max_tries"] = int(max_tries)
+                                old_max_tries = reward_cfg.get(
+                                    "fol_old_max_tries",
+                                    algo_cfg.get("fol_old_max_tries", None),
+                                )
+                                if old_max_tries is not None:
+                                    api_config["old_max_tries"] = int(old_max_tries)
                                 llm_timeout = reward_cfg.get("fol_timeout", algo_cfg.get("fol_timeout", None))
                                 if llm_timeout is not None:
                                     api_config["timeout"] = int(llm_timeout)
@@ -2103,6 +2109,16 @@ class RayPPOTrainer:
                     "fol_judge_total_tokens": "fol_judge/total_tokens",
                     "fol_judge_calls": "fol_judge/calls",
                     "fol_judge_completion_tokens_per_call": "fol_judge/completion_tokens_per_call",
+                    "fol_verifier_steps": "fol_judge/verifier_steps",
+                    "fol_entailed_steps": "fol_judge/entailed_steps",
+                    "fol_not_entailed_steps": "fol_judge/not_entailed_steps",
+                    "fol_invalid_translation_steps": "fol_judge/invalid_translation_steps",
+                    "fol_invalid_expression_steps": "fol_judge/invalid_expression_steps",
+                    "fol_expression_repair_steps": "fol_judge/expression_repair_steps",
+                    "fol_leakage_steps": "fol_judge/leakage_steps",
+                    "fol_student_duplicate_steps": "fol_judge/student_duplicate_steps",
+                    "fol_declaration_failed_steps": "fol_judge/declaration_failed_steps",
+                    "fol_format_failed_steps": "fol_judge/format_failed_steps",
                 }
                 for batch_key, metric_prefix in fol_judge_metric_map.items():
                     if batch_key in batch.non_tensor_batch:
@@ -2110,6 +2126,27 @@ class RayPPOTrainer:
                         metrics[f"{metric_prefix}/mean"] = float(np.mean(vals))
                         metrics[f"{metric_prefix}/max"] = float(np.max(vals))
                         metrics[f"{metric_prefix}/min"] = float(np.min(vals))
+                if "fol_verifier_steps" in batch.non_tensor_batch:
+                    verifier_steps = np.asarray(batch.non_tensor_batch["fol_verifier_steps"], dtype=np.float32)
+                    denom = np.maximum(verifier_steps, 1.0)
+                    fol_rate_metric_map = {
+                        "fol_entailed_steps": "fol_judge/entailed_rate",
+                        "fol_not_entailed_steps": "fol_judge/not_entailed_rate",
+                        "fol_invalid_translation_steps": "fol_judge/invalid_translation_rate",
+                        "fol_invalid_expression_steps": "fol_judge/invalid_expression_rate",
+                        "fol_expression_repair_steps": "fol_judge/expression_repair_rate",
+                        "fol_leakage_steps": "fol_judge/leakage_rate",
+                        "fol_student_duplicate_steps": "fol_judge/student_duplicate_rate",
+                        "fol_declaration_failed_steps": "fol_judge/declaration_failed_rate",
+                        "fol_format_failed_steps": "fol_judge/format_failed_rate",
+                    }
+                    for batch_key, metric_name in fol_rate_metric_map.items():
+                        if batch_key in batch.non_tensor_batch:
+                            numer = np.asarray(batch.non_tensor_batch[batch_key], dtype=np.float32)
+                            vals = numer / denom
+                            metrics[f"{metric_name}/mean"] = float(np.mean(vals))
+                            metrics[f"{metric_name}/max"] = float(np.max(vals))
+                            metrics[f"{metric_name}/min"] = float(np.min(vals))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

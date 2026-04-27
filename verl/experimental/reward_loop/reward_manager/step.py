@@ -89,6 +89,9 @@ class StepRewardManager(RewardManagerBase):
         max_tries = reward_cfg.get("fol_max_tries", algo_cfg.get("fol_max_tries", None))
         if max_tries is not None:
             self.api_config["max_tries"] = int(max_tries)
+        old_max_tries = reward_cfg.get("fol_old_max_tries", algo_cfg.get("fol_old_max_tries", None))
+        if old_max_tries is not None:
+            self.api_config["old_max_tries"] = int(old_max_tries)
         z3_timeout = reward_cfg.get("fol_timeout", algo_cfg.get("fol_timeout", None))
         if z3_timeout is not None:
             self.api_config["timeout"] = int(z3_timeout)
@@ -241,6 +244,16 @@ class StepRewardManager(RewardManagerBase):
                     "fol_judge_total_tokens": 0,
                     "fol_judge_calls": 0,
                     "fol_judge_completion_tokens_per_call": 0.0,
+                    "fol_verifier_steps": 0,
+                    "fol_entailed_steps": 0,
+                    "fol_not_entailed_steps": 0,
+                    "fol_invalid_translation_steps": 0,
+                    "fol_invalid_expression_steps": 0,
+                    "fol_expression_repair_steps": 0,
+                    "fol_leakage_steps": 0,
+                    "fol_student_duplicate_steps": 0,
+                    "fol_declaration_failed_steps": 0,
+                    "fol_format_failed_steps": 0,
                 }
             )
         return reward_extra_info
@@ -416,11 +429,22 @@ class StepRewardManager(RewardManagerBase):
             fol_judge_completion_tokens = 0
             fol_judge_total_tokens = 0
             fol_judge_calls = 0
+            fol_verifier_steps = 0
+            fol_entailed_steps = 0
+            fol_not_entailed_steps = 0
+            fol_invalid_translation_steps = 0
+            fol_invalid_expression_steps = 0
+            fol_expression_repair_steps = 0
+            fol_leakage_steps = 0
+            fol_student_duplicate_steps = 0
+            fol_declaration_failed_steps = 0
+            fol_format_failed_steps = 0
             for args, score_item in zip(call_args, scores):
                 if reward_type == "fol" and isinstance(score_item, dict):
                     score_value = float(score_item.get("score", 0.0))
                     step_debug = score_item.get("debug", {})
                     fol_debug.append(step_debug)
+                    fol_verifier_steps += 1
                     if isinstance(step_debug, dict):
                         judge_usage = step_debug.get("judge_usage", {})
                         if isinstance(judge_usage, dict):
@@ -428,6 +452,29 @@ class StepRewardManager(RewardManagerBase):
                             fol_judge_completion_tokens += int(judge_usage.get("completion_tokens", 0) or 0)
                             fol_judge_total_tokens += int(judge_usage.get("total_tokens", 0) or 0)
                             fol_judge_calls += int(judge_usage.get("calls", 0) or 0)
+                        z3_output = str(step_debug.get("z3_output", "") or "")
+                        if "SUCCESS_ENTAILED" in z3_output:
+                            fol_entailed_steps += 1
+                        if "FAILED_NOT_ENTAILED" in z3_output:
+                            fol_not_entailed_steps += 1
+                        if step_debug.get("translation_failed_closed") or "FAILED_INVALID_TRANSLATION" in z3_output:
+                            fol_invalid_translation_steps += 1
+                        if (
+                            step_debug.get("invalid_expression_syntax")
+                            or step_debug.get("invalid_expression_syntax_initial")
+                            or "FAILED_INVALID_EXPRESSION" in z3_output
+                        ):
+                            fol_invalid_expression_steps += 1
+                        if int(step_debug.get("expression_correction_attempts", 0) or 0) > 0:
+                            fol_expression_repair_steps += 1
+                        if step_debug.get("conclusion_leakage_detected") or "FAILED_LEAKED_CONCLUSION" in z3_output:
+                            fol_leakage_steps += 1
+                        if step_debug.get("student_premise_conclusion_duplicate"):
+                            fol_student_duplicate_steps += 1
+                        if step_debug.get("declaration_failed_closed"):
+                            fol_declaration_failed_steps += 1
+                        if step_debug.get("format_failed_closed"):
+                            fol_format_failed_steps += 1
                 else:
                     score_value = float(score_item)
                 step_rewards.append((int(args[3]), score_value))
@@ -443,5 +490,15 @@ class StepRewardManager(RewardManagerBase):
                 reward_extra_info["fol_judge_completion_tokens_per_call"] = (
                     float(fol_judge_completion_tokens) / fol_judge_calls if fol_judge_calls > 0 else 0.0
                 )
+                reward_extra_info["fol_verifier_steps"] = fol_verifier_steps
+                reward_extra_info["fol_entailed_steps"] = fol_entailed_steps
+                reward_extra_info["fol_not_entailed_steps"] = fol_not_entailed_steps
+                reward_extra_info["fol_invalid_translation_steps"] = fol_invalid_translation_steps
+                reward_extra_info["fol_invalid_expression_steps"] = fol_invalid_expression_steps
+                reward_extra_info["fol_expression_repair_steps"] = fol_expression_repair_steps
+                reward_extra_info["fol_leakage_steps"] = fol_leakage_steps
+                reward_extra_info["fol_student_duplicate_steps"] = fol_student_duplicate_steps
+                reward_extra_info["fol_declaration_failed_steps"] = fol_declaration_failed_steps
+                reward_extra_info["fol_format_failed_steps"] = fol_format_failed_steps
 
         return {"reward_score": score, "reward_extra_info": reward_extra_info}

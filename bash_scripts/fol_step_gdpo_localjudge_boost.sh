@@ -35,6 +35,7 @@ python3 -u -m verl.trainer.main_ppo \
     +algorithm.fol_max_tries=1 \
     +algorithm.fol_timeout=10 \
     +algorithm.api_timeout=200 \
+    +algorithm.fol_verify_with_cumulative_steps=true \
     algorithm.use_xml_steps=true \
     +algorithm.step_reward_weights='[0.8, 0.2]' \
     +algorithm.penalty_max_steps=12 \
