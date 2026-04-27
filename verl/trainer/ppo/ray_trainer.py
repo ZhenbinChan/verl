@@ -1661,6 +1661,18 @@ class RayPPOTrainer:
                             metrics["tree/num_trees"] = total_trees
                             metrics["tree/total_leaves"] = total_leaves
                             metrics["tree/avg_leaves_per_tree"] = total_leaves / max(total_trees, 1)
+                            pipeline_profile = getattr(tree_mgr, "pipeline_profile", {}) or {}
+                            for profile_key in (
+                                "initialize_s",
+                                "branch_generation_s",
+                                "ext_prm_eval_s",
+                                "evaluate_leaves_s",
+                                "normalize_backprop_s",
+                                "build_flat_batch_s",
+                            ):
+                                metrics[f"tree/{profile_key}"] = pipeline_profile.get(
+                                    profile_key, 0.0
+                                )
                             ext_prm_profile = getattr(tree_mgr, "ext_prm_profile", {}) or {}
                             if ext_prm_profile:
                                 metrics["tree/ext_prm_tasks"] = ext_prm_profile.get("tasks_total", 0)
@@ -1684,6 +1696,22 @@ class RayPPOTrainer:
                                         / fol_judge_calls
                                     )
                                 fol_tasks = ext_prm_profile.get("fol_tasks", 0)
+                                fol_prepare_unique = ext_prm_profile.get("fol_prepare_unique", 0)
+                                if fol_prepare_unique:
+                                    metrics["tree/fol_prepare_trees"] = ext_prm_profile.get(
+                                        "fol_prepare_trees", 0
+                                    )
+                                    metrics["tree/fol_prepare_unique"] = fol_prepare_unique
+                                    metrics["tree/fol_prepare_failed"] = ext_prm_profile.get(
+                                        "fol_prepare_failed", 0
+                                    )
+                                    metrics["tree/fol_prepare_s/mean"] = (
+                                        ext_prm_profile.get("fol_prepare_s_sum", 0.0)
+                                        / fol_prepare_unique
+                                    )
+                                    metrics["tree/fol_prepare_s/max"] = ext_prm_profile.get(
+                                        "fol_prepare_s_max", 0.0
+                                    )
                                 if fol_tasks:
                                     timing_pairs = {
                                         "translation_s": "fol_translation_s",

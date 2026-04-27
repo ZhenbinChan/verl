@@ -28,8 +28,10 @@ Reference: Algorithm 1 in "TreeRL: LLM Reinforcement Learning with On-Policy Tre
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -251,6 +253,7 @@ class TreeManager:
             ext_prm_max_workers = min(32, os.cpu_count() or 4)
         self.ext_prm_max_workers = max(1, int(ext_prm_max_workers))
         self.ext_prm_profile: dict[str, float] = {}
+        self.pipeline_profile: dict[str, float] = {}
         
         # TODO: 1. Diverse Sampling as a new anti-degeneration strategy (ref: THUNLP/TreeRL entropy_chain_local_manager.py:255)
 
@@ -816,8 +819,14 @@ class TreeManager:
             "fol_correction_z3_s_max": 0.0,
             "fol_verify_step_s_sum": 0.0,
             "fol_verify_step_s_max": 0.0,
+            "fol_prepare_trees": 0,
+            "fol_prepare_unique": 0,
+            "fol_prepare_failed": 0,
+            "fol_prepare_s_sum": 0.0,
+            "fol_prepare_s_max": 0.0,
         }
         tasks = []
+        tree_inputs = []
 
         for tree in self.trees:
             tidx = tree.tree_idx
@@ -837,16 +846,67 @@ class TreeManager:
                 elif isinstance(ei_vals, list) and tidx < len(ei_vals):
                     extra_info = ei_vals[tidx] or {}
 
-            fol_shared_state = None
-            if "fol" in eval_prms:
-                from verl.utils.reward_score.fol import prepare_fol_shared_state
+            tree_inputs.append((tree, tidx, prompt_text, extra_info))
 
-                fol_shared_state = prepare_fol_shared_state(
+        fol_shared_state_by_tree_idx = {}
+        if "fol" in eval_prms and tree_inputs:
+            from verl.utils.reward_score.fol import prepare_fol_shared_state
+
+            fol_api_config = getattr(ext_prm_fns.get("fol"), "keywords", {}).get("api_config")
+
+            def _fol_prepare_key(prompt_text: str, extra_info: dict) -> tuple[str, str]:
+                return (
                     prompt_text,
-                    extra_info=extra_info,
-                    api_config=getattr(ext_prm_fns.get("fol"), "keywords", {}).get("api_config"),
+                    json.dumps(extra_info or {}, sort_keys=True, default=str),
                 )
 
+            unique_prepare_inputs = {}
+            tree_prepare_keys = {}
+            for _, tidx, prompt_text, extra_info in tree_inputs:
+                prepare_key = _fol_prepare_key(prompt_text, extra_info)
+                tree_prepare_keys[tidx] = prepare_key
+                unique_prepare_inputs.setdefault(prepare_key, (prompt_text, extra_info))
+
+            self.ext_prm_profile["fol_prepare_trees"] = len(tree_inputs)
+            self.ext_prm_profile["fol_prepare_unique"] = len(unique_prepare_inputs)
+
+            def _prepare_one(item):
+                prepare_key, (prompt_text, extra_info) = item
+                start = time.perf_counter()
+                shared_state = prepare_fol_shared_state(
+                    prompt_text,
+                    extra_info=extra_info,
+                    api_config=fol_api_config,
+                )
+                return prepare_key, shared_state, time.perf_counter() - start
+
+            prepared_states = {}
+
+            def _record_prepare_result(prepare_key, shared_state, elapsed):
+                prepared_states[prepare_key] = shared_state
+                self.ext_prm_profile["fol_prepare_s_sum"] += elapsed
+                self.ext_prm_profile["fol_prepare_s_max"] = max(
+                    self.ext_prm_profile["fol_prepare_s_max"],
+                    elapsed,
+                )
+                if shared_state is None:
+                    self.ext_prm_profile["fol_prepare_failed"] += 1
+
+            prepare_items = list(unique_prepare_inputs.items())
+            if self.ext_prm_max_workers <= 1 or len(prepare_items) <= 1:
+                for item in prepare_items:
+                    _record_prepare_result(*_prepare_one(item))
+            else:
+                with ThreadPoolExecutor(max_workers=min(self.ext_prm_max_workers, len(prepare_items))) as executor:
+                    futures = [executor.submit(_prepare_one, item) for item in prepare_items]
+                    for future in as_completed(futures):
+                        _record_prepare_result(*future.result())
+
+            for _, tidx, _, _ in tree_inputs:
+                fol_shared_state_by_tree_idx[tidx] = prepared_states.get(tree_prepare_keys[tidx])
+
+        for tree, tidx, prompt_text, extra_info in tree_inputs:
+            fol_shared_state = fol_shared_state_by_tree_idx.get(tidx)
             for node in tree.all_nodes:
                 if not node.is_forked:
                     continue
@@ -1527,17 +1587,31 @@ class TreeManager:
         Returns:
             flat_batch: DataProto with all leaf paths and TreeRL step rewards.
         """
+        self.pipeline_profile = {
+            "initialize_s": 0.0,
+            "branch_generation_s": 0.0,
+            "ext_prm_eval_s": 0.0,
+            "evaluate_leaves_s": 0.0,
+            "normalize_backprop_s": 0.0,
+            "build_flat_batch_s": 0.0,
+        }
+
         # 1. Initialize trees (also maps external PRM scores to original-chain nodes)
+        start = time.perf_counter()
         self.initialize_trees(rollout_output)
+        self.pipeline_profile["initialize_s"] += time.perf_counter() - start
 
         # 2. Iterative expansion
         for round_idx in range(self.tree_rounds):
+            start = time.perf_counter()
             forking_points = self.select_forking_points()
             if not forking_points:
+                self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
                 break
 
             branch_batch, fork_info = self.prepare_branch_inputs(forking_points)
             if branch_batch is None:
+                self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
                 break
 
             # Repeat for T branches per fork
@@ -1550,24 +1624,34 @@ class TreeManager:
 
             branch_output = generate_fn(branch_batch)
             self.commit_branches(branch_output, fork_info)
+            self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
 
         # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
+        start = time.perf_counter()
         self.evaluate_branch_ext_prm(ext_prm_fns)
+        self.pipeline_profile["ext_prm_eval_s"] += time.perf_counter() - start
 
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)
+        start = time.perf_counter()
         self.evaluate_leaves(compute_score_fn)
+        self.pipeline_profile["evaluate_leaves_s"] += time.perf_counter() - start
 
         # Log finish_reason distribution before normalization
         reasons = [leaf.finish_reason for tree in self.trees for leaf in tree.all_leaves]
         reason_counts = Counter(reasons)
         print(f"[TreeRL] Leaf finish reasons: {dict(reason_counts)}")
 
+        start = time.perf_counter()
         self.leaf_normalize()
         self.backpropagate()
         self.normalize_all_steps()
         self.reweight_steps()           # no-op if tree_use_weighted_value=False
         self.compute_step_rewards()
+        self.pipeline_profile["normalize_backprop_s"] += time.perf_counter() - start
 
         # 4. Build flat batch
-        return self.build_flat_batch(rollout_output)
+        start = time.perf_counter()
+        flat_batch = self.build_flat_batch(rollout_output)
+        self.pipeline_profile["build_flat_batch_s"] += time.perf_counter() - start
+        return flat_batch
