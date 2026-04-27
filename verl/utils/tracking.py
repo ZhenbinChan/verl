@@ -117,12 +117,12 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
     
-    def build_wandb_table(self, columns: List[str]):
-        import wandb
-        return wandb.Table(columns=columns)
-    def log_table(self, table, table_name):
-        if self.wandb_run is not None:
-            self.wandb_run.log({f"{table_name}": table})
+    # def build_wandb_table(self, columns: List[str]):
+    #     import wandb
+    #     return wandb.Table(columns=columns)
+    # def log_table(self, table, table_name):
+    #     if self.wandb_run is not None:
+    #         self.wandb_run.log({f"{table_name}": table})
     def wandb_log(self, data, step, commit=False):
         """Log data to wandb"""
         self.logger["wandb"].log(data=data ,step=step, commit=commit)

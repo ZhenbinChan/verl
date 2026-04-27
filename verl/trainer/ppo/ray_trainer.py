@@ -1049,10 +1049,10 @@ class RayPPOTrainer:
         )
         self.logger = logger
 
-        # 记录模型的回答和奖励情况
-        if 'wandb' in self.config.trainer.logger:
-            self.record_table = logger.build_wandb_table(columns=["epoch","global_step","prompt","response","ground_truth","outcome_reward"])
-            self.validation_table = logger.build_wandb_table(columns=["epoch","global_step","prompt","response","ground_truth","outcome_reward"])
+        # # [Drop] 可能会导致 OOM. 记录模型的回答和奖励情况.
+        # if 'wandb' in self.config.trainer.logger:
+        #     self.record_table = logger.build_wandb_table(columns=["epoch","global_step","prompt","response","ground_truth","outcome_reward"])
+        #     self.validation_table = logger.build_wandb_table(columns=["epoch","global_step","prompt","response","ground_truth","outcome_reward"])
 
         self.global_steps = 0
         self.global_eps = 0
@@ -1105,6 +1105,7 @@ class RayPPOTrainer:
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )# torch.Size([batch size, 2560])
+                
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
@@ -1197,32 +1198,31 @@ class RayPPOTrainer:
                             reward_dict = self.reward_fn(batch, return_dict=True)
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
-                                if self.record_table is not None:
-                                    for i in range(len(reward_dict["ground_truth"])):
-                                        self.record_table.add_data(
-                                            epoch,
-                                            self.global_steps,
-                                            str(reward_dict["prompt"][i]),
-                                            str(reward_dict["response"][i]),
-                                            str(reward_dict["ground_truth"][i]),
-                                            str(reward_dict["outcome_reward"][i])
-                                        )
+                                # Warning：可能会导致 OOM
+                                # if self.record_table is not None:
+                                #     for i in range(len(reward_dict["ground_truth"])):
+                                #         self.record_table.add_data(
+                                #             epoch,
+                                #             self.global_steps,
+                                #             str(reward_dict["prompt"][i]),
+                                #             str(reward_dict["response"][i]),
+                                #             str(reward_dict["ground_truth"][i]),
+                                #             str(reward_dict["outcome_reward"][i])
+                                #         )
                         else:
                             if self.config.reward_model.launch_reward_fn_async:
                                 future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                             else:
                                 reward_dict = self.reward_fn(batch, return_dict=True)
-                            
                             # PRM: function reward
                             reward_fn_tensor = reward_dict["reward_tensor"]
                             reward_tensor = reward_fn_tensor
                             fn_dict = {
-                                "reward_fn_scores": reward_fn_tensor, # FRM rewards
+                                "reward_fn_scores": reward_fn_tensor,
                             }
                             if "verifiable_rewards" in reward_dict.keys():
-                                fn_dict["verifiable_rewards"] = reward_dict["verifiable_rewards"].sum(-1)# ORM rewards
+                                fn_dict["verifiable_rewards"] = reward_dict["verifiable_rewards"].sum(-1)
                             reward_fn_dict = DataProto.from_dict(fn_dict)
-                            # import pdb;pdb.set_trace()
                             batch.union(reward_fn_dict)
                             # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
                             ################# 新增功能：打印 reward 和具体细节 ##########
@@ -1249,17 +1249,6 @@ class RayPPOTrainer:
 
                                 metrics["rollout/total_correct_groups"] = len(self.all_correct_uids)
                                 metrics["rollout/total_wrong_groups"] = len(self.all_wrong_uids)
-
-                                if self.record_table is not None:
-                                    for i in range(len(reward_dict["ground_truth"])):
-                                        self.record_table.add_data(
-                                            epoch,
-                                            self.global_steps,
-                                            str(reward_dict["prompt"][i]),
-                                            str(reward_dict["response"][i]),
-                                            str(reward_dict["ground_truth"][i]),
-                                            str(reward_dict["outcome_reward"][i])
-                                        )
                             ##########################################################
 
 
