@@ -23,7 +23,7 @@ from verl.utils.reward_score import _default_compute_score
 class NaivePlusRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", **kwargs) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
@@ -130,8 +130,8 @@ class NaivePlusRewardManager:
             else:
                 reward = score
 
-            reward_tensor[i, valid_response_length - 1] = reward
-            #reward_tensor[i, :valid_response_length - 1] = reward
+            # reward_tensor[i, valid_response_length - 1] = reward
+            reward_tensor[i, :valid_response_length - 1] = reward
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0

@@ -22,8 +22,10 @@ fields that other managers understand (e.g. ``print_entropy_tree``,
 
 from __future__ import annotations
 
+import json
+import os
 from collections import defaultdict
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 import torch
 
@@ -32,7 +34,12 @@ from verl.utils.reward_score import _default_compute_score
 
 
 class MCTSRewardManager:
-    """Reward manager for the ``parallel_mcts`` sampling strategy."""
+    """Reward manager for the ``parallel_mcts`` sampling strategy.
+
+    Supports two reward styles:
+    - 'format': checks <step>/<premise>/<conclusion> tag structure
+    - 'fol': FOL/Z3 verification (requires fol_metadata_path)
+    """
 
     def __init__(
         self,
@@ -41,6 +48,7 @@ class MCTSRewardManager:
         compute_score: Optional[Callable] = None,
         reward_fn_key: str = "data_source",
         reward_style: str = "format",   # "format" | "fol"
+        fol_metadata_path: Optional[str] = None,
         **kwargs,                         # absorb all other yaml reward_kwargs
     ) -> None:
         self.tokenizer = tokenizer
@@ -52,11 +60,56 @@ class MCTSRewardManager:
         # Lazy-load the PRM function so we don't pay the import cost unless needed
         self._step_prm_fn: Optional[Callable[[str], float]] = None
 
+        # FOL verifier initialization
+        self.fol_verifier = None
+        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
+
+        if reward_style == "fol" and fol_metadata_path:
+            self._init_fol_verifier(fol_metadata_path)
+
+    def _init_fol_verifier(self, metadata_path: str) -> None:
+        """Initialize FOL verifier from metadata file."""
+        if not os.path.exists(metadata_path):
+            print(f"[FOL Warning] FOL metadata path not found: {metadata_path}")
+            return
+
+        try:
+            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
+
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            for item in data:
+                if item.get("fol_metadata"):
+                    sample_id = (
+                        item.get("sample_id")
+                        or item.get("extra_info", {}).get("index")
+                        or item.get("extra_info", {}).get("id")
+                    )
+                    if sample_id is not None:
+                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
+                            item["fol_metadata"]
+                        )
+
+            self.fol_verifier = FOLVerifier()
+            print(f"[FOL] RewardManager loaded {len(self.fol_metadata_map)} FOL metadata entries")
+
+        except Exception as e:
+            print(f"[FOL Warning] Failed to initialize FOL verifier: {e}")
+
     @property
     def step_prm_fn(self) -> Callable[[str], float]:
         if self._step_prm_fn is None:
             from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn
-            self._step_prm_fn = get_prm_fn(self.reward_style)
+
+            if self.reward_style == "fol" and self.fol_verifier:
+                self._step_prm_fn = get_prm_fn(
+                    self.reward_style,
+                    verifier=self.fol_verifier,
+                    metadata_map=self.fol_metadata_map,
+                )
+            else:
+                self._step_prm_fn = get_prm_fn(self.reward_style)
         return self._step_prm_fn
 
     # ------------------------------------------------------------------

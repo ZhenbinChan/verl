@@ -428,6 +428,10 @@ class RayPPOTrainer:
 
         self.record_table = None
 
+        # Tracking for homogeneous rollout groups (all correct or all wrong)
+        self.all_correct_uids = []  # uids where all rollouts got reward=1
+        self.all_wrong_uids = []    # uids where all rollouts got reward=0
+
         # define in-reward KL control
         # kl loss control currently not suppoorted
         if config.algorithm.use_kl_in_reward:
@@ -1152,6 +1156,10 @@ class RayPPOTrainer:
                     else:
                         repeat_times = self.config.actor_rollout_ref.rollout.n
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+                    # Use sample_id for tracking if available (allows tracing back to original sample)
+                    sample_ids = batch.non_tensor_batch.get("sample_id")
+                    if sample_ids is not None:
+                        batch.non_tensor_batch["uid"] = np.array([str(sid) for sid in sample_ids], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -1214,7 +1222,7 @@ class RayPPOTrainer:
                             if "verifiable_rewards" in reward_dict.keys():
                                 fn_dict["verifiable_rewards"] = reward_dict["verifiable_rewards"].sum(-1)# ORM rewards
                             reward_fn_dict = DataProto.from_dict(fn_dict)
-                            import pdb;pdb.set_trace()
+                            # import pdb;pdb.set_trace()
                             batch.union(reward_fn_dict)
                             # reward_tensor, reward_extra_infos_dict, reward_logging_info = compute_reward(batch, self.reward_fn)#调用2
                             ################# 新增功能：打印 reward 和具体细节 ##########
@@ -1223,6 +1231,25 @@ class RayPPOTrainer:
                             #     print(reward_dict["reward_detail"])
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
+
+                                # Detect homogeneous groups (all correct or all wrong)
+                                n = self.config.actor_rollout_ref.rollout.n
+                                uids = batch.non_tensor_batch["uid"]
+                                outcome_rewards = reward_dict["outcome_reward"]
+                                num_groups = len(outcome_rewards) // n
+
+                                for group_idx in range(num_groups):
+                                    group_rewards = outcome_rewards[group_idx * n : (group_idx + 1) * n]
+                                    group_uid = uids[group_idx * n]
+
+                                    if all(r == 1.0 for r in group_rewards):
+                                        self.all_correct_uids.append(group_uid)
+                                    elif all(r == 0.0 for r in group_rewards):
+                                        self.all_wrong_uids.append(group_uid)
+
+                                metrics["rollout/total_correct_groups"] = len(self.all_correct_uids)
+                                metrics["rollout/total_wrong_groups"] = len(self.all_wrong_uids)
+
                                 if self.record_table is not None:
                                     for i in range(len(reward_dict["ground_truth"])):
                                         self.record_table.add_data(
@@ -1336,13 +1363,14 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
+                            # 如果要查看每一个 Step 的输出再解除注释
+                            # self._dump_generations(
+                            #     inputs=inputs,
+                            #     outputs=outputs,
+                            #     scores=scores,
+                            #     reward_extra_infos_dict=reward_extra_infos_dict,
+                            #     dump_path=rollout_data_dir,
+                            # )
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
@@ -1377,7 +1405,20 @@ class RayPPOTrainer:
                     # 补充保存最后的 checkpoint
                     with _timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
-                    # 新增：Wandb 保存训练记录, 分两个表格（Train & Validation）
+                    # -------------------------------------------------------------- #
+                    # 保存 homogeneous group tracking 结果
+                    import json
+                    import os
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        tracking_file = os.path.join(rollout_data_dir, "homogeneous_tracking.json")
+                        with open(tracking_file, "w") as f:
+                            json.dump({
+                                "all_correct_uids": self.all_correct_uids,
+                                "all_wrong_uids": self.all_wrong_uids
+                            }, f, indent=2)
+                        pprint(f"Homogeneous tracking saved to {tracking_file}")
+                    # -------------------------------------------------------------- #
                     if self.record_table is not None:
                         logger.log_table(self.record_table, table_name='Training Record')
                         logger.log_table(self.validation_table, table_name='Validation Record')

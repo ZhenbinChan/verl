@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import random
 from collections import deque
 from contextlib import contextmanager
@@ -19,7 +21,7 @@ from verl.trainer.ppo.sampling.mcts_node import (
     select_terminal,
     uct,
 )
-from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn
+from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn, format_step_reward
 
 
 @contextmanager
@@ -64,7 +66,7 @@ class ParallelMCTSStrategy(SamplingStrategy):
     then attaches the resulting steps as child MCTSNodes.
 
     The Process Reward Model (PRM) scores each step immediately after expansion.
-    Supported PRM types: 'format' (tag-structure check) and 'fol' (reserved).
+    Supported PRM types: 'format' (tag-structure check) and 'fol' (FOL/Z3 verification).
 
     Config key: trainer.parallel_mcts_config
     """
@@ -88,11 +90,83 @@ class ParallelMCTSStrategy(SamplingStrategy):
         self.average_one_generation = cfg.get("average_one_generation", False)
 
         prm_type = cfg.get("prm", "format")
-        self.step_prm_fn = get_prm_fn(prm_type)
+
+        # FOL verifier initialization (lazy loading)
+        self.fol_verifier = None
+        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
+        self._fol_metadata_loaded = False
+        self._fol_metadata_path = cfg.get("fol_metadata_path", None)
+
+        # Create PRM function
+        if prm_type == "fol" and self._fol_metadata_path:
+            # Defer FOL verifier initialization to first run() call
+            # when we have access to gen_batch data
+            self._prm_type = prm_type
+            self.step_prm_fn = get_prm_fn("format")  # Temporary fallback
+        else:
+            self._prm_type = prm_type
+            self.step_prm_fn = get_prm_fn(prm_type)
 
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
         self.eos_token_id: Optional[int] = getattr(tokenizer, "eos_token_id", None)
+
+    # ------------------------------------------------------------------
+    # FOL Metadata Loading
+    # ------------------------------------------------------------------
+
+    def _load_fol_metadata(self, gen_batch: DataProto) -> None:
+        """Load FOL metadata from file and initialize FOL verifier."""
+        if self._fol_metadata_loaded:
+            return
+        if self.fol_verifier is not None:
+            return
+        if not self._fol_metadata_path or not os.path.exists(self._fol_metadata_path):
+            print(f"[FOL Warning] FOL metadata path not found: {self._fol_metadata_path}")
+            return
+
+        try:
+            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
+
+            with open(self._fol_metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            for item in data:
+                if item.get("fol_metadata"):
+                    sample_id = (
+                        item.get("sample_id")
+                        or item.get("extra_info", {}).get("index")
+                        or item.get("extra_info", {}).get("id")
+                    )
+                    if sample_id is not None:
+                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
+                            item["fol_metadata"]
+                        )
+
+            self.fol_verifier = FOLVerifier()
+            self.step_prm_fn = get_prm_fn(
+                "fol",
+                verifier=self.fol_verifier,
+                metadata_map=self.fol_metadata_map,
+            )
+            self._fol_metadata_loaded = True
+            print(f"[FOL] Loaded {len(self.fol_metadata_map)} FOL metadata entries")
+
+        except Exception as e:
+            print(f"[FOL Warning] Failed to load FOL metadata: {e}")
+
+    def _get_sample_id(self, tree_idx: int, gen_batch: DataProto) -> str:
+        """Get sample_id for a given tree index."""
+        if gen_batch.non_tensor_batch is not None:
+            sample_ids = gen_batch.non_tensor_batch.get("sample_id", [])
+            if sample_ids and tree_idx < len(sample_ids):
+                return str(sample_ids[tree_idx])
+            extra_info = gen_batch.non_tensor_batch.get("extra_info", [])
+            if extra_info and tree_idx < len(extra_info):
+                sample_id = extra_info[tree_idx].get("index") or extra_info[tree_idx].get("id")
+                if sample_id is not None:
+                    return str(sample_id)
+        return str(tree_idx)
 
     # ------------------------------------------------------------------
     # SamplingStrategy interface
@@ -109,6 +183,10 @@ class ParallelMCTSStrategy(SamplingStrategy):
         device = gen_batch.batch["input_ids"].device
 
         with _timer("parallel_mcts", timing_raw):
+            # Load FOL metadata on first run if prm='fol'
+            if self._prm_type == "fol":
+                self._load_fol_metadata(gen_batch)
+
             roots = self._init_roots(gen_batch, device)
             batch_size = len(roots)
             node_counts: List[int] = [1] * batch_size
@@ -119,7 +197,7 @@ class ParallelMCTSStrategy(SamplingStrategy):
                 selected = self._select_nodes(roots, depth_counts)
                 if not selected:
                     break
-                self._expand(selected, generate_fn, device, node_counts, depth_counts, leaves)
+                self._expand(selected, generate_fn, device, node_counts, depth_counts, leaves, gen_batch)
                 if all(len(leaves[i]) >= self.pass_k for i in range(batch_size)):
                     break
 
@@ -197,10 +275,11 @@ class ParallelMCTSStrategy(SamplingStrategy):
         node_counts: List[int],
         depth_counts: List[Dict[int, int]],
         leaves: List[List[MCTSNode]],
+        gen_batch: DataProto,
     ) -> None:
         branch_batch = self._pack_dataproto(nodes, self.max_children, device)
         branch_output = generate_fn(branch_batch)
-        self._unpack_and_attach(nodes, branch_output, self.max_children, node_counts, depth_counts, leaves)
+        self._unpack_and_attach(nodes, branch_output, self.max_children, node_counts, depth_counts, leaves, gen_batch)
 
     def _pack_dataproto(
         self,
@@ -242,6 +321,7 @@ class ParallelMCTSStrategy(SamplingStrategy):
         node_counts: List[int],
         depth_counts: List[Dict[int, int]],
         leaves: List[List[MCTSNode]],
+        gen_batch: DataProto,
     ) -> None:
         """Decode generate_fn output and attach children to parent nodes."""
         responses = branch_output.batch["responses"]  # [N*n_expand (* rollout_n), resp_len]
@@ -292,9 +372,18 @@ class ParallelMCTSStrategy(SamplingStrategy):
                     depth_counts[tree_idx].get(node.depth + 1, 0) + 1
                 )
 
+                # Compute PRM reward
                 try:
-                    r = self.step_prm_fn(step_text)
+                    if self.fol_verifier is not None and str(tree_idx) in self.fol_metadata_map:
+                        # FOL verification mode
+                        sample_id = self._get_sample_id(tree_idx, gen_batch)
+                        r = self.step_prm_fn(step_text, sample_id=sample_id)
+                    else:
+                        # Fallback to format check
+                        r = format_step_reward(step_text)
                 except NotImplementedError:
+                    r = 0.0
+                except Exception:
                     r = 0.0
 
                 child = MCTSNode(
@@ -364,11 +453,27 @@ class ParallelMCTSStrategy(SamplingStrategy):
             for leaf in tree_leaves:
                 terminal_text = leaf.accumulated_text
                 if gt is not None and terminal_text:
-                    try:
-                        score, _ = compute_score(terminal_text, gt)
-                        leaf.is_correct = float(score) == 1.0
-                    except Exception:
-                        leaf.is_correct = False
+                    # Try FOL verification first
+                    if self.fol_verifier is not None and str(i) in self.fol_metadata_map:
+                        try:
+                            sample_id = self._get_sample_id(i, gen_batch)
+                            metadata = self.fol_metadata_map[str(sample_id)]
+                            reward = self.fol_verifier.verify_step(metadata, terminal_text, use_llm=True)
+                            leaf.is_correct = (reward == 1.0)
+                        except Exception:
+                            # Fallback to compute_score
+                            try:
+                                score, _ = compute_score(terminal_text, gt)
+                                leaf.is_correct = float(score) == 1.0
+                            except Exception:
+                                leaf.is_correct = False
+                    else:
+                        # Fallback to compute_score
+                        try:
+                            score, _ = compute_score(terminal_text, gt)
+                            leaf.is_correct = float(score) == 1.0
+                        except Exception:
+                            leaf.is_correct = False
                 else:
                     leaf.is_correct = None
                 if leaf.is_correct:

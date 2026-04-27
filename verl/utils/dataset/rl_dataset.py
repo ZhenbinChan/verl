@@ -90,6 +90,7 @@ class RLHFDataset(Dataset):
         self.chat_template_func = config.get("chat_template_func", None)
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
+        self.prompt_instruction = config.get("data.prompt_instruction", None)
         self.serialize_dataset = False
         self._download()
         self._read_files_and_tokenize()
@@ -137,7 +138,7 @@ class RLHFDataset(Dataset):
 
     def _build_messages(self, example: dict):
         messages: list = example.pop(self.prompt_key)
-
+        
         if self.image_key in example or self.video_key in example:
             for message in messages:
                 content = message["content"]
@@ -160,6 +161,13 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
         messages = self._build_messages(row_dict)
+        # Inject instruction into the last user message if configured
+        if self.prompt_instruction is not None:
+            for msg in reversed(messages):
+                if msg["role"] == "user":
+                    msg["content"] = self.prompt_instruction + "\n\n" + msg["content"] 
+                    break
+
         model_inputs = {}
 
         if self.processor is not None:

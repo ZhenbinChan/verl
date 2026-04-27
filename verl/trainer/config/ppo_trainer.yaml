@@ -16,7 +16,9 @@ data:
   truncation: error
   image_key: images
   video_key: videos
-  custom_cls:
+  prompt_instruction: null  # instruction to append to prompts at training time
+
+custom_cls:
       path: null
       name: null
 
@@ -278,6 +280,10 @@ trainer:
     random_pick: false          # random node selection (true) or UCT (false)
     selection_policy: importance_sampling  # greedy | importance_sampling
     prm: format                 # process reward model: format | fol
+    # FOL verification settings (used when prm: fol)
+    fol_metadata_path: null     # path to FOL metadata JSON file
+    fol_verify_max_retries: 3   # max retries for Z3 code correction
+    fol_verify_timeout: 10.0    # Z3 execution timeout in seconds
     use_weighted_value: false    # use weighted update for accumulated_value
     normalize_style: step        # step | token normalization for accumulated_value
     average_one_generation: false

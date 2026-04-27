@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from verl.utils.fol_verifier import FOLMetadata, FOLVerifier
 
 
 def format_step_reward(step_text: str) -> float:
@@ -11,31 +14,87 @@ def format_step_reward(step_text: str) -> float:
     return 1.0 if (len(premises) >= 1 and len(conclusions) == 1) else 0.0
 
 
-def fol_step_reward(step_text: str) -> float:
+def fol_step_reward(
+    step_text: str,
+    *,
+    metadata: "FOLMetadata",
+    verifier: "FOLVerifier",
+) -> float:
     """FOL/Z3-based step verification reward.
 
-    Interface for future implementation. To implement:
-      1. Parse premises and conclusion from step_text.
-      2. Encode them as FOL formulas.
-      3. Use Z3 to verify whether the conclusion follows from the premises.
-      4. Return 1.0 if valid, 0.0 otherwise.
+    Verifies the logical relationship between <premise> and <conclusion> tags.
+
+    Args:
+        step_text: The step text to verify.
+        metadata: Pre-computed FOL metadata (context, declarations, etc.)
+        verifier: FOL verifier instance.
+
+    Returns:
+        1.0 if unsat (conclusion follows from premises), 0.0 otherwise.
     """
-    raise NotImplementedError(
-        "FOL reward is not yet implemented. "
-        "Implement fol_step_reward() in verl/trainer/ppo/sampling/mcts_prm.py."
-    )
+    try:
+        return verifier.verify_step(metadata, step_text, use_llm=True)
+    except Exception:
+        return 0.0
 
 
-def get_prm_fn(prm_type: str) -> Callable[[str], float]:
+def fol_step_reward_with_context(
+    step_text: str,
+    *,
+    sample_id: str,
+    sample_metadata_map: Dict[str, "FOLMetadata"],
+    verifier: "FOLVerifier",
+) -> float:
+    """FOL step reward with sample_id lookup.
+
+    Used for batch verification where sample metadata is looked up by sample_id.
+    """
+    if sample_id not in sample_metadata_map:
+        return 0.0
+    metadata = sample_metadata_map[sample_id]
+    return fol_step_reward(step_text, metadata=metadata, verifier=verifier)
+
+
+def get_prm_fn(
+    prm_type: str,
+    **kwargs,
+) -> Callable:
     """Return the PRM scoring function for the given type.
+
+    Args:
+        prm_type: Type of PRM ('format' or 'fol').
+        **kwargs: Additional parameters for FOL PRM:
+            - verifier: FOLVerifier instance (required for 'fol')
+            - metadata_map: Dict[str, FOLMetadata] for batch lookup
 
     Supported:
         'format': checks <step>/<premise>/<conclusion> tag structure.
-        'fol':    FOL/Z3 verification (not yet implemented).
+        'fol':    FOL/Z3 verification (requires verifier in kwargs).
     """
     if prm_type == "format":
         return format_step_reward
+
     elif prm_type == "fol":
-        return fol_step_reward
+        if "verifier" not in kwargs:
+            raise ValueError(
+                "FOL PRM requires 'verifier' parameter (FOLVerifier instance)"
+            )
+        verifier = kwargs["verifier"]
+
+        if "metadata_map" in kwargs:
+            # Batch mode: look up metadata by sample_id
+            metadata_map = kwargs["metadata_map"]
+            return lambda step_text, sample_id=None: fol_step_reward_with_context(
+                step_text,
+                sample_id=sample_id,
+                sample_metadata_map=metadata_map,
+                verifier=verifier,
+            )
+        else:
+            # Single sample mode
+            return lambda step_text, metadata=None: fol_step_reward(
+                step_text, metadata=metadata, verifier=verifier
+            )
+
     else:
         raise ValueError(f"Unknown PRM type: {prm_type!r}. Supported: 'format', 'fol'")

@@ -5,8 +5,8 @@ import re
 def compute_score(solution_str, ground_truth):
     # 匹配 \boxed{A} 或 \boxed{{B}} 等情况
     matches = re.findall(r'\\boxed\{\{?([A-Za-z])\}?\}', solution_str)
-    # print(f"Ground Truth: {ground_truth}")
-    # print(f"Solution String: {solution_str}")
+    print(f"Ground Truth: {ground_truth}")
+    print(f"Solution String: {solution_str}")
     if not matches:
         # 尝试抽取 Option(C) 中的 C
         matches = re.findall(r'Option\(\s*([A-Za-z])\s*\)', solution_str)

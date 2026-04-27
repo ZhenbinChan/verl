@@ -53,7 +53,7 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         from . import geo3k
 
         res = geo3k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lucasmccabe/logiqa"]:
+    elif data_source in ["lucasmccabe/logiqa", "reclor", "logiqa2"]:
         from . import logi
 
         res = logi.compute_score(solution_str, ground_truth)
