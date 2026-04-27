@@ -1564,6 +1564,18 @@ class RayPPOTrainer:
                                 tokenizer=self.tokenizer,
                                 use_xml=use_xml,
                                 ext_prm_max_workers=tree_ext_prm_max_workers,
+                                penalty_on_bad_format=bool(
+                                    reward_cfg.get(
+                                        "penalty_on_bad_format",
+                                        algo_cfg.get("penalty_on_bad_format", False),
+                                    )
+                                ),
+                                penalty_score=float(
+                                    reward_cfg.get(
+                                        "penalty_score",
+                                        algo_cfg.get("penalty_score", 0.0),
+                                    )
+                                ),
                             )
 
                             # Get compute_score function for leaf evaluation

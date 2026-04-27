@@ -40,6 +40,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import torch
 
+from verl.utils.fol_utils.common import check_step_format_fol
 from verl.utils.step_splitter import default_split_fn, get_split_fn
 
 # ---------------------------------------------------------------------------
@@ -204,6 +205,8 @@ class TreeManager:
         split_fn: Optional[Callable] = None,
         use_xml: bool = False,
         ext_prm_max_workers: Optional[int] = None,
+        penalty_on_bad_format: bool = False,
+        penalty_score: float = 0.0,
     ):
         """
         Args:
@@ -216,6 +219,8 @@ class TreeManager:
         self.config = config
         self.tokenizer = tokenizer
         self.use_xml = use_xml
+        self.penalty_on_bad_format = bool(penalty_on_bad_format)
+        self.penalty_score = float(penalty_score)
 
         # Derive split_fn from use_xml when not explicitly provided
         if split_fn is not None:
@@ -260,6 +265,14 @@ class TreeManager:
     def _new_node_id(self) -> int:
         self._node_counter += 1
         return self._node_counter
+
+    def _should_penalize_step_format(self, step_text: str) -> bool:
+        """Whether a per-step external PRM score should use the tree format penalty."""
+        return bool(
+            self.use_xml
+            and self.penalty_on_bad_format
+            and not check_step_format_fol(step_text or "")
+        )
 
     # ------------------------------------------------------------------
     # Step 1: Initialize Trees
@@ -465,6 +478,8 @@ class TreeManager:
                     # Find the node containing this position
                     for node in orig_nodes:
                         if node.token_start <= pos < node.token_end:
+                            if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
+                                score = self.penalty_score
                             node.ext_prm_scores[prm_name] = float(score)
                             break
 
@@ -933,6 +948,18 @@ class TreeManager:
         def _run_task(task):
             node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
             reward_fn = ext_prm_fns[prm_name]
+            if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
+                debug = None
+                debug = {
+                    "format_failed_closed": True,
+                    "judge_usage": {
+                        "calls": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                }
+                return node, prm_name, self.penalty_score, debug
             kwargs = {"extra_info": extra_info}
             if prm_name == "fol" and fol_shared_state is not None:
                 kwargs["fol_shared_state"] = fol_shared_state
