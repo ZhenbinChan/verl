@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -104,6 +105,7 @@ class TreeNode:
     # Metadata
     tree_idx: int = 0           # which tree this node belongs to
     is_forked: bool = False     # whether this node was created by forking
+    process_rewardable: bool = True  # false for non-reasoning terminal answer/blank segments
     finish_reason: Optional[str] = None  # "stop" (EOS) / "length" (token/step limit) / "repetition" (loop detected)
 
     @property
@@ -237,6 +239,7 @@ class TreeManager:
         self.weighted_value_style = config.get("tree_weighted_value_style", "sqrt")
         self.overall_norm_style = config.get("tree_overall_norm_style", "token")
         self.step_reward_mode = config.get("tree_step_reward_mode", "la")
+        self.overlap_ext_prm = bool(config.get("tree_overlap_ext_prm", False))
 
         # Anti-degeneration parameters (ref: THUNLP/TreeRL)
         # Inner repetition penalty applies a heuristic penalty to nodes whose step text contains repeated patterns,
@@ -272,6 +275,20 @@ class TreeManager:
             self.use_xml
             and self.penalty_on_bad_format
             and not check_step_format_fol(step_text or "")
+        )
+
+    @staticmethod
+    def _is_terminal_answer_segment(step_text: str) -> bool:
+        """Whether a generated segment is final-answer text rather than a reasoning step."""
+        text = (step_text or "").strip()
+        if not text:
+            return True
+        return bool(
+            re.fullmatch(
+                r"(?:final answer\s*:\s*)?\$?\s*\\boxed\{\{?[^{}]+\}?\}\s*\$?[\.\。]*",
+                text,
+                flags=re.IGNORECASE,
+            )
         )
 
     # ------------------------------------------------------------------
@@ -653,7 +670,7 @@ class TreeManager:
         self,
         branch_output: DataProto,
         fork_info_list: List[dict],
-    ) -> None:
+    ) -> List[TreeNode]:
         """Attach generated branch responses back to the trees.
 
         Each branch output becomes a new leaf path from the forking point.
@@ -662,9 +679,13 @@ class TreeManager:
         Args:
             branch_output: DataProto from generate_sequences with branch continuations.
             fork_info_list: Metadata from prepare_branch_inputs (one per forking point).
+
+        Returns:
+            The newly created forked nodes, in creation order.
         """
         responses = branch_output.batch["responses"]           # (num_branches, resp_len)
         attention_mask = branch_output.batch["attention_mask"]  # (num_branches, total_len)
+        new_nodes: list[TreeNode] = []
 
         # Determine how many branches per fork point
         num_forks = len(fork_info_list)
@@ -756,10 +777,14 @@ class TreeManager:
                     token_end=step_token_end,
                     tree_idx=info["tree_idx"],
                     is_forked=True,
+                    process_rewardable=not (
+                        self.use_xml and self._is_terminal_answer_segment(step_text)
+                    ),
                 )
 
                 prev_node.children.append(new_node)
                 tree.all_nodes.append(new_node)
+                new_nodes.append(new_node)
                 prev_node = new_node
                 branch_step_count += 1
 
@@ -779,9 +804,13 @@ class TreeManager:
                 else:
                     prev_node.finish_reason = "length"
 
+        return new_nodes
+
     def evaluate_branch_ext_prm(
         self,
         ext_prm_fns: Optional[dict] = None,
+        target_nodes: Optional[List[TreeNode]] = None,
+        reset_profile: bool = True,
     ) -> None:
         """Evaluate external PRM scores for forked (branch) nodes.
 
@@ -796,9 +825,20 @@ class TreeManager:
                 Same as StepRewardManager reward functions.
                 If None, forked nodes get no external PRM scores (backward
                 compatible — they simply won't contribute to the bigpool).
+            target_nodes: Optional subset of forked nodes to evaluate.  Used by
+                the per-round overlap path without changing branch generation.
+            reset_profile: Whether to reset accumulated external PRM metrics.
         """
         if not ext_prm_fns:
             return
+
+        target_nodes_by_tree: dict[int, list[TreeNode]] = {}
+        if target_nodes is not None:
+            for node in target_nodes:
+                if node is not None and node.is_forked:
+                    target_nodes_by_tree.setdefault(node.tree_idx, []).append(node)
+            if not target_nodes_by_tree:
+                return
 
         # Collect all PRM names from the original-chain nodes
         prm_names: set = set()
@@ -815,36 +855,39 @@ class TreeManager:
         if not eval_prms:
             return
 
-        self.ext_prm_profile = {
-            "tasks_total": 0,
-            "fol_tasks": 0,
-            "fol_judge_calls": 0,
-            "fol_judge_prompt_tokens": 0,
-            "fol_judge_completion_tokens": 0,
-            "fol_judge_total_tokens": 0,
-            "fol_translation_s_sum": 0.0,
-            "fol_translation_s_max": 0.0,
-            "fol_correct_loop_s_sum": 0.0,
-            "fol_correct_loop_s_max": 0.0,
-            "fol_z3_run_s_sum": 0.0,
-            "fol_z3_run_s_max": 0.0,
-            "fol_correction_llm_s_sum": 0.0,
-            "fol_correction_llm_s_max": 0.0,
-            "fol_correction_z3_s_sum": 0.0,
-            "fol_correction_z3_s_max": 0.0,
-            "fol_verify_step_s_sum": 0.0,
-            "fol_verify_step_s_max": 0.0,
-            "fol_prepare_trees": 0,
-            "fol_prepare_unique": 0,
-            "fol_prepare_failed": 0,
-            "fol_prepare_s_sum": 0.0,
-            "fol_prepare_s_max": 0.0,
-        }
+        if reset_profile or not self.ext_prm_profile:
+            self.ext_prm_profile = {
+                "tasks_total": 0,
+                "fol_tasks": 0,
+                "fol_judge_calls": 0,
+                "fol_judge_prompt_tokens": 0,
+                "fol_judge_completion_tokens": 0,
+                "fol_judge_total_tokens": 0,
+                "fol_translation_s_sum": 0.0,
+                "fol_translation_s_max": 0.0,
+                "fol_correct_loop_s_sum": 0.0,
+                "fol_correct_loop_s_max": 0.0,
+                "fol_z3_run_s_sum": 0.0,
+                "fol_z3_run_s_max": 0.0,
+                "fol_correction_llm_s_sum": 0.0,
+                "fol_correction_llm_s_max": 0.0,
+                "fol_correction_z3_s_sum": 0.0,
+                "fol_correction_z3_s_max": 0.0,
+                "fol_verify_step_s_sum": 0.0,
+                "fol_verify_step_s_max": 0.0,
+                "fol_prepare_trees": 0,
+                "fol_prepare_unique": 0,
+                "fol_prepare_failed": 0,
+                "fol_prepare_s_sum": 0.0,
+                "fol_prepare_s_max": 0.0,
+            }
         tasks = []
         tree_inputs = []
 
         for tree in self.trees:
             tidx = tree.tree_idx
+            if target_nodes is not None and tidx not in target_nodes_by_tree:
+                continue
             # Get prompt text for this tree
             prompt_text = ""
             if self._prompt_ids_list and tidx < len(self._prompt_ids_list):
@@ -882,8 +925,8 @@ class TreeManager:
                 tree_prepare_keys[tidx] = prepare_key
                 unique_prepare_inputs.setdefault(prepare_key, (prompt_text, extra_info))
 
-            self.ext_prm_profile["fol_prepare_trees"] = len(tree_inputs)
-            self.ext_prm_profile["fol_prepare_unique"] = len(unique_prepare_inputs)
+            self.ext_prm_profile["fol_prepare_trees"] += len(tree_inputs)
+            self.ext_prm_profile["fol_prepare_unique"] += len(unique_prepare_inputs)
 
             def _prepare_one(item):
                 prepare_key, (prompt_text, extra_info) = item
@@ -895,8 +938,6 @@ class TreeManager:
                 )
                 return prepare_key, shared_state, time.perf_counter() - start
 
-            prepared_states = {}
-
             def _record_prepare_result(prepare_key, shared_state, elapsed):
                 prepared_states[prepare_key] = shared_state
                 self.ext_prm_profile["fol_prepare_s_sum"] += elapsed
@@ -907,6 +948,7 @@ class TreeManager:
                 if shared_state is None:
                     self.ext_prm_profile["fol_prepare_failed"] += 1
 
+            prepared_states = {}
             prepare_items = list(unique_prepare_inputs.items())
             if self.ext_prm_max_workers <= 1 or len(prepare_items) <= 1:
                 for item in prepare_items:
@@ -922,8 +964,11 @@ class TreeManager:
 
         for tree, tidx, prompt_text, extra_info in tree_inputs:
             fol_shared_state = fol_shared_state_by_tree_idx.get(tidx)
-            for node in tree.all_nodes:
+            nodes_to_scan = target_nodes_by_tree.get(tidx, tree.all_nodes)
+            for node in nodes_to_scan:
                 if not node.is_forked:
+                    continue
+                if not node.process_rewardable:
                     continue
                 for prm_name in eval_prms:
                     if prm_name in node.ext_prm_scores:
@@ -943,7 +988,7 @@ class TreeManager:
 
         if not tasks:
             return
-        self.ext_prm_profile["tasks_total"] = len(tasks)
+        self.ext_prm_profile["tasks_total"] += len(tasks)
 
         def _run_task(task):
             node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
@@ -1439,7 +1484,7 @@ class TreeManager:
                 node_ids = []
                 token_offset = 0
                 for node in path:
-                    if node.token_ids and prm_name in node.ext_prm_scores:
+                    if node.token_ids and node.process_rewardable and prm_name in node.ext_prm_scores:
                         step_end_pos = token_offset + len(node.token_ids) - 1
                         scores.append((step_end_pos, node.ext_prm_scores[prm_name]))
                         node_ids.append(node.node_id)
@@ -1487,6 +1532,7 @@ class TreeManager:
             f"  L (expansion rounds)     = {L}",
             f"  mask_tail_ratio          = {self.mask_tail_ratio}",
             f"  max_steps_per_path       = {self.max_steps_per_path}",
+            f"  overlap_ext_prm          = {self.overlap_ext_prm}",
             f"  inner_repetition_penalty = {self.inner_repetition_penalty}",
             f"  repetition_pattern_len   = {self.repetition_pattern_length}",
             f"  repetition_threshold     = {self.repetition_threshold}",
@@ -1618,45 +1664,77 @@ class TreeManager:
             "initialize_s": 0.0,
             "branch_generation_s": 0.0,
             "ext_prm_eval_s": 0.0,
+            "ext_prm_wait_s": 0.0,
             "evaluate_leaves_s": 0.0,
             "normalize_backprop_s": 0.0,
             "build_flat_batch_s": 0.0,
         }
-
         # 1. Initialize trees (also maps external PRM scores to original-chain nodes)
         start = time.perf_counter()
         self.initialize_trees(rollout_output)
         self.pipeline_profile["initialize_s"] += time.perf_counter() - start
 
-        # 2. Iterative expansion
-        for round_idx in range(self.tree_rounds):
-            start = time.perf_counter()
-            forking_points = self.select_forking_points()
-            if not forking_points:
-                self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
-                break
+        ext_prm_executor = None
+        ext_prm_futures = []
+        overlap_ext_prm = bool(
+            self.overlap_ext_prm
+            and ext_prm_fns
+            and self.tree_rounds > 1
+        )
+        if overlap_ext_prm:
+            self.ext_prm_profile = {}
+            ext_prm_executor = ThreadPoolExecutor(max_workers=1)
 
-            branch_batch, fork_info = self.prepare_branch_inputs(forking_points)
-            if branch_batch is None:
-                self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
-                break
-
-            # Repeat for T branches per fork
-            if self.tree_branches > 1:
-                branch_batch = branch_batch.repeat(
-                    repeat_times=self.tree_branches, interleave=True
+            def _eval_new_branch_nodes(nodes: List[TreeNode]) -> float:
+                start_eval = time.perf_counter()
+                self.evaluate_branch_ext_prm(
+                    ext_prm_fns,
+                    target_nodes=nodes,
+                    reset_profile=False,
                 )
-                # Must match interleave order: [A,A,B,B] not [A,B,A,B]
-                fork_info = [info for info in fork_info for _ in range(self.tree_branches)]
+                return time.perf_counter() - start_eval
 
-            branch_output = generate_fn(branch_batch)
-            self.commit_branches(branch_output, fork_info)
-            self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
+        # 2. Iterative expansion
+        try:
+            for round_idx in range(self.tree_rounds):
+                start = time.perf_counter()
+                forking_points = self.select_forking_points()
+                if not forking_points:
+                    self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
+                    break
 
-        # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
-        start = time.perf_counter()
-        self.evaluate_branch_ext_prm(ext_prm_fns)
-        self.pipeline_profile["ext_prm_eval_s"] += time.perf_counter() - start
+                branch_batch, fork_info = self.prepare_branch_inputs(forking_points)
+                if branch_batch is None:
+                    self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
+                    break
+
+                # Repeat for T branches per fork
+                if self.tree_branches > 1:
+                    branch_batch = branch_batch.repeat(
+                        repeat_times=self.tree_branches, interleave=True
+                    )
+                    # Must match interleave order: [A,A,B,B] not [A,B,A,B]
+                    fork_info = [info for info in fork_info for _ in range(self.tree_branches)]
+
+                branch_output = generate_fn(branch_batch)
+                new_nodes = self.commit_branches(branch_output, fork_info)
+                if overlap_ext_prm and new_nodes:
+                    ext_prm_futures.append(ext_prm_executor.submit(_eval_new_branch_nodes, new_nodes))
+                self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
+
+            # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
+            if overlap_ext_prm:
+                start = time.perf_counter()
+                for future in ext_prm_futures:
+                    self.pipeline_profile["ext_prm_eval_s"] += future.result()
+                self.pipeline_profile["ext_prm_wait_s"] += time.perf_counter() - start
+            else:
+                start = time.perf_counter()
+                self.evaluate_branch_ext_prm(ext_prm_fns)
+                self.pipeline_profile["ext_prm_eval_s"] += time.perf_counter() - start
+        finally:
+            if ext_prm_executor is not None:
+                ext_prm_executor.shutdown(wait=True)
 
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)

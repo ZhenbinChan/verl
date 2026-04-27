@@ -1678,6 +1678,7 @@ class RayPPOTrainer:
                                 "initialize_s",
                                 "branch_generation_s",
                                 "ext_prm_eval_s",
+                                "ext_prm_wait_s",
                                 "evaluate_leaves_s",
                                 "normalize_backprop_s",
                                 "build_flat_batch_s",
