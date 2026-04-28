@@ -496,6 +496,9 @@ def _render_structured_implication(
     )
     if unknown_identifier_errors:
         if debug_info is not None:
+            debug_info["invalid_translation_reason"] = _invalid_translation_reason_from_unknown_identifiers(
+                unknown_identifier_errors
+            )
             debug_info["unknown_translation_identifiers"] = unknown_identifier_errors
         return _build_fail_closed_code(full_declarations, "FAILED_INVALID_TRANSLATION")
     leaked_sources = _find_exact_conclusion_leaks(
@@ -545,6 +548,29 @@ def _identifier_set(expr: str) -> set[str]:
     return names - _Z3_EXPR_OPERATOR_NAMES
 
 
+def _quantifier_bound_identifier_set(expr: str) -> set[str]:
+    """Return identifiers used as ForAll/Exists bound variables."""
+    bound_names: set[str] = set()
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return bound_names
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"ForAll", "Exists"} or not node.args:
+            continue
+        var_arg = node.args[0]
+        if isinstance(var_arg, (ast.List, ast.Tuple)):
+            for elt in var_arg.elts:
+                if isinstance(elt, ast.Name):
+                    bound_names.add(elt.id)
+        elif isinstance(var_arg, ast.Name):
+            bound_names.add(var_arg.id)
+    return bound_names
+
+
 def _collect_assignment_target_names(target: ast.AST, names: set[str]) -> None:
     """Collect Python names bound by assignment targets in rendered Z3 code."""
     if isinstance(target, ast.Name):
@@ -583,8 +609,39 @@ def _collect_unknown_identifier_errors(
         for idx, expr in enumerate(expressions):
             unknown = sorted(_identifier_set(expr) - declared_names)
             if unknown:
-                errors.append({"source": source, "index": idx, "expr": expr, "unknown_identifiers": unknown})
+                unknown_bound = sorted(set(unknown) & _quantifier_bound_identifier_set(expr))
+                error_type = "undeclared_quantifier_variable" if unknown_bound else "unknown_identifier"
+                errors.append({
+                    "source": source,
+                    "index": idx,
+                    "expr": expr,
+                    "error_type": error_type,
+                    "unknown_identifiers": unknown,
+                    "undeclared_quantifier_variables": unknown_bound,
+                })
     return errors
+
+
+def _invalid_translation_reason_from_unknown_identifiers(errors: list[dict[str, object]]) -> str:
+    """Summarize unknown-identifier preflight errors for debug output."""
+    for error in errors:
+        if error.get("error_type") == "undeclared_quantifier_variable":
+            return "undeclared_quantifier_variable"
+    return "unknown_identifier"
+
+
+def _classify_z3_runtime_error(error: object) -> Optional[str]:
+    """Classify Z3 execution failures that escaped preflight checks."""
+    if not error:
+        return None
+    text = str(error)
+    if "Sort mismatch" in text:
+        return "z3_sort_mismatch"
+    if "NameError" in text or "is not defined" in text:
+        return "z3_name_error"
+    if "Z3Exception" in text:
+        return "z3_runtime_error"
+    return None
 
 
 def _implication_payload_repair_is_conservative(original: dict, repaired: dict) -> bool:
@@ -1190,6 +1247,9 @@ class FOLEngine:
                 debug_info["verify_step_s"] = time.perf_counter() - verify_t0
                 debug_info["z3_output"] = result.get("output")
                 debug_info["z3_error"] = result.get("error")
+                runtime_reason = _classify_z3_runtime_error(result.get("error"))
+                if runtime_reason and not debug_info.get("invalid_translation_reason"):
+                    debug_info["invalid_translation_reason"] = runtime_reason
 
             # Step 3: Parse result
             if result["success"] and result.get("output"):

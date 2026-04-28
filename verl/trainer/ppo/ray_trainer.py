@@ -1921,6 +1921,13 @@ class RayPPOTrainer:
                                         f"\nStep {step_idx}: cache_hit={cache_hit}, "
                                         f"correction_attempts={correction_attempts}"
                                     )
+                                    invalid_reason = step_debug.get("invalid_translation_reason")
+                                    if invalid_reason:
+                                        print(f"[FOL Invalid Reason] {invalid_reason}")
+                                    unknown_identifiers = step_debug.get("unknown_translation_identifiers")
+                                    if unknown_identifiers:
+                                        print("[FOL Unknown Identifiers]")
+                                        print(json.dumps(unknown_identifiers, ensure_ascii=False, indent=2))
                                     translation_response = step_debug.get("translation_response")
                                     if translation_response:
                                         print("[FOL Translation Response]")
