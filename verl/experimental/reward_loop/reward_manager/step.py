@@ -114,6 +114,12 @@ class StepRewardManager(RewardManagerBase):
             algo_cfg.get("fol_judge_use_outlines", False),
         )
         self.api_config["fol_judge_use_outlines"] = bool(fol_judge_use_outlines)
+        fol_format_failed_score = reward_cfg.get(
+            "fol_format_failed_score",
+            algo_cfg.get("fol_format_failed_score", None),
+        )
+        if fol_format_failed_score is not None:
+            self.api_config["fol_format_failed_score"] = float(fol_format_failed_score)
 
         # Step reward type: explicit parameter > reward config > algorithm config > default "random"
         if step_reward_type is not None: # explicit parameter only exists @ unit tests

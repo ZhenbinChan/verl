@@ -257,7 +257,7 @@ def compute_step_reward_fol(
     Configurable via api_config:
       fol_preprocess: "direct" | "structured"
       fol_translation: "implication" | "assertion"
-      max_tries, timeout, cumulative
+      max_tries, timeout, cumulative, fol_format_failed_score
     """
     # _t0 = time.time()
     # _tid = threading.current_thread().name
@@ -272,13 +272,15 @@ def compute_step_reward_fol(
             "z3_error": None,
             "judge_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
+        fol_format_failed_score = float((api_config or {}).get("fol_format_failed_score", 0.0))
 
         # Format precheck: if the step contains <step> but has bad format
         # (missing <premise>/<conclusion>, mismatched tags, etc.), skip the
-        # expensive FOL judge call and return 0.0 directly.
+        # expensive FOL judge call and return the configured FOL format score.
         if "<step>" in step_text and not check_step_format_fol(step_text):
             debug_info["format_failed_closed"] = True
-            return {"score": 0.0, "debug": debug_info} if return_debug else 0.0
+            debug_info["format_failed_score"] = fol_format_failed_score
+            return {"score": fol_format_failed_score, "debug": debug_info} if return_debug else fol_format_failed_score
         if _has_student_premise_conclusion_duplicate(step_text):
             debug_info["student_premise_conclusion_duplicate"] = True
             return {"score": 0.0, "debug": debug_info} if return_debug else 0.0

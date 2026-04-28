@@ -128,6 +128,12 @@ class TreeRewardManager(RewardManagerBase):
             algo_cfg_fol.get("fol_judge_use_outlines", False),
         )
         self.api_config["fol_judge_use_outlines"] = bool(fol_judge_use_outlines)
+        fol_format_failed_score = reward_cfg_fol.get(
+            "fol_format_failed_score",
+            algo_cfg_fol.get("fol_format_failed_score", None),
+        )
+        if fol_format_failed_score is not None:
+            self.api_config["fol_format_failed_score"] = float(fol_format_failed_score)
 
         # Step reward type: explicit parameter > reward config > algorithm config > None
         if step_reward_type is not None:
@@ -207,6 +213,12 @@ class TreeRewardManager(RewardManagerBase):
         )
         self.penalty_score = float(
             reward_cfg.get("penalty_score", algo_cfg.get("penalty_score", 0.0))
+        )
+        self.defer_initial_ext_prm = bool(
+            config.get("trainer", {}).get(
+                "tree_defer_initial_ext_prm",
+                reward_cfg.get("tree_defer_initial_ext_prm", False),
+            )
         )
 
         max_workers = reward_cfg_fol.get(
@@ -374,6 +386,12 @@ class TreeRewardManager(RewardManagerBase):
                     reward_extra_info[f"{reward_type}_step_reward"] = penalty_rewards
                 reward_extra_info["process_reward_penalized"] = True
                 reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
+                return {"reward_score": score, "reward_extra_info": reward_extra_info}
+
+            # TreeManager can optionally compute original-chain external PRMs
+            # after initialization. This keeps the anti-hacking fast path above
+            # intact while allowing initial PRM calls to overlap branch generation.
+            if self.defer_initial_ext_prm:
                 return {"reward_score": score, "reward_extra_info": reward_extra_info}
 
             # Extract prompt text for reward functions that need it

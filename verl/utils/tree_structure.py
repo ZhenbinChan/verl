@@ -240,6 +240,7 @@ class TreeManager:
         self.overall_norm_style = config.get("tree_overall_norm_style", "token")
         self.step_reward_mode = config.get("tree_step_reward_mode", "la")
         self.overlap_ext_prm = bool(config.get("tree_overlap_ext_prm", False))
+        self.defer_initial_ext_prm = bool(config.get("tree_defer_initial_ext_prm", False))
 
         # Anti-degeneration parameters (ref: THUNLP/TreeRL)
         # Inner repetition penalty applies a heuristic penalty to nodes whose step text contains repeated patterns,
@@ -502,8 +503,6 @@ class TreeManager:
                     # Find the node containing this position
                     for node in orig_nodes:
                         if node.token_start <= pos < node.token_end:
-                            if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
-                                score = self.penalty_score
                             node.ext_prm_scores[prm_name] = float(score)
                             break
 
@@ -825,12 +824,14 @@ class TreeManager:
         ext_prm_fns: Optional[dict] = None,
         target_nodes: Optional[List[TreeNode]] = None,
         reset_profile: bool = True,
+        include_original: bool = False,
     ) -> None:
-        """Evaluate external PRM scores for forked (branch) nodes.
+        """Evaluate external PRM scores for tree nodes.
 
-        Original-chain nodes already have ext_prm_scores from
-        ``_map_ext_prm_to_nodes``.  This method fills in scores for
-        forked nodes so that every node on every leaf path has PRM data.
+        By default this fills in forked nodes only; original-chain nodes are
+        normally populated from RewardManager output via ``_map_ext_prm_to_nodes``.
+        When initial PRMs are deferred, ``include_original=True`` lets
+        TreeManager compute missing original-chain scores with the same code path.
 
         Args:
             ext_prm_fns: Dict mapping prm_name → reward_fn.
@@ -839,9 +840,11 @@ class TreeManager:
                 Same as StepRewardManager reward functions.
                 If None, forked nodes get no external PRM scores (backward
                 compatible — they simply won't contribute to the bigpool).
-            target_nodes: Optional subset of forked nodes to evaluate.  Used by
-                the per-round overlap path without changing branch generation.
+            target_nodes: Optional subset of nodes to evaluate.  Used by the
+                per-round overlap path and deferred original-chain PRM path.
             reset_profile: Whether to reset accumulated external PRM metrics.
+            include_original: Whether original-chain nodes are eligible for
+                evaluation when their PRM scores are missing.
         """
         if not ext_prm_fns:
             return
@@ -849,17 +852,23 @@ class TreeManager:
         target_nodes_by_tree: dict[int, list[TreeNode]] = {}
         if target_nodes is not None:
             for node in target_nodes:
-                if node is not None and node.is_forked:
+                if node is not None and (include_original or node.is_forked):
                     target_nodes_by_tree.setdefault(node.tree_idx, []).append(node)
             if not target_nodes_by_tree:
                 return
 
-        # Collect all PRM names from the original-chain nodes
         prm_names: set = set()
-        for tree in self.trees:
-            for node in tree.all_nodes:
-                if not node.is_forked:
-                    prm_names.update(node.ext_prm_scores.keys())
+        if include_original:
+            prm_names.update(ext_prm_fns.keys())
+        else:
+            # Collect all PRM names from the original-chain nodes. Forked-node
+            # PRM types should match the original-chain template when present.
+            for tree in self.trees:
+                for node in tree.all_nodes:
+                    if not node.is_forked:
+                        prm_names.update(node.ext_prm_scores.keys())
+            if not prm_names:
+                prm_names.update(ext_prm_fns.keys())
 
         if not prm_names:
             return
@@ -982,7 +991,7 @@ class TreeManager:
             fol_shared_state = fol_shared_state_by_tree_idx.get(tidx)
             nodes_to_scan = target_nodes_by_tree.get(tidx, tree.all_nodes)
             for node in nodes_to_scan:
-                if not node.is_forked:
+                if not include_original and not node.is_forked:
                     continue
                 if not node.process_rewardable:
                     continue
@@ -1013,9 +1022,12 @@ class TreeManager:
             node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
             reward_fn = ext_prm_fns[prm_name]
             if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
+                api_config = getattr(reward_fn, "keywords", {}).get("api_config") or {}
+                format_failed_score = float(api_config.get("fol_format_failed_score", 0.0))
                 debug = None
                 debug = {
                     "format_failed_closed": True,
+                    "format_failed_score": format_failed_score,
                     "judge_usage": {
                         "calls": 0,
                         "prompt_tokens": 0,
@@ -1023,7 +1035,7 @@ class TreeManager:
                         "total_tokens": 0,
                     },
                 }
-                return node, prm_name, self.penalty_score, debug
+                return node, prm_name, format_failed_score, debug
             kwargs = {"extra_info": extra_info}
             if prm_name == "fol" and fol_shared_state is not None:
                 kwargs["fol_shared_state"] = fol_shared_state
@@ -1581,6 +1593,7 @@ class TreeManager:
             f"  mask_tail_ratio          = {self.mask_tail_ratio}",
             f"  max_steps_per_path       = {self.max_steps_per_path}",
             f"  overlap_ext_prm          = {self.overlap_ext_prm}",
+            f"  defer_initial_ext_prm    = {self.defer_initial_ext_prm}",
             f"  inner_repetition_penalty = {self.inner_repetition_penalty}",
             f"  repetition_pattern_len   = {self.repetition_pattern_length}",
             f"  repetition_threshold     = {self.repetition_threshold}",
@@ -1724,6 +1737,8 @@ class TreeManager:
 
         ext_prm_executor = None
         ext_prm_futures = []
+        initial_ext_prm_executor = None
+        initial_ext_prm_future = None
         overlap_ext_prm = bool(
             self.overlap_ext_prm
             and ext_prm_fns
@@ -1741,6 +1756,32 @@ class TreeManager:
                     reset_profile=False,
                 )
                 return time.perf_counter() - start_eval
+
+        if self.defer_initial_ext_prm and ext_prm_fns:
+            original_nodes = [
+                node
+                for tree in self.trees
+                for node in tree.all_nodes
+                if not node.is_forked and node.process_rewardable
+            ]
+            if original_nodes:
+                if overlap_ext_prm:
+                    executor = ext_prm_executor
+                else:
+                    initial_ext_prm_executor = ThreadPoolExecutor(max_workers=1)
+                    executor = initial_ext_prm_executor
+
+                def _eval_original_nodes() -> float:
+                    start_eval = time.perf_counter()
+                    self.evaluate_branch_ext_prm(
+                        ext_prm_fns,
+                        target_nodes=original_nodes,
+                        reset_profile=True,
+                        include_original=True,
+                    )
+                    return time.perf_counter() - start_eval
+
+                initial_ext_prm_future = executor.submit(_eval_original_nodes)
 
         # 2. Iterative expansion
         try:
@@ -1771,6 +1812,11 @@ class TreeManager:
                 self.pipeline_profile["branch_generation_s"] += time.perf_counter() - start
 
             # 2.5. Evaluate external PRM on forked nodes (if evaluator provided)
+            if initial_ext_prm_future is not None:
+                start = time.perf_counter()
+                self.pipeline_profile["ext_prm_eval_s"] += initial_ext_prm_future.result()
+                self.pipeline_profile["ext_prm_wait_s"] += time.perf_counter() - start
+
             if overlap_ext_prm:
                 start = time.perf_counter()
                 for future in ext_prm_futures:
@@ -1778,11 +1824,16 @@ class TreeManager:
                 self.pipeline_profile["ext_prm_wait_s"] += time.perf_counter() - start
             else:
                 start = time.perf_counter()
-                self.evaluate_branch_ext_prm(ext_prm_fns)
+                self.evaluate_branch_ext_prm(
+                    ext_prm_fns,
+                    reset_profile=not bool(self.defer_initial_ext_prm),
+                )
                 self.pipeline_profile["ext_prm_eval_s"] += time.perf_counter() - start
         finally:
             if ext_prm_executor is not None:
                 ext_prm_executor.shutdown(wait=True)
+            if initial_ext_prm_executor is not None:
+                initial_ext_prm_executor.shutdown(wait=True)
 
         # 3. Evaluate + normalize + backpropagate + step-norm + reweight + step rewards
         #    Ref: github/THUNLP/TreeRL tree_node.py build_into_tree_format (line 352-368)

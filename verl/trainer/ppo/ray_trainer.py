@@ -1636,6 +1636,12 @@ class RayPPOTrainer:
                                 api_config["fol_judge_use_outlines"] = bool(fol_judge_use_outlines)
                                 cumulative = reward_cfg.get("fol_verify_with_cumulative_steps", algo_cfg.get("fol_verify_with_cumulative_steps", False))
                                 api_config["cumulative"] = bool(cumulative)
+                                fol_format_failed_score = reward_cfg.get(
+                                    "fol_format_failed_score",
+                                    algo_cfg.get("fol_format_failed_score", None),
+                                )
+                                if fol_format_failed_score is not None:
+                                    api_config["fol_format_failed_score"] = float(fol_format_failed_score)
 
                                 for rt in step_reward_types:
                                     if rt == "format":
