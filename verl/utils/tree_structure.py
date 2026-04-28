@@ -894,6 +894,8 @@ class TreeManager:
                 "fol_prepare_failed": 0,
                 "fol_prepare_s_sum": 0.0,
                 "fol_prepare_s_max": 0.0,
+                "fol_cache_hits": 0,
+                "fol_cache_misses": 0,
             }
         tasks = []
         tree_inputs = []
@@ -988,7 +990,10 @@ class TreeManager:
                     if prm_name in node.ext_prm_scores:
                         continue
                     path = node.path_from_root()
-                    step_history = [n.step_text for n in path[:-1]]
+                    # Match StepRewardManager semantics: step_history includes
+                    # the current step, so cumulative FOL verifies the full
+                    # prefix ending at this node rather than only ancestors.
+                    step_history = [n.step_text for n in path]
                     tasks.append(
                         (
                             node,
@@ -1035,6 +1040,10 @@ class TreeManager:
             if prm_name != "fol" or not isinstance(debug, dict):
                 return
             self.ext_prm_profile["fol_tasks"] += 1
+            if debug.get("cache_hit"):
+                self.ext_prm_profile["fol_cache_hits"] += 1
+            else:
+                self.ext_prm_profile["fol_cache_misses"] += 1
             judge_usage = debug.get("judge_usage", {})
             if isinstance(judge_usage, dict):
                 self.ext_prm_profile["fol_judge_calls"] += int(judge_usage.get("calls", 0) or 0)

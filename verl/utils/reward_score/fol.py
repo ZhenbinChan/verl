@@ -48,6 +48,7 @@ _fol_shared_state_cache_lock = threading.Lock()
 _FOL_VERIFY_CACHE_MAX_SIZE = max(1, int(os.environ.get("FOL_VERIFY_CACHE_SIZE", "4096")))
 _fol_verify_cache: OrderedDict[tuple, float] = OrderedDict()
 _fol_verify_cache_lock = threading.Lock()
+_fol_verify_inflight: dict[tuple, dict] = {}
 _fol_verify_cache_stats = {"hits": 0, "misses": 0}
 _fol_verify_cache_stats_lock = threading.Lock()
 _fol_verify_cache_step_stats: OrderedDict[int, dict[str, int]] = OrderedDict()
@@ -303,6 +304,8 @@ def compute_step_reward_fol(
             fol_config=fol_config,
             step_to_translate=step_to_translate,
         )
+        owner = False
+        inflight_state = None
         with _fol_verify_cache_lock:
             cached_reward = _fol_verify_cache.get(verify_cache_key)
             if cached_reward is not None:
@@ -310,26 +313,55 @@ def compute_step_reward_fol(
                 debug_info["cache_hit"] = True
                 _log_verify_cache_event(True, step_index)
                 return {"score": cached_reward, "debug": debug_info} if return_debug else cached_reward
+            inflight_state = _fol_verify_inflight.get(verify_cache_key)
+            if inflight_state is None:
+                inflight_state = {"event": threading.Event(), "reward": None, "exc": None}
+                _fol_verify_inflight[verify_cache_key] = inflight_state
+                owner = True
+
+        if not owner:
+            inflight_state["event"].wait()
+            with _fol_verify_cache_lock:
+                cached_reward = _fol_verify_cache.get(verify_cache_key)
+                if cached_reward is not None:
+                    _fol_verify_cache.move_to_end(verify_cache_key)
+                    debug_info["cache_hit"] = True
+                    _log_verify_cache_event(True, step_index)
+                    return {"score": cached_reward, "debug": debug_info} if return_debug else cached_reward
+            inflight_exc = inflight_state.get("exc")
+            if inflight_exc is not None:
+                raise inflight_exc
+            inflight_reward = inflight_state.get("reward")
+            if inflight_reward is not None:
+                debug_info["cache_hit"] = True
+                _log_verify_cache_event(True, step_index)
+                return {"score": inflight_reward, "debug": debug_info} if return_debug else inflight_reward
+            raise RuntimeError("FOL verify cache in-flight request completed without a result")
         _log_verify_cache_event(False, step_index)
 
         # print(f"[FOL][{_tid}] → verify_step({fol_config.translation.value})...", flush=True)
         # _t2 = time.time()
-        reward = engine.verify_step(
-            shared_state["processed_context"],
-            shared_state["declarations"],
-            step_to_translate,
-            debug_info=debug_info,
-        )
-        reward = float(reward)
+        try:
+            reward = engine.verify_step(
+                shared_state["processed_context"],
+                shared_state["declarations"],
+                step_to_translate,
+                debug_info=debug_info,
+            )
+            reward = float(reward)
+        except BaseException as exc:
+            with _fol_verify_cache_lock:
+                inflight_state["exc"] = exc
+                inflight_state["event"].set()
+                _fol_verify_inflight.pop(verify_cache_key, None)
+            raise
         with _fol_verify_cache_lock:
-            existing_reward = _fol_verify_cache.get(verify_cache_key)
-            if existing_reward is not None:
-                _fol_verify_cache.move_to_end(verify_cache_key)
-                debug_info["cache_hit"] = True
-                return {"score": existing_reward, "debug": debug_info} if return_debug else existing_reward
             _fol_verify_cache[verify_cache_key] = reward
             if len(_fol_verify_cache) > _FOL_VERIFY_CACHE_MAX_SIZE:
                 _fol_verify_cache.popitem(last=False)
+            inflight_state["reward"] = reward
+            inflight_state["event"].set()
+            _fol_verify_inflight.pop(verify_cache_key, None)
         # print(f"[FOL][{_tid}] ◀ done  reward={reward}  verify={time.time()-_t2:.2f}s  total={time.time()-_t0:.2f}s", flush=True)
         return {"score": reward, "debug": debug_info} if return_debug else reward
     except Exception as e:

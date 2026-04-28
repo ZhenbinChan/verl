@@ -2169,6 +2169,7 @@ class RayPPOTrainer:
                     "fol_judge_total_tokens": "fol_judge/total_tokens",
                     "fol_judge_calls": "fol_judge/calls",
                     "fol_judge_completion_tokens_per_call": "fol_judge/completion_tokens_per_call",
+                    "fol_cache_hit_rate": "fol_judge/cache_hit_rate",
                     "fol_verifier_steps": "fol_judge/verifier_steps",
                     "fol_entailed_steps": "fol_judge/entailed_steps",
                     "fol_not_entailed_steps": "fol_judge/not_entailed_steps",

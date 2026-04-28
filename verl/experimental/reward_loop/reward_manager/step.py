@@ -244,6 +244,7 @@ class StepRewardManager(RewardManagerBase):
                     "fol_judge_total_tokens": 0,
                     "fol_judge_calls": 0,
                     "fol_judge_completion_tokens_per_call": 0.0,
+                    "fol_cache_hit_rate": 0.0,
                     "fol_verifier_steps": 0,
                     "fol_entailed_steps": 0,
                     "fol_not_entailed_steps": 0,
@@ -429,6 +430,7 @@ class StepRewardManager(RewardManagerBase):
             fol_judge_completion_tokens = 0
             fol_judge_total_tokens = 0
             fol_judge_calls = 0
+            fol_cache_hits = 0
             fol_verifier_steps = 0
             fol_entailed_steps = 0
             fol_not_entailed_steps = 0
@@ -446,6 +448,8 @@ class StepRewardManager(RewardManagerBase):
                     fol_debug.append(step_debug)
                     fol_verifier_steps += 1
                     if isinstance(step_debug, dict):
+                        if step_debug.get("cache_hit"):
+                            fol_cache_hits += 1
                         judge_usage = step_debug.get("judge_usage", {})
                         if isinstance(judge_usage, dict):
                             fol_judge_prompt_tokens += int(judge_usage.get("prompt_tokens", 0) or 0)
@@ -489,6 +493,9 @@ class StepRewardManager(RewardManagerBase):
                 reward_extra_info["fol_judge_calls"] = fol_judge_calls
                 reward_extra_info["fol_judge_completion_tokens_per_call"] = (
                     float(fol_judge_completion_tokens) / fol_judge_calls if fol_judge_calls > 0 else 0.0
+                )
+                reward_extra_info["fol_cache_hit_rate"] = (
+                    float(fol_cache_hits) / fol_verifier_steps if fol_verifier_steps > 0 else 0.0
                 )
                 reward_extra_info["fol_verifier_steps"] = fol_verifier_steps
                 reward_extra_info["fol_entailed_steps"] = fol_entailed_steps
