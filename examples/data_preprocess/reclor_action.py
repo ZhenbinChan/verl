@@ -53,10 +53,11 @@ if __name__ == "__main__":
             solution = option_mapping[int(example.pop("label"))]
 
             answers = "\n\n".join(["Option (" + option_mapping[i] +")"+ answer_raw[i] + ".\n" for i in range(len(answer_raw))])
-            question = instruction_following + "<Context>" + context + "</Context>" + "<Question>" + question_raw + "</Question>" + "<Options>" + answers + "</Options>"
+            question = "## Task Instructions\n" + instruction_following + "<Context>" + context + "</Context>" + "<Question>" + question_raw + "</Question>" + "<Options>" + answers + "</Options>"
             # solution = extract_solution(answer_raw)
 
             # import pdb;pdb.set_trace()
+            sample_id = f"reclor_{idx}"
             data = {
                 "data_source": "reclor",
                 "prompt": [
@@ -69,6 +70,7 @@ if __name__ == "__main__":
                 "reward_model": {"style": "rule", "ground_truth": solution},
                 "answer": solution,
                 "raw_prompt": question,
+                "sample_id": sample_id,
                 "extra_info": {
                     "split": split,
                     "index": idx,
@@ -82,6 +84,7 @@ if __name__ == "__main__":
 
     train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
+    # import pdb;pdb.set_trace() 
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir

@@ -1157,10 +1157,6 @@ class RayPPOTrainer:
                     else:
                         repeat_times = self.config.actor_rollout_ref.rollout.n
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-                    # Use sample_id for tracking if available (allows tracing back to original sample)
-                    sample_ids = batch.non_tensor_batch.get("sample_id")
-                    if sample_ids is not None:
-                        batch.non_tensor_batch["uid"] = np.array([str(sid) for sid in sample_ids], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -1232,20 +1228,21 @@ class RayPPOTrainer:
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
 
-                                # Detect homogeneous groups (all correct or all wrong)
-                                n = self.config.actor_rollout_ref.rollout.n
-                                uids = batch.non_tensor_batch["uid"]
-                                outcome_rewards = reward_dict["outcome_reward"]
-                                num_groups = len(outcome_rewards) // n
+                                if "sample_id" in batch.non_tensor_batch.keys():
+                                    # Detect homogeneous groups (all correct or all wrong)
+                                    n = repeat_times
+                                    sample_ids = batch.non_tensor_batch["sample_id"]
+                                    outcome_rewards = reward_dict["outcome_reward"]
+                                    num_groups = len(outcome_rewards) // n
 
-                                for group_idx in range(num_groups):
-                                    group_rewards = outcome_rewards[group_idx * n : (group_idx + 1) * n]
-                                    group_uid = uids[group_idx * n]
+                                    for group_idx in range(num_groups):
+                                        group_rewards = outcome_rewards[group_idx * n : (group_idx + 1) * n]
+                                        group_sample_id = sample_ids[group_idx * n]
 
-                                    if all(r == 1.0 for r in group_rewards):
-                                        self.all_correct_uids.append(group_uid)
-                                    elif all(r == 0.0 for r in group_rewards):
-                                        self.all_wrong_uids.append(group_uid)
+                                        if all(r == 1.0 for r in group_rewards):
+                                            self.all_correct_uids.append(group_sample_id)
+                                        elif all(r == 0.0 for r in group_rewards):
+                                            self.all_wrong_uids.append(group_sample_id)
 
                                 metrics["rollout/total_correct_groups"] = len(self.all_correct_uids)
                                 metrics["rollout/total_wrong_groups"] = len(self.all_wrong_uids)
@@ -1399,14 +1396,16 @@ class RayPPOTrainer:
                     import json
                     import os
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    experiment_name = self.config.trainer.experiment_name
+                    dataset_name = self.config.data.train_files.split("/")[-1].split(".")[0]
                     if rollout_data_dir:
-                        tracking_file = os.path.join(rollout_data_dir, "homogeneous_tracking.json")
+                        tracking_file = os.path.join(rollout_data_dir, f"{experiment_name}_{dataset_name}_homogeneous.json")
                         with open(tracking_file, "w") as f:
                             json.dump({
                                 "all_correct_uids": self.all_correct_uids,
                                 "all_wrong_uids": self.all_wrong_uids
-                            }, f, indent=2)
-                        pprint(f"Homogeneous tracking saved to {tracking_file}")
+                            }, f, indent=4)
+                        print(f"[Info]Homogeneous tracking saved to {tracking_file}")
                     # -------------------------------------------------------------- #
                     if self.record_table is not None:
                         logger.log_table(self.record_table, table_name='Training Record')
