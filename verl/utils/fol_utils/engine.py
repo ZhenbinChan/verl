@@ -457,7 +457,10 @@ def _render_structured_implication(
     if not isinstance(payload, dict):
         return ""
 
-    var_block = _render_const_declarations(payload.get("new_variables", []), section_name="New Variables")
+    new_variables = payload.get("new_variables", [])
+    if not isinstance(new_variables, list):
+        return ""
+    var_block = _render_const_declarations(new_variables, section_name="New Variables")
     background_axioms = payload.get("background_axioms", [])
     previous_conclusions = payload.get("previous_conclusions", [])
     current_premises = payload.get("current_premises", [])
@@ -484,15 +487,29 @@ def _render_structured_implication(
         if debug_info is not None:
             debug_info["invalid_expression_syntax"] = expression_errors
         return _build_fail_closed_code(full_declarations, "FAILED_INVALID_EXPRESSION")
-    unknown_identifier_errors = _collect_unknown_identifier_errors(
-        {
-            "background_axioms": background_axioms,
-            "previous_conclusions": previous_conclusions,
-            "current_premises": current_premises,
-            "conclusion": [conclusion],
-        },
+
+    expr_sources = {
+        "background_axioms": background_axioms,
+        "previous_conclusions": previous_conclusions,
+        "current_premises": current_premises,
+        "conclusion": [conclusion],
+    }
+    inferred_quantifier_variables, quantifier_diagnostics = _infer_quantifier_variable_sorts(
+        expr_sources,
         full_declarations,
-        payload.get("new_variables", []),
+        new_variables,
+    )
+    if inferred_quantifier_variables:
+        new_variables = [*new_variables, *inferred_quantifier_variables]
+        var_block = _render_const_declarations(new_variables, section_name="New Variables")
+        full_declarations = f"{declarations}\n\n{var_block}" if var_block else declarations
+        if debug_info is not None:
+            debug_info["autofilled_quantifier_variables"] = quantifier_diagnostics
+
+    unknown_identifier_errors = _collect_unknown_identifier_errors(
+        expr_sources,
+        full_declarations,
+        new_variables,
     )
     if unknown_identifier_errors:
         if debug_info is not None:
@@ -580,6 +597,59 @@ def _collect_assignment_target_names(target: ast.AST, names: set[str]) -> None:
             _collect_assignment_target_names(element, names)
 
 
+def _ast_call_name(node: ast.AST) -> Optional[str]:
+    """Return the simple function name for an AST call node."""
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+    return None
+
+
+def _sort_name_from_ast(node: ast.AST) -> Optional[str]:
+    """Return a renderable sort expression name from declaration AST nodes."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Call):
+        call_name = _ast_call_name(node)
+        if call_name in {"BoolSort", "IntSort", "RealSort"} and not node.args and not node.keywords:
+            return f"{call_name}()"
+    return None
+
+
+def _declared_function_arg_sorts(declarations: str) -> dict[str, list[str]]:
+    """Return function argument sort signatures from rendered declaration code."""
+    signatures: dict[str, list[str]] = {}
+    try:
+        tree = ast.parse(declarations)
+    except SyntaxError:
+        return signatures
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        if _ast_call_name(node.value) != "Function" or len(node.value.args) < 2:
+            continue
+        target_names: set[str] = set()
+        for target in node.targets:
+            _collect_assignment_target_names(target, target_names)
+        if not target_names:
+            continue
+        arg_sorts = []
+        # Function('Name', ArgSort1, ..., ReturnSort): skip string name and return sort.
+        for sort_node in node.value.args[1:-1]:
+            sort_name = _sort_name_from_ast(sort_node)
+            if sort_name is None:
+                arg_sorts = []
+                break
+            arg_sorts.append(sort_name)
+        if arg_sorts:
+            for target_name in target_names:
+                signatures[target_name] = arg_sorts
+    return signatures
+
+
 def _declared_identifier_names(declarations: str, new_variables: list[dict[str, str]]) -> set[str]:
     """Return identifiers available to implication expressions."""
     names = set(_Z3_EXPR_OPERATOR_NAMES)
@@ -595,6 +665,70 @@ def _declared_identifier_names(declarations: str, new_variables: list[dict[str, 
         if isinstance(item, dict) and isinstance(item.get("name"), str):
             names.add(item["name"])
     return names
+
+
+def _infer_quantifier_variable_sorts(
+    expr_sources: dict[str, list[str]],
+    declarations: str,
+    new_variables: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """Infer missing bound-variable sorts from declared function signatures.
+
+    This is intentionally conservative: a variable is auto-declared only when
+    every use with a known function signature points to the same argument sort.
+    Ambiguous or unseen variables are left for the normal fail-closed path.
+    """
+    declared_names = _declared_identifier_names(declarations, new_variables)
+    function_arg_sorts = _declared_function_arg_sorts(declarations)
+    inferred: list[dict[str, str]] = []
+    diagnostics_by_name: dict[str, list[dict[str, object]]] = {}
+    candidates_by_name: dict[str, set[str]] = {}
+
+    for source, expressions in expr_sources.items():
+        for idx, expr in enumerate(expressions):
+            bound_names = _quantifier_bound_identifier_set(expr)
+            missing_bound = sorted(name for name in bound_names if name not in declared_names)
+            if not missing_bound:
+                continue
+
+            sort_candidates: dict[str, set[str]] = {name: set() for name in missing_bound}
+            try:
+                tree = ast.parse(expr, mode="eval")
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                arg_sorts = function_arg_sorts.get(node.func.id)
+                if not arg_sorts:
+                    continue
+                for arg_node, sort_name in zip(node.args, arg_sorts):
+                    if isinstance(arg_node, ast.Name) and arg_node.id in sort_candidates:
+                        sort_candidates[arg_node.id].add(sort_name)
+
+            for name in missing_bound:
+                candidates = sorted(sort_candidates.get(name, set()))
+                candidates_by_name.setdefault(name, set()).update(candidates)
+                diagnostics_by_name.setdefault(name, []).append({
+                    "source": source,
+                    "index": idx,
+                    "name": name,
+                    "candidate_sorts": candidates,
+                    "expr": expr,
+                })
+
+    diagnostics: list[dict[str, object]] = []
+    for name, candidates in sorted(candidates_by_name.items()):
+        if len(candidates) == 1 and _is_valid_python_identifier(name):
+            sort_name = next(iter(candidates))
+            inferred.append({"name": name, "sort": sort_name})
+            for diagnostic in diagnostics_by_name.get(name, []):
+                diagnostic = dict(diagnostic)
+                diagnostic["sort"] = sort_name
+                diagnostics.append(diagnostic)
+
+    return inferred, diagnostics
 
 
 def _collect_unknown_identifier_errors(
