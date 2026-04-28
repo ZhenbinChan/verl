@@ -559,6 +559,24 @@ class TestProcessValidationMetrics(unittest.TestCase):
         self.assertAlmostEqual(result["source1"]["score"]["mean@2"], 0.85)
         self.assertNotIn("fol_debug", result["source1"])
 
+    def test_process_validation_metrics_reduces_step_reward_scores_only(self):
+        """Step reward metrics should average scores, not token positions."""
+        data_sources = ["source1", "source1", "source1"]
+        sample_inputs = ["prompt1", "prompt1", "prompt1"]
+        infos_dict = {
+            "fol_step_reward": [
+                [(180, 0.0), (190, 1.0)],
+                [(20, -1.0), (30, 0.0)],
+                [],
+            ],
+        }
+
+        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+
+        self.assertIn("fol_step_reward", result["source1"])
+        self.assertIn("mean@2", result["source1"]["fol_step_reward"])
+        self.assertAlmostEqual(result["source1"]["fol_step_reward"]["mean@2"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

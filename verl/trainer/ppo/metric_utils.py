@@ -565,6 +565,40 @@ def process_validation_metrics(
     reduce_fns_best_worst = [np.max, np.min]
     n_bootstrap = 1000
 
+    def reduce_step_reward_values(var_name: str, var_vals: list[Any]) -> list[float] | None:
+        """Convert List[(token_pos, score)] payloads to per-response score means.
+
+        Step rewards are stored with token positions so training can scatter the
+        scores back onto response tokens.  Validation metrics should summarize
+        only the reward scores; applying np.mean directly to the pair payload
+        would also average token positions.
+        """
+        if not var_name.endswith("_step_reward"):
+            return None
+
+        reduced_vals = []
+        saw_step_reward_payload = False
+        for item in var_vals:
+            if not isinstance(item, (list, tuple)):
+                continue
+            scores = []
+            for pair in item:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                try:
+                    scores.append(float(pair[1]))
+                except (TypeError, ValueError):
+                    continue
+            if scores:
+                saw_step_reward_payload = True
+                reduced_vals.append(float(np_mean(scores)))
+            elif len(item) == 0:
+                saw_step_reward_payload = True
+
+        if not saw_step_reward_payload:
+            return None
+        return reduced_vals
+
     # 2. cache ns list
     def gen_ns(n_resps: int) -> list[int]:
         if n_resps <= 1:
@@ -595,6 +629,11 @@ def process_validation_metrics(
             for var_name, var_vals in var2vals.items():
                 # skip empty or string values
                 if not var_vals or isinstance(var_vals[0], str):
+                    continue
+                reduced_step_reward_vals = reduce_step_reward_values(var_name, var_vals)
+                if reduced_step_reward_vals is not None:
+                    var_vals = reduced_step_reward_vals
+                if not var_vals:
                     continue
 
                 # compute mean and std

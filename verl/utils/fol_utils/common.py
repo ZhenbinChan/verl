@@ -137,6 +137,24 @@ def _is_transient_openai_error(exc: BaseException) -> bool:
     return any(marker in msg for marker in _OPENAI_TRANSIENT_MARKERS)
 
 
+def _parse_context_length_error(exc: BaseException) -> tuple[int, int, int] | None:
+    """Extract (max_context, prompt_tokens, requested_output_tokens) from vLLM errors."""
+    msg = str(exc)
+    max_ctx_match = re.search(r"maximum context length is\s+(\d+)", msg, re.IGNORECASE)
+    prompt_match = re.search(r"prompt contains at least\s+(\d+)\s+input tokens", msg, re.IGNORECASE)
+    output_match = re.search(r"requested\s+(\d+)\s+output tokens", msg, re.IGNORECASE)
+    if not (max_ctx_match and prompt_match and output_match):
+        return None
+    try:
+        return (
+            int(max_ctx_match.group(1)),
+            int(prompt_match.group(1)),
+            int(output_match.group(1)),
+        )
+    except ValueError:
+        return None
+
+
 def get_client(api_key: str, base_url: str | None, timeout: float) -> OpenAI:
     """Return a cached OpenAI client, creating one if needed."""
     cache_key = (api_key, base_url, timeout)
@@ -450,6 +468,10 @@ def call_llm(
     max_delay = float(cfg.get("api_retry_max_delay", 300.0))
     tpm_limit = float(cfg.get("tpm", 0) or 0)
     max_output_tokens = int(cfg.get("max_tokens", 1024))
+    min_context_shrink_tokens = int(cfg.get("api_context_shrink_min_tokens", 128))
+    max_context_shrink_tokens = int(cfg.get("api_context_shrink_max_tokens", 256))
+    max_context_shrink_retries = int(cfg.get("api_context_shrink_retries", 1))
+    context_shrink_retries = 0
     estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
 
     attempt = 0
@@ -476,6 +498,26 @@ def call_llm(
             return completion.choices[0].message.content or ""
         except Exception as exc:
             _update_openai_tpm_budget(reservation, release=True)
+            context_error = _parse_context_length_error(exc)
+            if context_error is not None and context_shrink_retries < max_context_shrink_retries:
+                max_context, prompt_tokens, requested_output_tokens = context_error
+                available_output_tokens = max_context - prompt_tokens
+                shrink_tokens = requested_output_tokens - available_output_tokens
+                if (
+                    available_output_tokens >= min_context_shrink_tokens
+                    and 0 < shrink_tokens <= max_context_shrink_tokens
+                    and available_output_tokens < max_output_tokens
+                ):
+                    logger.warning(
+                        "OpenAI request exceeded context by %d tokens; reducing max_tokens from %d to %d",
+                        shrink_tokens,
+                        max_output_tokens,
+                        available_output_tokens,
+                    )
+                    max_output_tokens = available_output_tokens
+                    estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
+                    context_shrink_retries += 1
+                    continue
             if attempt >= max_retries or not _is_transient_openai_error(exc):
                 logger.error(
                     "Max retries exceeded at OpenAI SDK (model=%s, base_url=%s): %s",
@@ -483,7 +525,6 @@ def call_llm(
                     cfg.get("base_url"),
                     str(exc)[:500],
                 )
-                exit()
                 raise
             delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
             # logger.warning(
