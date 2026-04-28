@@ -518,6 +518,18 @@ def _render_structured_implication(
         if debug_info is not None:
             debug_info["autofilled_free_identifiers"] = free_identifier_diagnostics
 
+    inferred_symbolic_constants, symbolic_constant_diagnostics = _infer_symbolic_constant_sorts(
+        expr_sources,
+        full_declarations,
+        new_variables,
+    )
+    if inferred_symbolic_constants:
+        new_variables = [*new_variables, *inferred_symbolic_constants]
+        var_block = _render_const_declarations(new_variables, section_name="New Variables")
+        full_declarations = f"{declarations}\n\n{var_block}" if var_block else declarations
+        if debug_info is not None:
+            debug_info["autofilled_symbolic_constants"] = symbolic_constant_diagnostics
+
     unknown_identifier_errors = _collect_unknown_identifier_errors(
         expr_sources,
         full_declarations,
@@ -1040,18 +1052,19 @@ def _is_autofillable_free_identifier(name: str) -> bool:
     return _is_valid_python_identifier(name) and name[:1].islower()
 
 
-def _infer_free_identifier_sorts(
+def _is_autofillable_symbolic_constant(name: str) -> bool:
+    """Whether an undeclared identifier can be treated as a symbolic constant."""
+    return _is_valid_python_identifier(name) and name[:1].isupper()
+
+
+def _infer_missing_identifier_sorts(
     expr_sources: dict[str, list[str]],
     declarations: str,
     new_variables: list[dict[str, str]],
+    *,
+    is_candidate,
 ) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
-    """Infer missing free-identifier sorts from declared function signatures.
-
-    This normalizes translator omissions like ``P(xiao_huang)`` or
-    ``ForAll([x], R(x, e))`` into explicit constants when every observed use of
-    the free identifier has the same declared argument sort. It does not infer
-    call heads, quantifier-bound variables, or uppercase enum-like symbols.
-    """
+    """Infer missing expression identifier sorts from declared function signatures."""
     declared_names = _declared_identifier_names(declarations, new_variables)
     function_arg_sorts = _declared_function_arg_sorts(declarations)
     candidates_by_name: dict[str, set[str]] = {}
@@ -1065,7 +1078,7 @@ def _infer_free_identifier_sorts(
             missing_names = sorted(
                 name
                 for name in identifiers - declared_names - called_names - bound_names
-                if _is_autofillable_free_identifier(name)
+                if is_candidate(name)
             )
             if not missing_names:
                 continue
@@ -1109,6 +1122,46 @@ def _infer_free_identifier_sorts(
                 diagnostics.append(diagnostic)
 
     return inferred, diagnostics
+
+
+def _infer_free_identifier_sorts(
+    expr_sources: dict[str, list[str]],
+    declarations: str,
+    new_variables: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """Infer lowercase free-identifier sorts from declared function signatures.
+
+    This normalizes translator omissions like ``P(xiao_huang)`` or
+    ``ForAll([x], R(x, e))`` into explicit constants when every observed use of
+    the free identifier has the same declared argument sort. It does not infer
+    call heads, quantifier-bound variables, or uppercase enum-like symbols.
+    """
+    return _infer_missing_identifier_sorts(
+        expr_sources,
+        declarations,
+        new_variables,
+        is_candidate=_is_autofillable_free_identifier,
+    )
+
+
+def _infer_symbolic_constant_sorts(
+    expr_sources: dict[str, list[str]],
+    declarations: str,
+    new_variables: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """Infer uppercase symbolic constants from declared function signatures.
+
+    This covers translator omissions like ``HasProperty(film, TensileStrength)``
+    when ``HasProperty`` uniquely requires a ``Property`` argument. The rule is
+    deliberately conservative: call heads, bound variables, declared names, and
+    ambiguous/conflicting sort candidates are left for the fail-closed path.
+    """
+    return _infer_missing_identifier_sorts(
+        expr_sources,
+        declarations,
+        new_variables,
+        is_candidate=_is_autofillable_symbolic_constant,
+    )
 
 
 def _collect_unknown_identifier_errors(

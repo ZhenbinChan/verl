@@ -1735,6 +1735,7 @@ class RayPPOTrainer:
                                     for key in (
                                         "fol_autofilled_quantifier_steps",
                                         "fol_autofilled_free_identifier_steps",
+                                        "fol_autofilled_symbolic_constant_steps",
                                         "fol_sort_mismatch_steps",
                                     ):
                                         value = ext_prm_profile.get(key, 0)
@@ -1948,6 +1949,10 @@ class RayPPOTrainer:
                                     if autofilled_free_identifiers:
                                         print("[FOL Autofilled Free Identifiers]")
                                         print(json.dumps(autofilled_free_identifiers, ensure_ascii=False, indent=2))
+                                    autofilled_symbolic_constants = step_debug.get("autofilled_symbolic_constants")
+                                    if autofilled_symbolic_constants:
+                                        print("[FOL Autofilled Symbolic Constants]")
+                                        print(json.dumps(autofilled_symbolic_constants, ensure_ascii=False, indent=2))
                                     translation_response = step_debug.get("translation_response")
                                     if translation_response:
                                         print("[FOL Translation Response]")
@@ -2211,6 +2216,7 @@ class RayPPOTrainer:
                     "fol_expression_repair_steps": "fol_judge/expression_repair_steps",
                     "fol_autofilled_quantifier_steps": "fol_judge/autofilled_quantifier_steps",
                     "fol_autofilled_free_identifier_steps": "fol_judge/autofilled_free_identifier_steps",
+                    "fol_autofilled_symbolic_constant_steps": "fol_judge/autofilled_symbolic_constant_steps",
                     "fol_sort_mismatch_steps": "fol_judge/sort_mismatch_steps",
                     "fol_leakage_steps": "fol_judge/leakage_steps",
                     "fol_student_duplicate_steps": "fol_judge/student_duplicate_steps",
@@ -2234,6 +2240,7 @@ class RayPPOTrainer:
                         "fol_expression_repair_steps": "fol_judge/expression_repair_rate",
                         "fol_autofilled_quantifier_steps": "fol_judge/autofilled_quantifier_rate",
                         "fol_autofilled_free_identifier_steps": "fol_judge/autofilled_free_identifier_rate",
+                        "fol_autofilled_symbolic_constant_steps": "fol_judge/autofilled_symbolic_constant_rate",
                         "fol_sort_mismatch_steps": "fol_judge/sort_mismatch_rate",
                         "fol_leakage_steps": "fol_judge/leakage_rate",
                         "fol_student_duplicate_steps": "fol_judge/student_duplicate_rate",

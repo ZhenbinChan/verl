@@ -259,6 +259,7 @@ class StepRewardManager(RewardManagerBase):
                     "fol_expression_repair_steps": 0,
                     "fol_autofilled_quantifier_steps": 0,
                     "fol_autofilled_free_identifier_steps": 0,
+                    "fol_autofilled_symbolic_constant_steps": 0,
                     "fol_sort_mismatch_steps": 0,
                     "fol_leakage_steps": 0,
                     "fol_student_duplicate_steps": 0,
@@ -448,6 +449,7 @@ class StepRewardManager(RewardManagerBase):
             fol_expression_repair_steps = 0
             fol_autofilled_quantifier_steps = 0
             fol_autofilled_free_identifier_steps = 0
+            fol_autofilled_symbolic_constant_steps = 0
             fol_sort_mismatch_steps = 0
             fol_leakage_steps = 0
             fol_student_duplicate_steps = 0
@@ -487,6 +489,8 @@ class StepRewardManager(RewardManagerBase):
                             fol_autofilled_quantifier_steps += 1
                         if step_debug.get("autofilled_free_identifiers"):
                             fol_autofilled_free_identifier_steps += 1
+                        if step_debug.get("autofilled_symbolic_constants"):
+                            fol_autofilled_symbolic_constant_steps += 1
                         if (
                             step_debug.get("translation_sort_mismatches")
                             or step_debug.get("invalid_translation_reason") == "z3_sort_mismatch"
@@ -526,6 +530,7 @@ class StepRewardManager(RewardManagerBase):
                 reward_extra_info["fol_expression_repair_steps"] = fol_expression_repair_steps
                 reward_extra_info["fol_autofilled_quantifier_steps"] = fol_autofilled_quantifier_steps
                 reward_extra_info["fol_autofilled_free_identifier_steps"] = fol_autofilled_free_identifier_steps
+                reward_extra_info["fol_autofilled_symbolic_constant_steps"] = fol_autofilled_symbolic_constant_steps
                 reward_extra_info["fol_sort_mismatch_steps"] = fol_sort_mismatch_steps
                 reward_extra_info["fol_leakage_steps"] = fol_leakage_steps
                 reward_extra_info["fol_student_duplicate_steps"] = fol_student_duplicate_steps
