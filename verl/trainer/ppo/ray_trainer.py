@@ -1886,6 +1886,25 @@ class RayPPOTrainer:
                                     sr_sample.append({k: v[0]})
                             if sr_sample:
                                 print(f"[Step Rewards]: {sr_sample}")
+                            tree_debug = {}
+                            for k in (
+                                "treerl_tree_idx",
+                                "treerl_leaf_idx",
+                                "treerl_path_node_ids",
+                                "treerl_path_is_forked",
+                                "treerl_path_rewardable",
+                                "treerl_path_format_ok",
+                                "fol_step_node_ids",
+                                "format_step_node_ids",
+                                "self_eval_step_node_ids",
+                                "fol_old_step_node_ids",
+                            ):
+                                vals = batch.non_tensor_batch.get(k)
+                                if vals is not None and len(vals) > 0:
+                                    val = vals[0]
+                                    tree_debug[k] = val.tolist() if hasattr(val, "tolist") else val
+                            if tree_debug:
+                                print(f"[Tree Debug]: {tree_debug}")
                             fol_debug = reward_extra_infos_dict.get("fol_debug")
                             if fol_debug is not None and len(fol_debug) > 0 and fol_debug[0]:
                                 print("\n[FOL Debug]")

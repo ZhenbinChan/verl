@@ -357,22 +357,29 @@ class TreeManager:
             response_text = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
 
             # Split into steps.
-            # XML path: character-level split then char→token mapping (same
-            #   approach as StepRewardManager — keeps BPE drift but stays
-            #   aligned with reward computation).
+            # XML path: character-level split then token-id boundary search
+            #   (same approach as StepRewardManager; avoids BPE drift).
             # Delimiter path: token-level search — no decode→re-encode drift.
-            from verl.utils.step_splitter import (split_by_xml_step_tags,
-                                                  split_tokens_by_delimiter)
+            from verl.utils.step_splitter import (
+                _char_end_to_token_pos,
+                split_by_xml_step_tags,
+                split_tokens_by_delimiter,
+            )
 
             xml_steps = split_by_xml_step_tags(response_text) if self.use_xml else []
             if xml_steps:
-                # XML: map char boundaries → token positions via re-encode
+                # XML: map char boundaries against the actual generated token IDs.
+                # Avoid decode→re-encode drift at BPE merge boundaries.
                 step_ranges: list[tuple[int, int, str]] = []
                 _prev = 0
                 for step_text, _cs, char_end in xml_steps:
-                    text_up_to_end = response_text[:char_end]
-                    toks_up = self.tokenizer.encode(text_up_to_end, add_special_tokens=False)
-                    tok_end = min(len(toks_up), valid_resp_len)
+                    tok_end = _char_end_to_token_pos(
+                        valid_resp_ids,
+                        self.tokenizer,
+                        char_end,
+                        valid_resp_len,
+                    ) + 1
+                    tok_end = min(tok_end, valid_resp_len)
                     step_ranges.append((_prev, tok_end, step_text))
                     _prev = tok_end
             else:
@@ -731,17 +738,24 @@ class TreeManager:
             # Split branch response into steps.
             # XML path: char→token mapping; Delimiter path: token-level search.
             response_text = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
-            from verl.utils.step_splitter import (split_by_xml_step_tags,
-                                                  split_tokens_by_delimiter)
+            from verl.utils.step_splitter import (
+                _char_end_to_token_pos,
+                split_by_xml_step_tags,
+                split_tokens_by_delimiter,
+            )
 
             xml_steps = split_by_xml_step_tags(response_text) if self.use_xml else []
             if xml_steps:
                 step_ranges: list[tuple[int, int, str]] = []
                 _prev = 0
                 for step_text, _cs, char_end in xml_steps:
-                    text_up_to_end = response_text[:char_end]
-                    toks_up = self.tokenizer.encode(text_up_to_end, add_special_tokens=False)
-                    tok_end = min(len(toks_up), valid_resp_len)
+                    tok_end = _char_end_to_token_pos(
+                        valid_resp_ids,
+                        self.tokenizer,
+                        char_end,
+                        valid_resp_len,
+                    ) + 1
+                    tok_end = min(tok_end, valid_resp_len)
                     step_ranges.append((_prev, tok_end, step_text))
                     _prev = tok_end
             else:
@@ -1325,9 +1339,9 @@ class TreeManager:
         """
         all_paths = []
         for tree in self.trees:
-            for leaf in tree.all_leaves:
+            for leaf_idx, leaf in enumerate(tree.all_leaves):
                 path = leaf.path_from_root()
-                all_paths.append((tree, path))
+                all_paths.append((tree, leaf_idx, path))
 
         if not all_paths:
             return original_output
@@ -1337,7 +1351,7 @@ class TreeManager:
         all_response_log_probs = []
         all_step_rewards = []  # List[(pos, score)] per path
 
-        for tree, path in all_paths:
+        for tree, _, path in all_paths:
             # Concatenate all token_ids and log_probs along the path
             resp_ids = []
             resp_lps = []
@@ -1382,7 +1396,7 @@ class TreeManager:
             orig_prompts = original_output.batch["prompts"]
             prompt_len = orig_prompts.shape[1]
             prompts = torch.zeros(num_paths, prompt_len, dtype=torch.long)
-            for i, (tree, _) in enumerate(all_paths):
+            for i, (tree, _, _) in enumerate(all_paths):
                 if tree.tree_idx < orig_prompts.shape[0]:
                     prompts[i] = orig_prompts[tree.tree_idx]
         else:
@@ -1392,7 +1406,7 @@ class TreeManager:
         total_len = (prompt_len + max_resp_len) if prompts is not None else max_resp_len
         attention_mask = torch.zeros(num_paths, total_len, dtype=torch.long)
         if prompts is not None:
-            for i, (tree, _) in enumerate(all_paths):
+            for i, (tree, _, _) in enumerate(all_paths):
                 if tree.tree_idx < original_output.batch["attention_mask"].shape[0]:
                     orig_attn = original_output.batch["attention_mask"][tree.tree_idx, :prompt_len]
                     attention_mask[i, :prompt_len] = orig_attn
@@ -1404,7 +1418,7 @@ class TreeManager:
         # Places the score at the last valid response token for each path,
         # matching the format that RewardLoopManager.compute_rm_score() produces.
         rm_scores = torch.zeros(num_paths, max_resp_len, dtype=torch.float32)
-        for i, (tree, path) in enumerate(all_paths):
+        for i, (tree, _, path) in enumerate(all_paths):
             leaf = path[-1]
             score = leaf.correctness if leaf.correctness is not None else 0.0
             valid_len = len(all_response_ids[i])
@@ -1442,7 +1456,7 @@ class TreeManager:
                 continue  # external PRM step rewards handled below
             vals = self._non_tensor_batch_template[key]
             replicated = []
-            for tree, _ in all_paths:
+            for tree, _, _ in all_paths:
                 tidx = tree.tree_idx
                 if isinstance(vals, np.ndarray) and tidx < len(vals):
                     replicated.append(vals[tidx])
@@ -1456,6 +1470,31 @@ class TreeManager:
         non_tensor_batch["treerl_step_reward"] = np.array(all_step_rewards, dtype=object)
         non_tensor_batch["num_steps"] = np.array(
             [len(sr) for sr in all_step_rewards], dtype=np.int32
+        )
+        non_tensor_batch["treerl_tree_idx"] = np.array(
+            [tree.tree_idx for tree, _, _ in all_paths], dtype=np.int32
+        )
+        non_tensor_batch["treerl_leaf_idx"] = np.array(
+            [leaf_idx for _, leaf_idx, _ in all_paths], dtype=np.int32
+        )
+        non_tensor_batch["treerl_path_node_ids"] = np.array(
+            [[node.node_id for node in path] for _, _, path in all_paths],
+            dtype=object,
+        )
+        non_tensor_batch["treerl_path_is_forked"] = np.array(
+            [[bool(node.is_forked) for node in path] for _, _, path in all_paths],
+            dtype=object,
+        )
+        non_tensor_batch["treerl_path_rewardable"] = np.array(
+            [[bool(node.process_rewardable) for node in path] for _, _, path in all_paths],
+            dtype=object,
+        )
+        non_tensor_batch["treerl_path_format_ok"] = np.array(
+            [
+                [bool(check_step_format_fol(node.step_text or "")) for node in path]
+                for _, _, path in all_paths
+            ],
+            dtype=object,
         )
 
         # External PRM step rewards — read from TreeNode.ext_prm_scores.
@@ -1479,7 +1518,7 @@ class TreeManager:
             nid_key = f"{prm_name}_step_node_ids"
             per_path_scores = []
             per_path_node_ids = []
-            for path_idx, (tree, path) in enumerate(all_paths):
+            for path_idx, (tree, _, path) in enumerate(all_paths):
                 scores = []
                 node_ids = []
                 token_offset = 0
