@@ -206,6 +206,11 @@ def _get_default_api_config() -> dict:
         "temperature": 0.2,
         "max_tokens": 1024,
         "top_p": 0.8,
+        "api_context_shrink_min_tokens": 128,
+        "api_context_shrink_max_tokens": 512,
+        "api_context_shrink_retries": 3,
+        "api_context_shrink_initial_margin": 16,
+        "api_context_shrink_margin_step": 64,
     }
 
 
@@ -471,6 +476,8 @@ def call_llm(
     min_context_shrink_tokens = int(cfg.get("api_context_shrink_min_tokens", 128))
     max_context_shrink_tokens = int(cfg.get("api_context_shrink_max_tokens", 256))
     max_context_shrink_retries = int(cfg.get("api_context_shrink_retries", 1))
+    context_shrink_initial_margin = int(cfg.get("api_context_shrink_initial_margin", 0))
+    context_shrink_margin_step = int(cfg.get("api_context_shrink_margin_step", 0))
     context_shrink_retries = 0
     estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
 
@@ -501,7 +508,13 @@ def call_llm(
             context_error = _parse_context_length_error(exc)
             if context_error is not None and context_shrink_retries < max_context_shrink_retries:
                 max_context, prompt_tokens, requested_output_tokens = context_error
-                available_output_tokens = max_context - prompt_tokens
+                raw_available_output_tokens = max_context - prompt_tokens
+                context_shrink_margin = max(
+                    0,
+                    context_shrink_initial_margin
+                    + context_shrink_retries * context_shrink_margin_step,
+                )
+                available_output_tokens = raw_available_output_tokens - context_shrink_margin
                 shrink_tokens = requested_output_tokens - available_output_tokens
                 if (
                     available_output_tokens >= min_context_shrink_tokens
@@ -509,10 +522,13 @@ def call_llm(
                     and available_output_tokens < max_output_tokens
                 ):
                     logger.warning(
-                        "OpenAI request exceeded context by %d tokens; reducing max_tokens from %d to %d",
+                        "OpenAI request exceeded context by %d tokens; reducing max_tokens from %d to %d "
+                        "(raw_available=%d, safety_margin=%d)",
                         shrink_tokens,
                         max_output_tokens,
                         available_output_tokens,
+                        raw_available_output_tokens,
+                        context_shrink_margin,
                     )
                     max_output_tokens = available_output_tokens
                     estimated_tokens = _estimate_openai_request_tokens(messages, max_output_tokens)
