@@ -898,6 +898,9 @@ class TreeManager:
                 "fol_correction_z3_s_max": 0.0,
                 "fol_verify_step_s_sum": 0.0,
                 "fol_verify_step_s_max": 0.0,
+                "fol_autofilled_quantifier_steps": 0,
+                "fol_autofilled_free_identifier_steps": 0,
+                "fol_sort_mismatch_steps": 0,
                 "fol_prepare_trees": 0,
                 "fol_prepare_unique": 0,
                 "fol_prepare_failed": 0,
@@ -1056,6 +1059,15 @@ class TreeManager:
                 self.ext_prm_profile["fol_cache_hits"] += 1
             else:
                 self.ext_prm_profile["fol_cache_misses"] += 1
+            if debug.get("autofilled_quantifier_variables"):
+                self.ext_prm_profile["fol_autofilled_quantifier_steps"] += 1
+            if debug.get("autofilled_free_identifiers"):
+                self.ext_prm_profile["fol_autofilled_free_identifier_steps"] += 1
+            if (
+                debug.get("translation_sort_mismatches")
+                or debug.get("invalid_translation_reason") == "z3_sort_mismatch"
+            ):
+                self.ext_prm_profile["fol_sort_mismatch_steps"] += 1
             judge_usage = debug.get("judge_usage", {})
             if isinstance(judge_usage, dict):
                 self.ext_prm_profile["fol_judge_calls"] += int(judge_usage.get("calls", 0) or 0)

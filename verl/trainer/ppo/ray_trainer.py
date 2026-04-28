@@ -1732,6 +1732,14 @@ class RayPPOTrainer:
                                         "fol_prepare_s_max", 0.0
                                     )
                                 if fol_tasks:
+                                    for key in (
+                                        "fol_autofilled_quantifier_steps",
+                                        "fol_autofilled_free_identifier_steps",
+                                        "fol_sort_mismatch_steps",
+                                    ):
+                                        value = ext_prm_profile.get(key, 0)
+                                        metrics[f"tree/{key}"] = value
+                                        metrics[f"tree/{key.replace('_steps', '_rate')}"] = value / fol_tasks
                                     timing_pairs = {
                                         "translation_s": "fol_translation_s",
                                         "correct_loop_s": "fol_correct_loop_s",
@@ -1928,6 +1936,10 @@ class RayPPOTrainer:
                                     if unknown_identifiers:
                                         print("[FOL Unknown Identifiers]")
                                         print(json.dumps(unknown_identifiers, ensure_ascii=False, indent=2))
+                                    sort_mismatches = step_debug.get("translation_sort_mismatches")
+                                    if sort_mismatches:
+                                        print("[FOL Sort Mismatches]")
+                                        print(json.dumps(sort_mismatches, ensure_ascii=False, indent=2))
                                     autofilled_quantifier_variables = step_debug.get("autofilled_quantifier_variables")
                                     if autofilled_quantifier_variables:
                                         print("[FOL Autofilled Quantifier Variables]")
@@ -2197,6 +2209,9 @@ class RayPPOTrainer:
                     "fol_invalid_translation_steps": "fol_judge/invalid_translation_steps",
                     "fol_invalid_expression_steps": "fol_judge/invalid_expression_steps",
                     "fol_expression_repair_steps": "fol_judge/expression_repair_steps",
+                    "fol_autofilled_quantifier_steps": "fol_judge/autofilled_quantifier_steps",
+                    "fol_autofilled_free_identifier_steps": "fol_judge/autofilled_free_identifier_steps",
+                    "fol_sort_mismatch_steps": "fol_judge/sort_mismatch_steps",
                     "fol_leakage_steps": "fol_judge/leakage_steps",
                     "fol_student_duplicate_steps": "fol_judge/student_duplicate_steps",
                     "fol_declaration_failed_steps": "fol_judge/declaration_failed_steps",
@@ -2217,6 +2232,9 @@ class RayPPOTrainer:
                         "fol_invalid_translation_steps": "fol_judge/invalid_translation_rate",
                         "fol_invalid_expression_steps": "fol_judge/invalid_expression_rate",
                         "fol_expression_repair_steps": "fol_judge/expression_repair_rate",
+                        "fol_autofilled_quantifier_steps": "fol_judge/autofilled_quantifier_rate",
+                        "fol_autofilled_free_identifier_steps": "fol_judge/autofilled_free_identifier_rate",
+                        "fol_sort_mismatch_steps": "fol_judge/sort_mismatch_rate",
                         "fol_leakage_steps": "fol_judge/leakage_rate",
                         "fol_student_duplicate_steps": "fol_judge/student_duplicate_rate",
                         "fol_declaration_failed_steps": "fol_judge/declaration_failed_rate",

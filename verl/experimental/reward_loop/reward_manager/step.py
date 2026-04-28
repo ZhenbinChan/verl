@@ -257,6 +257,9 @@ class StepRewardManager(RewardManagerBase):
                     "fol_invalid_translation_steps": 0,
                     "fol_invalid_expression_steps": 0,
                     "fol_expression_repair_steps": 0,
+                    "fol_autofilled_quantifier_steps": 0,
+                    "fol_autofilled_free_identifier_steps": 0,
+                    "fol_sort_mismatch_steps": 0,
                     "fol_leakage_steps": 0,
                     "fol_student_duplicate_steps": 0,
                     "fol_declaration_failed_steps": 0,
@@ -443,6 +446,9 @@ class StepRewardManager(RewardManagerBase):
             fol_invalid_translation_steps = 0
             fol_invalid_expression_steps = 0
             fol_expression_repair_steps = 0
+            fol_autofilled_quantifier_steps = 0
+            fol_autofilled_free_identifier_steps = 0
+            fol_sort_mismatch_steps = 0
             fol_leakage_steps = 0
             fol_student_duplicate_steps = 0
             fol_declaration_failed_steps = 0
@@ -477,6 +483,15 @@ class StepRewardManager(RewardManagerBase):
                             fol_invalid_expression_steps += 1
                         if int(step_debug.get("expression_correction_attempts", 0) or 0) > 0:
                             fol_expression_repair_steps += 1
+                        if step_debug.get("autofilled_quantifier_variables"):
+                            fol_autofilled_quantifier_steps += 1
+                        if step_debug.get("autofilled_free_identifiers"):
+                            fol_autofilled_free_identifier_steps += 1
+                        if (
+                            step_debug.get("translation_sort_mismatches")
+                            or step_debug.get("invalid_translation_reason") == "z3_sort_mismatch"
+                        ):
+                            fol_sort_mismatch_steps += 1
                         if step_debug.get("conclusion_leakage_detected") or "FAILED_LEAKED_CONCLUSION" in z3_output:
                             fol_leakage_steps += 1
                         if step_debug.get("student_premise_conclusion_duplicate"):
@@ -509,6 +524,9 @@ class StepRewardManager(RewardManagerBase):
                 reward_extra_info["fol_invalid_translation_steps"] = fol_invalid_translation_steps
                 reward_extra_info["fol_invalid_expression_steps"] = fol_invalid_expression_steps
                 reward_extra_info["fol_expression_repair_steps"] = fol_expression_repair_steps
+                reward_extra_info["fol_autofilled_quantifier_steps"] = fol_autofilled_quantifier_steps
+                reward_extra_info["fol_autofilled_free_identifier_steps"] = fol_autofilled_free_identifier_steps
+                reward_extra_info["fol_sort_mismatch_steps"] = fol_sort_mismatch_steps
                 reward_extra_info["fol_leakage_steps"] = fol_leakage_steps
                 reward_extra_info["fol_student_duplicate_steps"] = fol_student_duplicate_steps
                 reward_extra_info["fol_declaration_failed_steps"] = fol_declaration_failed_steps

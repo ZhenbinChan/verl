@@ -530,6 +530,13 @@ def _render_structured_implication(
             )
             debug_info["unknown_translation_identifiers"] = unknown_identifier_errors
         return _build_fail_closed_code(full_declarations, "FAILED_INVALID_TRANSLATION")
+    sort_mismatch_errors = _collect_sort_mismatch_errors(
+        expr_sources,
+        full_declarations,
+        new_variables,
+    )
+    if sort_mismatch_errors and debug_info is not None:
+        debug_info["translation_sort_mismatches"] = sort_mismatch_errors
     leaked_sources = _find_exact_conclusion_leaks(
         conclusion,
         {
@@ -643,9 +650,9 @@ def _sort_name_from_ast(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _declared_function_arg_sorts(declarations: str) -> dict[str, list[str]]:
-    """Return function argument sort signatures from rendered declaration code."""
-    signatures: dict[str, list[str]] = {}
+def _declared_function_signatures(declarations: str) -> dict[str, dict[str, object]]:
+    """Return function signatures from rendered declaration code."""
+    signatures: dict[str, dict[str, object]] = {}
     try:
         tree = ast.parse(declarations)
     except SyntaxError:
@@ -669,10 +676,64 @@ def _declared_function_arg_sorts(declarations: str) -> dict[str, list[str]]:
                 arg_sorts = []
                 break
             arg_sorts.append(sort_name)
-        if arg_sorts:
+        return_sort = _sort_name_from_ast(node.value.args[-1])
+        if return_sort is not None:
             for target_name in target_names:
-                signatures[target_name] = arg_sorts
+                signatures[target_name] = {"arg_sorts": arg_sorts, "return_sort": return_sort}
     return signatures
+
+
+def _declared_function_arg_sorts(declarations: str) -> dict[str, list[str]]:
+    """Return function argument sort signatures from rendered declaration code."""
+    return {
+        name: list(signature["arg_sorts"])
+        for name, signature in _declared_function_signatures(declarations).items()
+        if isinstance(signature.get("arg_sorts"), list)
+    }
+
+
+def _declared_identifier_sorts(declarations: str, new_variables: list[dict[str, str]]) -> dict[str, str]:
+    """Return declared constant / enum-value sorts available to expressions."""
+    sorts: dict[str, str] = {}
+    try:
+        tree = ast.parse(declarations)
+    except SyntaxError:
+        return sorts
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        call_name = _ast_call_name(node.value)
+        if call_name == "Const" and len(node.value.args) >= 2:
+            sort_name = _sort_name_from_ast(node.value.args[1])
+            if sort_name is None:
+                continue
+            target_names: set[str] = set()
+            for target in node.targets:
+                _collect_assignment_target_names(target, target_names)
+            for target_name in target_names:
+                sorts[target_name] = sort_name
+        elif call_name == "EnumSort":
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Tuple)
+                    and len(target.elts) >= 2
+                    and isinstance(target.elts[0], ast.Name)
+                    and isinstance(target.elts[1], (ast.Tuple, ast.List))
+                ):
+                    sort_name = target.elts[0].id
+                    for enum_target in target.elts[1].elts:
+                        if isinstance(enum_target, ast.Name):
+                            sorts[enum_target.id] = sort_name
+
+    for item in new_variables:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("sort"), str)
+        ):
+            sorts[item["name"]] = item["sort"]
+    return sorts
 
 
 def _declared_identifier_names(declarations: str, new_variables: list[dict[str, str]]) -> set[str]:
@@ -690,6 +751,224 @@ def _declared_identifier_names(declarations: str, new_variables: list[dict[str, 
         if isinstance(item, dict) and isinstance(item.get("name"), str):
             names.add(item["name"])
     return names
+
+
+def _node_source(node: ast.AST) -> str:
+    """Return a compact source string for an expression AST node."""
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return type(node).__name__
+
+
+def _collect_sort_mismatch_errors(
+    expr_sources: dict[str, list[str]],
+    declarations: str,
+    new_variables: list[dict[str, str]],
+) -> list[dict[str, object]]:
+    """Collect likely Z3 sort mismatches without changing verification behavior."""
+    identifier_sorts = _declared_identifier_sorts(declarations, new_variables)
+    function_signatures = _declared_function_signatures(declarations)
+    errors: list[dict[str, object]] = []
+
+    def add_error(
+        *,
+        source: str,
+        index: int,
+        expr: str,
+        function: str,
+        arg_index: int,
+        expected_sort: str,
+        actual_sort: str,
+        actual_expr: str,
+    ) -> None:
+        errors.append({
+            "source": source,
+            "index": index,
+            "expr": expr,
+            "function": function,
+            "arg_index": arg_index,
+            "expected_sort": expected_sort,
+            "actual_sort": actual_sort,
+            "actual_expr": actual_expr,
+        })
+
+    def check_arg(
+        *,
+        source: str,
+        index: int,
+        expr: str,
+        function: str,
+        arg_index: int,
+        expected_sort: str,
+        arg_node: ast.AST,
+    ) -> Optional[str]:
+        actual_sort = infer_sort(arg_node, source=source, index=index, expr=expr)
+        if actual_sort is not None and actual_sort != expected_sort:
+            add_error(
+                source=source,
+                index=index,
+                expr=expr,
+                function=function,
+                arg_index=arg_index,
+                expected_sort=expected_sort,
+                actual_sort=actual_sort,
+                actual_expr=_node_source(arg_node),
+            )
+        return actual_sort
+
+    def infer_sort(node: ast.AST, *, source: str, index: int, expr: str) -> Optional[str]:
+        if isinstance(node, ast.Name):
+            if node.id == "True" or node.id == "False":
+                return "BoolSort()"
+            return identifier_sorts.get(node.id)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool):
+                return "BoolSort()"
+            if isinstance(node.value, int):
+                return "IntSort()"
+            if isinstance(node.value, float):
+                return "RealSort()"
+            return None
+        if isinstance(node, ast.Compare):
+            left_sort = infer_sort(node.left, source=source, index=index, expr=expr)
+            for comparator in node.comparators:
+                right_sort = infer_sort(comparator, source=source, index=index, expr=expr)
+                if left_sort is not None and right_sort is not None and left_sort != right_sort:
+                    add_error(
+                        source=source,
+                        index=index,
+                        expr=expr,
+                        function=type(node.ops[0]).__name__ if node.ops else "Compare",
+                        arg_index=0,
+                        expected_sort=left_sort,
+                        actual_sort=right_sort,
+                        actual_expr=_node_source(comparator),
+                    )
+                left_sort = right_sort or left_sort
+            return "BoolSort()"
+        if not isinstance(node, ast.Call):
+            return None
+
+        call_name = _ast_call_name(node)
+        if call_name in function_signatures:
+            signature = function_signatures[call_name]
+            arg_sorts = signature.get("arg_sorts", [])
+            if isinstance(arg_sorts, list):
+                for arg_index, (arg_node, expected_sort) in enumerate(zip(node.args, arg_sorts)):
+                    if isinstance(expected_sort, str):
+                        check_arg(
+                            source=source,
+                            index=index,
+                            expr=expr,
+                            function=call_name,
+                            arg_index=arg_index,
+                            expected_sort=expected_sort,
+                            arg_node=arg_node,
+                        )
+            return_sort = signature.get("return_sort")
+            return return_sort if isinstance(return_sort, str) else None
+
+        bool_arg_ops = {"And", "Or", "Implies"}
+        if call_name in bool_arg_ops:
+            for arg_index, arg_node in enumerate(node.args):
+                check_arg(
+                    source=source,
+                    index=index,
+                    expr=expr,
+                    function=call_name,
+                    arg_index=arg_index,
+                    expected_sort="BoolSort()",
+                    arg_node=arg_node,
+                )
+            return "BoolSort()"
+        if call_name == "Not":
+            if node.args:
+                check_arg(
+                    source=source,
+                    index=index,
+                    expr=expr,
+                    function=call_name,
+                    arg_index=0,
+                    expected_sort="BoolSort()",
+                    arg_node=node.args[0],
+                )
+            return "BoolSort()"
+        if call_name in {"ForAll", "Exists"}:
+            if len(node.args) >= 2:
+                check_arg(
+                    source=source,
+                    index=index,
+                    expr=expr,
+                    function=call_name,
+                    arg_index=1,
+                    expected_sort="BoolSort()",
+                    arg_node=node.args[1],
+                )
+            return "BoolSort()"
+        if call_name == "If":
+            if node.args:
+                check_arg(
+                    source=source,
+                    index=index,
+                    expr=expr,
+                    function=call_name,
+                    arg_index=0,
+                    expected_sort="BoolSort()",
+                    arg_node=node.args[0],
+                )
+            branch_sorts = [
+                infer_sort(arg_node, source=source, index=index, expr=expr)
+                for arg_node in node.args[1:3]
+            ]
+            if len(branch_sorts) == 2 and all(branch_sorts) and branch_sorts[0] != branch_sorts[1]:
+                add_error(
+                    source=source,
+                    index=index,
+                    expr=expr,
+                    function=call_name,
+                    arg_index=2,
+                    expected_sort=branch_sorts[0],
+                    actual_sort=branch_sorts[1],
+                    actual_expr=_node_source(node.args[2]),
+                )
+            return branch_sorts[0] if branch_sorts else None
+        if call_name == "Distinct":
+            known_sorts = [
+                infer_sort(arg_node, source=source, index=index, expr=expr)
+                for arg_node in node.args
+            ]
+            expected_sort = next((sort for sort in known_sorts if sort is not None), None)
+            if expected_sort is not None:
+                for arg_index, (arg_node, actual_sort) in enumerate(zip(node.args, known_sorts)):
+                    if actual_sort is not None and actual_sort != expected_sort:
+                        add_error(
+                            source=source,
+                            index=index,
+                            expr=expr,
+                            function=call_name,
+                            arg_index=arg_index,
+                            expected_sort=expected_sort,
+                            actual_sort=actual_sort,
+                            actual_expr=_node_source(arg_node),
+                        )
+            return "BoolSort()"
+        if call_name == "BoolVal":
+            return "BoolSort()"
+        if call_name == "IntVal":
+            return "IntSort()"
+        if call_name == "RealVal":
+            return "RealSort()"
+        return None
+
+    for source, expressions in expr_sources.items():
+        for idx, expr in enumerate(expressions):
+            try:
+                tree = ast.parse(expr, mode="eval")
+            except SyntaxError:
+                continue
+            infer_sort(tree.body, source=source, index=idx, expr=expr)
+    return errors
 
 
 def _infer_quantifier_variable_sorts(
