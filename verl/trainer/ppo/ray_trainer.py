@@ -1932,6 +1932,10 @@ class RayPPOTrainer:
                                     if autofilled_quantifier_variables:
                                         print("[FOL Autofilled Quantifier Variables]")
                                         print(json.dumps(autofilled_quantifier_variables, ensure_ascii=False, indent=2))
+                                    autofilled_free_identifiers = step_debug.get("autofilled_free_identifiers")
+                                    if autofilled_free_identifiers:
+                                        print("[FOL Autofilled Free Identifiers]")
+                                        print(json.dumps(autofilled_free_identifiers, ensure_ascii=False, indent=2))
                                     translation_response = step_debug.get("translation_response")
                                     if translation_response:
                                         print("[FOL Translation Response]")

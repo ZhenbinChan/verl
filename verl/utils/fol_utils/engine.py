@@ -506,6 +506,18 @@ def _render_structured_implication(
         if debug_info is not None:
             debug_info["autofilled_quantifier_variables"] = quantifier_diagnostics
 
+    inferred_free_identifiers, free_identifier_diagnostics = _infer_free_identifier_sorts(
+        expr_sources,
+        full_declarations,
+        new_variables,
+    )
+    if inferred_free_identifiers:
+        new_variables = [*new_variables, *inferred_free_identifiers]
+        var_block = _render_const_declarations(new_variables, section_name="New Variables")
+        full_declarations = f"{declarations}\n\n{var_block}" if var_block else declarations
+        if debug_info is not None:
+            debug_info["autofilled_free_identifiers"] = free_identifier_diagnostics
+
     unknown_identifier_errors = _collect_unknown_identifier_errors(
         expr_sources,
         full_declarations,
@@ -586,6 +598,19 @@ def _quantifier_bound_identifier_set(expr: str) -> set[str]:
         elif isinstance(var_arg, ast.Name):
             bound_names.add(var_arg.id)
     return bound_names
+
+
+def _called_function_identifier_set(expr: str) -> set[str]:
+    """Return simple function identifiers used as call heads in an expression."""
+    called_names: set[str] = set()
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return called_names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called_names.add(node.func.id)
+    return called_names
 
 
 def _collect_assignment_target_names(target: ast.AST, names: set[str]) -> None:
@@ -721,6 +746,82 @@ def _infer_quantifier_variable_sorts(
     diagnostics: list[dict[str, object]] = []
     for name, candidates in sorted(candidates_by_name.items()):
         if len(candidates) == 1 and _is_valid_python_identifier(name):
+            sort_name = next(iter(candidates))
+            inferred.append({"name": name, "sort": sort_name})
+            for diagnostic in diagnostics_by_name.get(name, []):
+                diagnostic = dict(diagnostic)
+                diagnostic["sort"] = sort_name
+                diagnostics.append(diagnostic)
+
+    return inferred, diagnostics
+
+
+def _is_autofillable_free_identifier(name: str) -> bool:
+    """Whether an undeclared expression identifier can be treated as a new constant."""
+    return _is_valid_python_identifier(name) and name[:1].islower()
+
+
+def _infer_free_identifier_sorts(
+    expr_sources: dict[str, list[str]],
+    declarations: str,
+    new_variables: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """Infer missing free-identifier sorts from declared function signatures.
+
+    This normalizes translator omissions like ``P(xiao_huang)`` or
+    ``ForAll([x], R(x, e))`` into explicit constants when every observed use of
+    the free identifier has the same declared argument sort. It does not infer
+    call heads, quantifier-bound variables, or uppercase enum-like symbols.
+    """
+    declared_names = _declared_identifier_names(declarations, new_variables)
+    function_arg_sorts = _declared_function_arg_sorts(declarations)
+    candidates_by_name: dict[str, set[str]] = {}
+    diagnostics_by_name: dict[str, list[dict[str, object]]] = {}
+
+    for source, expressions in expr_sources.items():
+        for idx, expr in enumerate(expressions):
+            identifiers = _identifier_set(expr)
+            called_names = _called_function_identifier_set(expr)
+            bound_names = _quantifier_bound_identifier_set(expr)
+            missing_names = sorted(
+                name
+                for name in identifiers - declared_names - called_names - bound_names
+                if _is_autofillable_free_identifier(name)
+            )
+            if not missing_names:
+                continue
+
+            sort_candidates: dict[str, set[str]] = {name: set() for name in missing_names}
+            try:
+                tree = ast.parse(expr, mode="eval")
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                arg_sorts = function_arg_sorts.get(node.func.id)
+                if not arg_sorts:
+                    continue
+                for arg_node, sort_name in zip(node.args, arg_sorts):
+                    if isinstance(arg_node, ast.Name) and arg_node.id in sort_candidates:
+                        sort_candidates[arg_node.id].add(sort_name)
+
+            for name in missing_names:
+                candidates = sorted(sort_candidates.get(name, set()))
+                candidates_by_name.setdefault(name, set()).update(candidates)
+                diagnostics_by_name.setdefault(name, []).append({
+                    "source": source,
+                    "index": idx,
+                    "name": name,
+                    "candidate_sorts": candidates,
+                    "expr": expr,
+                })
+
+    inferred: list[dict[str, str]] = []
+    diagnostics: list[dict[str, object]] = []
+    for name, candidates in sorted(candidates_by_name.items()):
+        if len(candidates) == 1:
             sort_name = next(iter(candidates))
             inferred.append({"name": name, "sort": sort_name})
             for diagnostic in diagnostics_by_name.get(name, []):
