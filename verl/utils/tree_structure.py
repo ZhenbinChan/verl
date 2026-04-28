@@ -101,6 +101,8 @@ class TreeNode:
     # Populated by _map_ext_prm_to_nodes (original chain) and
     # evaluate_branch_ext_prm (forked nodes).
     ext_prm_scores: dict = field(default_factory=dict)
+    ext_prm_penalty: bool = False
+    ext_prm_penalty_reason: Optional[str] = None
 
     # Metadata
     tree_idx: int = 0           # which tree this node belongs to
@@ -207,6 +209,9 @@ class TreeManager:
         split_fn: Optional[Callable] = None,
         use_xml: bool = False,
         ext_prm_max_workers: Optional[int] = None,
+        penalty_max_steps: int = 0,
+        penalty_on_truncated: bool = False,
+        penalty_on_multi_boxed: bool = False,
         penalty_on_bad_format: bool = False,
         penalty_score: float = 0.0,
     ):
@@ -221,6 +226,9 @@ class TreeManager:
         self.config = config
         self.tokenizer = tokenizer
         self.use_xml = use_xml
+        self.penalty_max_steps = int(penalty_max_steps or 0)
+        self.penalty_on_truncated = bool(penalty_on_truncated)
+        self.penalty_on_multi_boxed = bool(penalty_on_multi_boxed)
         self.penalty_on_bad_format = bool(penalty_on_bad_format)
         self.penalty_score = float(penalty_score)
 
@@ -277,6 +285,29 @@ class TreeManager:
             and self.penalty_on_bad_format
             and not check_step_format_fol(step_text or "")
         )
+
+    def _should_penalize_path_format(self, path_text: str) -> bool:
+        """Match the round-0 bad-format precheck on a full path/branch string."""
+        if not (self.use_xml and self.penalty_on_bad_format):
+            return False
+        text = path_text or ""
+        step_open = text.count("<step>")
+        step_close = text.count("</step>")
+        last_step_close = text.rfind("</step>")
+        last_conclusion = text.rfind("<conclusion>")
+        has_conclusion_outside_step = last_conclusion > last_step_close and last_step_close != -1
+        return step_open != step_close or has_conclusion_outside_step
+
+    def _mark_ext_prm_penalty(self, nodes: list["TreeNode"], reason: str) -> None:
+        for node in nodes:
+            if not node.process_rewardable:
+                continue
+            node.ext_prm_penalty = True
+            if node.ext_prm_penalty_reason:
+                if reason not in node.ext_prm_penalty_reason.split("|"):
+                    node.ext_prm_penalty_reason = f"{node.ext_prm_penalty_reason}|{reason}"
+            else:
+                node.ext_prm_penalty_reason = reason
 
     @staticmethod
     def _is_terminal_answer_segment(step_text: str) -> bool:
@@ -767,6 +798,7 @@ class TreeManager:
             fork_depth = len(fork_node.path_from_root())
             branch_step_count = 0
             truncated_by_max_steps = False
+            branch_nodes: list[TreeNode] = []
 
             for step_token_start, step_token_end, step_text in step_ranges:
                 if step_token_start >= step_token_end:
@@ -798,24 +830,54 @@ class TreeManager:
                 prev_node.children.append(new_node)
                 tree.all_nodes.append(new_node)
                 new_nodes.append(new_node)
+                branch_nodes.append(new_node)
                 prev_node = new_node
                 branch_step_count += 1
 
             # Determine finish_reason for the branch leaf
             if prev_node != fork_node:  # at least one node was added
                 eos_token_id = self.tokenizer.eos_token_id
+                repeated_branch = bool(
+                    find_repeated_patterns(
+                        response_text,
+                        pattern_length=self.repetition_pattern_length,
+                        threshold=self.repetition_threshold,
+                    )
+                )
                 if truncated_by_max_steps:
                     prev_node.finish_reason = "length"
-                elif find_repeated_patterns(
-                    response_text,
-                    pattern_length=self.repetition_pattern_length,
-                    threshold=self.repetition_threshold,
-                ):
+                elif repeated_branch:
                     prev_node.finish_reason = "repetition"
                 elif eos_token_id is not None and valid_resp_ids and valid_resp_ids[-1] == eos_token_id:
                     prev_node.finish_reason = "stop"
                 else:
                     prev_node.finish_reason = "length"
+
+                if self.penalty_max_steps > 0:
+                    overflow_nodes = [
+                        node for node in branch_nodes
+                        if len(node.path_from_root()) > self.penalty_max_steps
+                    ]
+                    self._mark_ext_prm_penalty(
+                        overflow_nodes,
+                        f"num_steps>{self.penalty_max_steps}",
+                    )
+
+                if repeated_branch:
+                    self._mark_ext_prm_penalty(branch_nodes, "repetition")
+
+                # Align forked branches with the round-0 anti-hacking precheck.
+                # Scope the penalty to newly generated branch nodes; ancestors
+                # keep their previously assigned scores.
+                full_path_text = "".join(n.step_text or "" for n in fork_node.path_from_root()) + response_text
+                if self.penalty_on_truncated and prev_node.finish_reason == "length" and not truncated_by_max_steps:
+                    self._mark_ext_prm_penalty(branch_nodes, "truncated")
+                if self.penalty_on_multi_boxed:
+                    boxed_count = len(re.findall(r"\\boxed\{", full_path_text))
+                    if boxed_count > 1:
+                        self._mark_ext_prm_penalty(branch_nodes, f"multi_boxed={boxed_count}")
+                if self._should_penalize_path_format(full_path_text):
+                    self._mark_ext_prm_penalty(branch_nodes, "bad_format_path")
 
         return new_nodes
 
@@ -1025,6 +1087,21 @@ class TreeManager:
         def _run_task(task):
             node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
             reward_fn = ext_prm_fns[prm_name]
+            if node.ext_prm_penalty:
+                debug = None
+                if prm_name == "fol":
+                    debug = {
+                        "path_penalty_closed": True,
+                        "path_penalty_reason": node.ext_prm_penalty_reason,
+                        "path_penalty_score": self.penalty_score,
+                        "judge_usage": {
+                            "calls": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                    }
+                return node, prm_name, self.penalty_score, debug
             if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
                 api_config = getattr(reward_fn, "keywords", {}).get("api_config") or {}
                 format_failed_score = float(api_config.get("fol_format_failed_score", 0.0))

@@ -334,22 +334,24 @@ class StepRewardManager(RewardManagerBase):
         reward_extra_info["num_steps"] = len(step_positions)
 
         # --- Anti-reward-hacking precheck ---
-        # If a response already matches a configured penalty condition, skip
-        # expensive process-reward calls and directly assign the penalty score.
-        penalize = False
+        # Hard path penalties skip all expensive process-reward calls. Max-step
+        # overflow is finer grained: keep the prefix and penalize only the suffix.
+        hard_penalize = False
+        hard_penalty_reason = []
+        penalty_step_indices = set()
         penalty_reason = []
 
         num_steps = len(step_positions)
 
         # 1. Too many steps
         if self.penalty_max_steps > 0 and num_steps > self.penalty_max_steps:
-            penalize = True
+            penalty_step_indices.update(range(self.penalty_max_steps, num_steps))
             penalty_reason.append(f"num_steps={num_steps}>{self.penalty_max_steps}")
 
         # 2. Response truncated (hit max_response_length)
         if self.penalty_on_truncated and valid_response_length >= response_length:
-            penalize = True
-            penalty_reason.append("truncated")
+            hard_penalize = True
+            hard_penalty_reason.append("truncated")
 
         # 3. Multiple \boxed{} in response
         if self.penalty_on_multi_boxed:
@@ -357,8 +359,8 @@ class StepRewardManager(RewardManagerBase):
 
             boxed_count = len(_re.findall(r'\\boxed\{', response_str))
             if boxed_count > 1:
-                penalize = True
-                penalty_reason.append(f"multi_boxed={boxed_count}")
+                hard_penalize = True
+                hard_penalty_reason.append(f"multi_boxed={boxed_count}")
 
         # 4. Bad format: mismatched <step>/<conclusion> tags
         if self.penalty_on_bad_format:
@@ -371,19 +373,23 @@ class StepRewardManager(RewardManagerBase):
             if last_conclusion > last_step_close and last_step_close != -1:
                 has_conclusion_outside_step = True
             if step_open != step_close or has_conclusion_outside_step:
-                penalize = True
-                penalty_reason.append(
+                hard_penalize = True
+                hard_penalty_reason.append(
                     f"bad_format(open={step_open},close={step_close},conclusion_outside={has_conclusion_outside_step})"
                 )
 
-        if penalize:
+        if hard_penalize:
             penalty_val = self.penalty_score
             penalty_rewards = [(int(pos), penalty_val) for _, pos in step_positions]
             for reward_type in self.step_reward_types:
                 reward_extra_info[f"{reward_type}_step_reward"] = penalty_rewards
             reward_extra_info["process_reward_penalized"] = True
-            reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
+            reward_extra_info["penalty_reason"] = "|".join(hard_penalty_reason)
             return {"reward_score": score, "reward_extra_info": reward_extra_info}
+
+        if penalty_step_indices:
+            reward_extra_info["process_reward_penalized"] = True
+            reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
 
         # 2.2 Extract prompt text for reward functions that need it
         raw_prompt = data_item.non_tensor_batch.get("raw_prompt", [])
@@ -416,6 +422,8 @@ class StepRewardManager(RewardManagerBase):
             # Pre-build all step histories so calls can run in parallel
             call_args = []
             for i, (step_text, token_end_pos) in enumerate(step_positions):
+                if i in penalty_step_indices:
+                    continue
                 history = [s for s, _ in step_positions[: i + 1]]
                 call_args.append((step_text, prompt_text, history, token_end_pos))
 
@@ -507,6 +515,11 @@ class StepRewardManager(RewardManagerBase):
                 else:
                     score_value = float(score_item)
                 step_rewards.append((int(args[3]), score_value))
+            for i in sorted(penalty_step_indices):
+                if i < len(step_positions):
+                    _, token_end_pos = step_positions[i]
+                    step_rewards.append((int(token_end_pos), self.penalty_score))
+            step_rewards.sort(key=lambda item: item[0])
 
             key = f"{reward_type}_step_reward"
             reward_extra_info[key] = step_rewards

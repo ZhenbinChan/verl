@@ -342,28 +342,30 @@ class TreeRewardManager(RewardManagerBase):
             reward_extra_info["num_steps"] = len(step_positions)
 
             # --- Anti-reward-hacking precheck ---
-            # If a response already matches a configured penalty condition, skip
-            # expensive external-PRM calls and directly assign the penalty score.
-            penalize = False
+            # Hard path penalties skip all expensive external-PRM calls. Max-step
+            # overflow is finer grained: keep the prefix and penalize only the suffix.
+            hard_penalize = False
+            hard_penalty_reason = []
+            penalty_step_indices = set()
             penalty_reason = []
 
             num_steps = len(step_positions)
 
             if self.penalty_max_steps > 0 and num_steps > self.penalty_max_steps:
-                penalize = True
+                penalty_step_indices.update(range(self.penalty_max_steps, num_steps))
                 penalty_reason.append(f"num_steps={num_steps}>{self.penalty_max_steps}")
 
             if self.penalty_on_truncated and valid_response_length >= response_length:
-                penalize = True
-                penalty_reason.append("truncated")
+                hard_penalize = True
+                hard_penalty_reason.append("truncated")
 
             if self.penalty_on_multi_boxed:
                 import re as _re
 
                 boxed_count = len(_re.findall(r'\\boxed\{', response_str))
                 if boxed_count > 1:
-                    penalize = True
-                    penalty_reason.append(f"multi_boxed={boxed_count}")
+                    hard_penalize = True
+                    hard_penalty_reason.append(f"multi_boxed={boxed_count}")
 
             if self.penalty_on_bad_format:
                 step_open = response_str.count("<step>")
@@ -374,19 +376,30 @@ class TreeRewardManager(RewardManagerBase):
                 if last_conclusion > last_step_close and last_step_close != -1:
                     has_conclusion_outside_step = True
                 if step_open != step_close or has_conclusion_outside_step:
-                    penalize = True
-                    penalty_reason.append(
+                    hard_penalize = True
+                    hard_penalty_reason.append(
                         f"bad_format(open={step_open},close={step_close},conclusion_outside={has_conclusion_outside_step})"
                     )
 
-            if penalize:
+            if hard_penalize:
                 penalty_val = self.penalty_score
                 penalty_rewards = [(int(pos), penalty_val) for _, pos in step_positions]
                 for reward_type in self.step_reward_types:
                     reward_extra_info[f"{reward_type}_step_reward"] = penalty_rewards
                 reward_extra_info["process_reward_penalized"] = True
-                reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
+                reward_extra_info["penalty_reason"] = "|".join(hard_penalty_reason)
                 return {"reward_score": score, "reward_extra_info": reward_extra_info}
+
+            if penalty_step_indices:
+                penalty_rewards = [
+                    (int(step_positions[i][1]), self.penalty_score)
+                    for i in sorted(penalty_step_indices)
+                    if i < len(step_positions)
+                ]
+                for reward_type in self.step_reward_types:
+                    reward_extra_info[f"{reward_type}_step_reward"] = penalty_rewards
+                reward_extra_info["process_reward_penalized"] = True
+                reward_extra_info["penalty_reason"] = "|".join(penalty_reason)
 
             # TreeManager can optionally compute original-chain external PRMs
             # after initialization. This keeps the anti-hacking fast path above
@@ -426,6 +439,8 @@ class TreeRewardManager(RewardManagerBase):
                 # N sequential blocking calls and ceil(N/16) concurrent ones.
                 call_args = []
                 for i, (step_text, token_end_pos) in enumerate(step_positions):
+                    if i in penalty_step_indices:
+                        continue
                     history = [s for s, _ in step_positions[: i + 1]]
                     call_args.append((step_text, prompt_text, history, token_end_pos))
 
@@ -447,6 +462,11 @@ class TreeRewardManager(RewardManagerBase):
                     (int(args[3]), float(score))
                     for args, score in zip(call_args, scores)
                 ]
+                for i in sorted(penalty_step_indices):
+                    if i < len(step_positions):
+                        _, token_end_pos = step_positions[i]
+                        step_rewards.append((int(token_end_pos), self.penalty_score))
+                step_rewards.sort(key=lambda item: item[0])
 
                 key = f"{reward_type}_step_reward"
                 reward_extra_info[key] = step_rewards

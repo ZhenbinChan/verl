@@ -1564,6 +1564,24 @@ class RayPPOTrainer:
                                 tokenizer=self.tokenizer,
                                 use_xml=use_xml,
                                 ext_prm_max_workers=tree_ext_prm_max_workers,
+                                penalty_max_steps=int(
+                                    reward_cfg.get(
+                                        "penalty_max_steps",
+                                        algo_cfg.get("penalty_max_steps", 0),
+                                    )
+                                ),
+                                penalty_on_truncated=bool(
+                                    reward_cfg.get(
+                                        "penalty_on_truncated",
+                                        algo_cfg.get("penalty_on_truncated", False),
+                                    )
+                                ),
+                                penalty_on_multi_boxed=bool(
+                                    reward_cfg.get(
+                                        "penalty_on_multi_boxed",
+                                        algo_cfg.get("penalty_on_multi_boxed", False),
+                                    )
+                                ),
                                 penalty_on_bad_format=bool(
                                     reward_cfg.get(
                                         "penalty_on_bad_format",
