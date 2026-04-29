@@ -5,7 +5,7 @@ This note summarizes the current debugging state for the LogiQA2K 1.5B FOL rewar
 ## Current Findings
 
 - FOL step-GDPO v3 is the most plausible "multi-step and reasonably correct" run so far.
-  - Best observed val: step 300, acc `0.38095`, val num_steps `7.34`.
+  - Best observed val: step 350, acc `0.38249`, val num_steps `7.11`.
   - It keeps multi-step generations, unlike tree runs.
   - Recent FOL judge metrics improved versus older v2/v2.1 runs, but leakage and sort/declaration failures still exist.
 - FOL Tree-GAE shallow v3 achieved the highest current FOL-tree val acc but via short reasoning.
@@ -51,6 +51,58 @@ This note summarizes the current debugging state for the LogiQA2K 1.5B FOL rewar
   - Theoretical leaves per prompt: `4 * (1 + 1 * 3 * 1) = 16`, matching step-GDPO `n=16`.
 
 ## Experiment Directions
+
+### Prompt-v2 Follow-Up
+
+- `verl/prompts/logical_reasoning.txt` was revised to keep FOL/Z3-friendly atomic reasoning while replacing unsafe boxed examples such as `\boxed{animal}` and `\boxed{No}` with option-letter-safe examples.
+- `verl/prompts/logical_reasoning_2.txt` adds a shorter prompt variant closer to the earlier premise-selection style.
+- Existing `data/logiqa2k/*.parquet` files embed the old system prompt, so prompt changes require regenerating parquet data before rerunning baselines.
+- For ReClor-style datasets, check both sides before training:
+  - raw labels are often `0..3`;
+  - the prompt should display options as A/B/C/D;
+  - `reward_model.ground_truth` and reward extraction must agree on either option letters or raw indices. Prefer option letters for MCQ rewards.
+
+### Baseline Matrix To Run
+
+The useful experiment set is now broader than only FOL. Run it in stages so the full matrix does not waste GPU time before the prompt effect is isolated.
+
+Stage 0: regenerate prompt-v2 data.
+
+- Create a new data directory, e.g. `data/logiqa2k_prompt_v2/`, using `verl/prompts/logical_reasoning.txt`.
+- Optionally create `data/logiqa2k_prompt_v2_short/` using `logical_reasoning_2.txt`.
+- Do not overwrite the old parquet unless the old prompt is no longer needed for comparison.
+
+Stage 1: new-prompt 1.5B sanity baselines.
+
+- Actor: Qwen2.5-1.5B.
+- Methods: step-GDPO first; tree-GAE only after step-GDPO shows nonzero/healthy behavior.
+- Rewards to run:
+  - outcome-only;
+  - format;
+  - self-eval;
+  - FOL;
+  - random, as a sanity/control run.
+- Goal: determine whether the prompt alone fixes answer-format collapse or changes the short-reasoning tendency.
+
+Stage 2: stronger-actor baselines.
+
+- Actor families to compare:
+  - Qwen2.5-1.5B and Qwen2.5-7B;
+  - 3.5/4B and 9B class models if available locally.
+- Rewards:
+  - outcome-only, format, self-eval, FOL;
+  - random only once per actor family as a control, not necessarily every size.
+- Primary metrics:
+  - val acc;
+  - val num_steps;
+  - XML bad-format / missing-boxed / multi-boxed rates;
+  - FOL invalid translation, leakage, entailed rate, and judge latency.
+
+Stage 3: tree reruns after step baselines.
+
+- Only rerun Tree-GAE when the corresponding step-GDPO run is healthy.
+- For each promising actor/reward pair, compare shallow tree vs deeper tree.
+- Stop early if the tree collapses to one-step answer paths again without improving acc.
 
 - Let FOL step-GDPO v3 finish first.
   - It is the main candidate for "more steps and decent accuracy".
@@ -101,6 +153,21 @@ This note summarizes the current debugging state for the LogiQA2K 1.5B FOL rewar
 
 ## Current Best Reference Points
 
+| Run | Log | Status | Best Val Acc | Best Step | Val Num Steps At Best | Final / Latest Val Acc | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| FOL step-GDPO v3 | `train_fol_step_gdpo_gpu2_v3.log` | running | `0.38249` | 350 | `7.11` | `0.38249` latest known | Best current multi-step FOL run. |
+| FOL Tree-GAE shallow v3 | `train_fol_tree_gae_gpu3_judge56_v3.log` | done | `0.43318` | 450 | `1.00` | `0.37942` at step 500 | Highest FOL-tree acc but short-answer strategy. |
+| FOL Tree-GAE deeper v1 | `train_fol_tree_gae_gpu4_judge56_deeper_v1.log` | running | `0.37174` | 100 | `1.14` | `0.33641` at step 150 | Deeper tree still collapses short. |
+| FOL step-GDPO old | `train_fol_step_gdpo_gpu2.log` | done | `0.39017` | 350 | `5.45` | `0.35791` at step 500 | Old aux FOL reward metric scale is buggy; compare acc/steps only. |
+| FOL step-GDPO v2 | `train_fol_step_gdpo_gpu2_v2.log` | failed/stopped | `0.34869` | 100 | `3.97` | `0.34869` at step 100 | Hit fatal errors later. |
+| FOL step-GDPO v2.1 | `train_fol_step_gdpo_gpu2_v2_1.log` | stopped | `0.34562` | 150 | `2.45` | `0.34562` at step 150 | Shorter than v3. |
+| format Tree-GAE old | `train_format_tree_gae_gpu3.log` | done | `0.43318` | 450 | `2.53` | `0.40707` at step 500 | Cheap format reward; longer than FOL tree but still shortens. |
+| outcome Tree-GAE old | `train_outcome_tree_gae_gpu3.log` | done | `0.35638` | 500 | `0.00` | `0.35638` at step 500 | Outcome-only tree collapse / no step metric. |
+| self-eval step-GDPO old | `train_self_eval_step_gdpo_gpu3.log` | done | `0.41475` | 350 | `1.00` | `0.40553` at step 500 | Strong acc, short answers. |
+| self-eval Tree-GAE old | `train_self_eval_tree_gae_gpu5_new.log` | done | `0.36098` | 150 | not recorded in latest table | `0.25960` at step 500 | Poor late behavior; old penalty contamination may affect interpretation. |
+
+Auxiliary reward means from older runs can exceed `[0, 1]` due to an older aggregation/reporting bug. Use val acc, val num_steps, format validity, and FOL debug rates for cross-run comparison.
+
 - Step-GDPO self-eval 8:2:
   - Log: `train_self_eval_step_gdpo_gpu3.log`
   - Best val acc: `0.41475` at step 350.
@@ -111,7 +178,7 @@ This note summarizes the current debugging state for the LogiQA2K 1.5B FOL rewar
   - But it is a short-answer strategy.
 - FOL step-GDPO v3:
   - Log: `train_fol_step_gdpo_gpu2_v3.log`
-  - Best observed val acc so far: `0.38095` at step 300.
+  - Best observed val acc so far: `0.38249` at step 350.
   - Keeps val num_steps around `7`.
 
 ## Useful Local Commands
@@ -168,4 +235,3 @@ for name, file in files:
         print("val", step_re.search(line).group(1) if step_re.search(line) else "?", get(line, "val-core/logiqa/acc/mean@1"), get(line, "val-aux/logiqa/num_steps/mean@1"))
 PY
 ```
-
