@@ -17,6 +17,7 @@ fi
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ray stop --force
+export WANDB_ENTITY=${WANDB_ENTITY:-verl-fol}
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 

@@ -21,6 +21,7 @@ FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen3.6-35B-A3B}
 DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
 DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
+export WANDB_ENTITY=${WANDB_ENTITY:-verl-fol}
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ray stop --force

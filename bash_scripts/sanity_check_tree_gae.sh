@@ -5,6 +5,7 @@ MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
 DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
+export WANDB_ENTITY=${WANDB_ENTITY:-verl-fol}
 # ray stop --force  # disabled: kills other Ray instances when running concurrent jobs
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
