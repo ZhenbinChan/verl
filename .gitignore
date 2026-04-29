@@ -138,7 +138,7 @@ eval/
 
 visualization/
 ckpt/
-
 output_models/
 results/
 homogeneous_data/
+record/

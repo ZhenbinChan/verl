@@ -16,7 +16,7 @@ data:
   truncation: error
   image_key: images
   video_key: videos
-  prompt_instruction: null  # instruction to append to prompts at training time
+  prompt_path: null  # instruction to append to prompts at training time
 
 custom_cls:
       path: null

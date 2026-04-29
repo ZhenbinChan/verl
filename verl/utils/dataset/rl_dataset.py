@@ -90,7 +90,12 @@ class RLHFDataset(Dataset):
         self.chat_template_func = config.get("chat_template_func", None)
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
-        self.prompt_instruction = config.get("data.prompt_instruction", None)
+        # Read instruction from prompt path
+        self.prompt_instruction = None
+        prompt_path = config.get("prompt_path", None)
+        if prompt_path is not None and os.path.isfile(prompt_path):
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                self.prompt_instruction = f.read()
         self.serialize_dataset = False
         self._download()
         self._read_files_and_tokenize()
@@ -111,6 +116,21 @@ class RLHFDataset(Dataset):
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         print(f"dataset len: {len(self.dataframe)}")
+
+        # inject prompt_instruction into every prompt BEFORE filtering
+        if self.prompt_instruction is not None:
+            prompt_key = self.prompt_key
+            prompt_instruction = self.prompt_instruction
+
+            def _inject_instruction(example):
+                messages = example[prompt_key]
+                for msg in reversed(messages):
+                    if msg["role"] == "user":
+                        msg["content"] = prompt_instruction + "\n\n" + msg["content"]
+                        break
+                return {prompt_key: messages}
+
+            self.dataframe = self.dataframe.map(_inject_instruction)
 
         # filter out too long prompts
         if self.filter_overlong_prompts:
@@ -138,7 +158,6 @@ class RLHFDataset(Dataset):
 
     def _build_messages(self, example: dict):
         messages: list = example.pop(self.prompt_key)
-        
         if self.image_key in example or self.video_key in example:
             for message in messages:
                 content = message["content"]
@@ -161,13 +180,6 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
         messages = self._build_messages(row_dict)
-        # Inject instruction into the last user message if configured
-        if self.prompt_instruction is not None:
-            for msg in reversed(messages):
-                if msg["role"] == "user":
-                    msg["content"] = self.prompt_instruction + "\n\n" + msg["content"] 
-                    break
-
         model_inputs = {}
 
         if self.processor is not None:

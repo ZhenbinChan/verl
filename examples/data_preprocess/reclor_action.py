@@ -43,6 +43,8 @@ if __name__ == "__main__":
         print(instruction_following)
     instruction_following = str(instruction_following)
 
+    print(instruction_following)
+
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         option_mapping = ["A", "B", "C", "D","E", "F", "G", "H", "I", "J"]
@@ -52,8 +54,8 @@ if __name__ == "__main__":
             answer_raw = example.pop("answers")# list
             solution = option_mapping[int(example.pop("label"))]
 
-            answers = "\n\n".join(["Option (" + option_mapping[i] +")"+ answer_raw[i] + ".\n" for i in range(len(answer_raw))])
-            question = "## Task Instructions\n" + instruction_following + "<Context>" + context + "</Context>" + "<Question>" + question_raw + "</Question>" + "<Options>" + answers + "</Options>"
+            answers = "\n\n".join(["Option (" + option_mapping[i] +")"+ answer_raw[i] + "." for i in range(len(answer_raw))])
+            question = "## Task Instructions\n\n" + instruction_following + "\n\n<Context>" + context + "</Context>\n\n" + "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
             # solution = extract_solution(answer_raw)
 
             # import pdb;pdb.set_trace()
@@ -84,7 +86,7 @@ if __name__ == "__main__":
 
     train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
-    # import pdb;pdb.set_trace() 
+    import pdb;pdb.set_trace() 
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir

@@ -1349,6 +1349,8 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            import os
+                            experiment_name = self.config.trainer.get("experiment_name", None)
                             dump_path = os.path.join(rollout_data_dir, f"{experiment_name}")
                             self._dump_generations(
                                 inputs=inputs,
