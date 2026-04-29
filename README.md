@@ -65,13 +65,33 @@ Equivalent explicit command:
 ```bash
 python examples/data_preprocess/logiqa.py \
     --version 1 \
-    --num_samples 2000 \
+    --num_samples -1 \
     --format xml \
     --local_save_dir ./data/logiqa2k_prompt_v2 \
     --system_prompt_file logical_reasoning.txt
 ```
 
 Prompt changes do not affect existing parquet files. Regenerate parquet whenever `logical_reasoning.txt` or `logical_reasoning_2.txt` changes.
+
+For ReClor, use the same prompt-v2 format and A/B/C/D answer labels:
+
+```bash
+bash bash_scripts/prepare_reclor_prompt_v2.sh
+```
+
+This writes labeled splits only:
+
+```text
+data/reclor_prompt_v2/train.parquet
+data/reclor_prompt_v2/validation.parquet
+```
+
+The official ReClor test split is unlabeled, so the script skips it by default.
+To save it for generation-only inspection:
+
+```bash
+bash bash_scripts/prepare_reclor_prompt_v2.sh --save_unlabeled_test
+```
 
 The new experiment scripts use:
 
