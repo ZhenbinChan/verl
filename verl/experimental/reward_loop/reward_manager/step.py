@@ -9,6 +9,7 @@ tensors and apply big-pool normalization.
 """
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import os
@@ -30,6 +31,11 @@ from verl.utils.step_splitter import (
 
 def _compute_step_reward_random(step_text: str, prompt_text: str, step_history: list[str], **kwargs) -> float:
     """Random baseline process reward."""
+    random_seed = kwargs.get("random_seed")
+    if random_seed is not None:
+        payload = "\x1f".join([str(random_seed), prompt_text, *step_history, step_text])
+        digest = hashlib.sha256(payload.encode("utf-8", errors="ignore")).digest()
+        return float(digest[0] & 1)
     return float(random.randint(0, 1))
 
 
@@ -200,6 +206,8 @@ class StepRewardManager(RewardManagerBase):
         self.penalty_score = float(
             reward_cfg.get("penalty_score", algo_cfg.get("penalty_score", 0.0))
         )  # score to assign when penalized (default 0.0, can be negative)
+        random_reward_seed = reward_cfg.get("random_reward_seed", algo_cfg.get("random_reward_seed", None))
+        self.random_reward_seed = int(random_reward_seed) if random_reward_seed is not None else None
 
         # LLM-backed step rewards are token-budget-bound long before 64 threads
         # are useful. Keep the default conservative, and let scripts opt in to
@@ -434,6 +442,7 @@ class StepRewardManager(RewardManagerBase):
                     lambda args=args: reward_fn(
                         args[0], args[1], args[2],
                         api_config=self.api_config, extra_info=extra_info,
+                        **({"random_seed": self.random_reward_seed} if reward_type == "random" else {}),
                         **({"return_debug": True} if reward_type == "fol" else {}),
                         **({"fol_shared_state": fol_shared_state} if reward_type == "fol" else {}),
                     ),

@@ -12,8 +12,8 @@ set -x
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen3.6-35B-A3B}
-DATA_NAME=logiqa2k
-DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 if [[ -z "${VLLM_ATTENTION_BACKEND+x}" ]]; then
     export VLLM_ATTENTION_BACKEND=XFORMERS
 fi
@@ -132,7 +132,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_weighted_value_style=sqrt \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_tree_gae_fol_local_1epo_${DATA_NAME}_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

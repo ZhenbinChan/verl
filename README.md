@@ -34,6 +34,58 @@ python examples/data_preprocess/logiqa.py \
     --system_prompt_file logical_reasoning.txt
 ```
 
+### Prompt-v2 Parquet Generation
+
+The `verl-fol-2` experiment scripts expect prompt-v2 parquet files by default. Generate them before launching new prompt-v2 baselines:
+
+```bash
+bash bash_scripts/prepare_logiqa2k_prompt_v2.sh
+```
+
+This writes:
+
+```text
+data/logiqa2k_prompt_v2/train.parquet
+data/logiqa2k_prompt_v2/validation.parquet
+data/logiqa2k_prompt_v2/test.parquet
+```
+
+The default prompt file is `verl/prompts/logical_reasoning.txt`. It is the main FOL/Z3-aware prompt with MCQ-safe A/B/C/D examples.
+
+To generate the shorter prompt variant:
+
+```bash
+PROMPT_FILE=logical_reasoning_2.txt \
+DATA_DIR=./data/logiqa2k_prompt_v2_short \
+bash bash_scripts/prepare_logiqa2k_prompt_v2.sh
+```
+
+Equivalent explicit command:
+
+```bash
+python examples/data_preprocess/logiqa.py \
+    --version 1 \
+    --num_samples 2000 \
+    --format xml \
+    --local_save_dir ./data/logiqa2k_prompt_v2 \
+    --system_prompt_file logical_reasoning.txt
+```
+
+Prompt changes do not affect existing parquet files. Regenerate parquet whenever `logical_reasoning.txt` or `logical_reasoning_2.txt` changes.
+
+The new experiment scripts use:
+
+```bash
+trainer.project_name='verl-fol-2'
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+```
+
+You can still run against another dataset directory by overriding:
+
+```bash
+DATA_DIR=./data/logiqa2k_prompt_v2 bash bash_scripts/fol_step_gdpo_localjudge_boost.sh
+```
+
 Version 1, 2000 samples, plain text format:
 
 ```bash

@@ -2,8 +2,8 @@ set -x
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-DATA_NAME=logiqa2k
-DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 # ray stop --force  # disabled: kills other Ray instances when running concurrent jobs
 unset ROCR_VISIBLE_DEVICES
@@ -69,7 +69,7 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_weighted_value_style=sqrt \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_tree_gae_sanity_check_${DATA_NAME}_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

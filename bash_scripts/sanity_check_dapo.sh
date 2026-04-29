@@ -15,8 +15,8 @@ set -x
 # 1. 基础路径设置
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-DATA_NAME=logiqa2k
-DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 # ray stop --force
 # ! For some reason, great lakes sets these two env vars
@@ -72,7 +72,7 @@ python3 -u -m verl.trainer.main_ppo \
     +reward_model.reward_kwargs.max_resp_len=2048 \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_dapo_sanity_check_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

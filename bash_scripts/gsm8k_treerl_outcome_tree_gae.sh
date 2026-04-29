@@ -65,7 +65,7 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_weighted_value_style=sqrt \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_treerl_${DATA_NAME}_outcome_only_M6_N2_L1_T2" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

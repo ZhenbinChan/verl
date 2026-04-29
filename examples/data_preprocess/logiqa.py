@@ -34,7 +34,7 @@ def make_map_fn(split, format='flat', system_prompt=None, user_prompt_suffix=Non
         labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
         options_str = "\n".join([f"Option ({labels[i]}): {opt}" for i, opt in enumerate(options) if i < len(labels)])
         
-        instruction_following = 'Please reason step by step with steps separated by "\n\n", and put the index of the correct answer within \\boxed{{}}.'
+        instruction_following = 'Please reason step by step with steps separated by "\n\n", and put the letter of the correct option within \\boxed{{}}.'
         
         if format == 'xml':
             prompt_content = f"<Context>\n{context}\n</Context>\n\n<Question>\n{question_text}\n</Question>\n\n<Options>\n{options_str}\n</Options>\n\n{instruction_following}"

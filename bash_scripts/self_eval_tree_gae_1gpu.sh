@@ -14,8 +14,8 @@ set -x
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-DATA_NAME=logiqa2k
-DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
@@ -125,7 +125,7 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_weighted_value_style=sqrt \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_self_eval_1gpu_4_1_3" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

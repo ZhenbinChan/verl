@@ -18,8 +18,8 @@ set -x
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
 FOL_MODEL_PATH=${FOL_MODEL_PATH:-~/run/models/Qwen3.6-35B-A3B}
-DATA_NAME=logiqa2k
-DATA_DIR="$HOME/run/work/verl/data/${DATA_NAME}"
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
+DATA_DIR=${DATA_DIR:-"$HOME/run/work/verl/data/${DATA_NAME}"}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
@@ -118,7 +118,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_step_gdpo_fol_local_1gpu_1epo_${DATA_NAME}" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

@@ -16,7 +16,7 @@ set -x
 
 HOME=~
 MODEL_PATH=~/run/models/Qwen2.5-1.5B-Instruct
-DATA_NAME=logiqa2k
+DATA_NAME=${DATA_NAME:-logiqa2k_prompt_v2}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 DATA_DIR=${DATA_DIR:-"$REPO_ROOT/data/${DATA_NAME}"}
@@ -97,7 +97,7 @@ python3 -u -m verl.trainer.main_ppo \
     +trainer.tree_weighted_value_style=sqrt \
     +algorithm.tree_ext_reward_dedup=True \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl-fol' \
+    trainer.project_name='verl-fol-2' \
     trainer.experiment_name="qwen1.5b_tree_gae_1epo_${DATA_NAME}_fol_boost_deeper_4_1_3_1" \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
