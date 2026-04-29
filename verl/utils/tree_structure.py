@@ -1087,20 +1087,19 @@ class TreeManager:
         def _run_task(task):
             node, prm_name, prompt_text, step_history, extra_info, fol_shared_state = task
             reward_fn = ext_prm_fns[prm_name]
-            if node.ext_prm_penalty:
+            if prm_name == "fol" and node.ext_prm_penalty:
                 debug = None
-                if prm_name == "fol":
-                    debug = {
-                        "path_penalty_closed": True,
-                        "path_penalty_reason": node.ext_prm_penalty_reason,
-                        "path_penalty_score": self.penalty_score,
-                        "judge_usage": {
-                            "calls": 0,
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "total_tokens": 0,
-                        },
-                    }
+                debug = {
+                    "path_penalty_closed": True,
+                    "path_penalty_reason": node.ext_prm_penalty_reason,
+                    "path_penalty_score": self.penalty_score,
+                    "judge_usage": {
+                        "calls": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                }
                 return node, prm_name, self.penalty_score, debug
             if prm_name == "fol" and self._should_penalize_step_format(node.step_text):
                 api_config = getattr(reward_fn, "keywords", {}).get("api_config") or {}
