@@ -26,7 +26,7 @@ from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="/home/chenzhb/Workspaces/verl/data/reclor_action/")
+    parser.add_argument("--local_dir", default="./data/reclor_action/")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]
 
-    with open("/home/chenzhb/Workspaces/verl/mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
+    with open("./mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
         instruction_following = f.read()
         print(instruction_following)
     instruction_following = str(instruction_following)

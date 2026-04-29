@@ -1349,14 +1349,14 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            # 如果要查看每一个 Step 的输出再解除注释
-                            # self._dump_generations(
-                            #     inputs=inputs,
-                            #     outputs=outputs,
-                            #     scores=scores,
-                            #     reward_extra_infos_dict=reward_extra_infos_dict,
-                            #     dump_path=rollout_data_dir,
-                            # )
+                            dump_path = os.path.join(rollout_data_dir, f"{experiment_name}")
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=outputs,
+                                scores=scores,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=dump_path,
+                            )
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
@@ -1377,7 +1377,7 @@ class RayPPOTrainer:
                     }
                 )
 
-                                # collect metrics
+                # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
@@ -1399,7 +1399,7 @@ class RayPPOTrainer:
                     experiment_name = self.config.trainer.experiment_name
                     dataset_name = self.config.data.train_files.split("/")[-1].split(".")[0]
                     if rollout_data_dir:
-                        tracking_file = os.path.join(rollout_data_dir, f"{experiment_name}_{dataset_name}_homogeneous.json")
+                        tracking_file = os.path.join(rollout_data_dir, f"{experiment_name}.json")
                         with open(tracking_file, "w") as f:
                             json.dump({
                                 "all_correct_uids": self.all_correct_uids,

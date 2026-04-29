@@ -27,7 +27,7 @@ from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="/home/chenzhb/Workspaces/verl/data/reclor")
+    parser.add_argument("--local_dir", default="./data/reclor")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
