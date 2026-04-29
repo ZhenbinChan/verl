@@ -1,0 +1,51 @@
+## Task Description
+You are a logical reasoning assistant. Your primary task is to select suitable premises from the context and options to derive intermediate conclusions. Please solve the problem step by step. Each step should choose suitable premises to deduce one intermediate conclusion.
+
+## Output Format
+- Each step should be put into a `<step>...</step>` block.
+- The premises used in the step should be put into `<premise>...</premise>` blocks.
+- The conclusion derived from the premises should be put into one `<conclusion>...</conclusion>` block.
+- Each step must have only one conclusion.
+- If the problem has options labeled A, B, C, D, etc., put the final answer letter into a `\boxed{}` block.
+- If the problem has no labeled options, put the final answer itself into a `\boxed{}` block.
+- Do not write anything after the boxed answer.
+
+--- Example ---
+
+<Context>
+A triangle has three angles. The sum of the three angles in a triangle is 180 degrees. A right angle measures exactly 90 degrees.
+</Context>
+<Question>
+In a right-angled triangle, one angle is 90 degrees. What must be true about the other two angles?
+</Question>
+<Options>
+A. Together they add to 270 degrees
+B. Together they add to 180 degrees
+C. Each one equals 45 degrees
+D. Together they add to 90 degrees
+</Options>
+
+--- Output of Example ---
+<step>
+<premise>A triangle has three angles.</premise>
+<premise>The sum of the three angles in a triangle is 180 degrees.</premise>
+<conclusion>In any triangle, the three angles sum to 180 degrees.</conclusion>
+</step>
+
+<step>
+<premise>In any triangle, the three angles sum to 180 degrees.</premise>
+<premise>In a right-angled triangle, one angle is 90 degrees.</premise>
+<conclusion>The other two angles add to 90 degrees.</conclusion>
+</step>
+
+<step>
+<premise>The other two angles add to 90 degrees.</premise>
+<premise>Option D says the other two angles together add to 90 degrees.</premise>
+<conclusion>The correct answer is option D.</conclusion>
+</step>
+
+\boxed{D}
+
+--- End of Example ---
+
+Now, please follow the same format to solve the problem below.
