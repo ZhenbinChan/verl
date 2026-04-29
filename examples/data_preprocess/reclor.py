@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import datasets
+from tqdm.auto import tqdm
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "verl" / "prompts"
@@ -99,6 +100,20 @@ def make_map_fn(split, format="xml", system_prompt=None, user_prompt_suffix=None
     return process_fn
 
 
+def map_with_progress(dataset, split, format, system_prompt=None, user_prompt_suffix=None, require_label=True):
+    mapper = make_map_fn(
+        split,
+        format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+        require_label=require_label,
+    )
+    rows = []
+    for idx, example in enumerate(tqdm(dataset, desc=f"Processing {split}", unit="example")):
+        rows.append(mapper(example, idx))
+    return datasets.Dataset.from_list(rows)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -137,25 +152,21 @@ if __name__ == "__main__":
     if args.num_samples is not None and args.num_samples != -1:
         train_dataset = train_dataset.select(range(min(len(train_dataset), args.num_samples)))
 
-    train_dataset = train_dataset.map(
-        function=make_map_fn(
-            "train",
-            args.format,
-            system_prompt=system_prompt,
-            user_prompt_suffix=user_prompt_suffix,
-            require_label=True,
-        ),
-        with_indices=True,
+    train_dataset = map_with_progress(
+        train_dataset,
+        "train",
+        args.format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+        require_label=True,
     )
-    val_dataset = val_dataset.map(
-        function=make_map_fn(
-            "validation",
-            args.format,
-            system_prompt=system_prompt,
-            user_prompt_suffix=user_prompt_suffix,
-            require_label=True,
-        ),
-        with_indices=True,
+    val_dataset = map_with_progress(
+        val_dataset,
+        "validation",
+        args.format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+        require_label=True,
     )
 
     train_dataset.to_parquet(os.path.join(local_save_dir, "train.parquet"))
@@ -167,15 +178,13 @@ if __name__ == "__main__":
 
     if args.save_unlabeled_test:
         test_dataset = _load_json_split("test")
-        test_dataset = test_dataset.map(
-            function=make_map_fn(
-                "test",
-                args.format,
-                system_prompt=system_prompt,
-                user_prompt_suffix=user_prompt_suffix,
-                require_label=False,
-            ),
-            with_indices=True,
+        test_dataset = map_with_progress(
+            test_dataset,
+            "test",
+            args.format,
+            system_prompt=system_prompt,
+            user_prompt_suffix=user_prompt_suffix,
+            require_label=False,
         )
         test_dataset.to_parquet(os.path.join(local_save_dir, "test_unlabeled.parquet"))
         print(f"Unlabeled test samples: {len(test_dataset)}")

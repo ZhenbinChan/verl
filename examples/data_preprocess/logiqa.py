@@ -6,6 +6,7 @@ import argparse
 import os
 from pathlib import Path
 import datasets
+from tqdm.auto import tqdm
 
 # Default location for prompt files
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "verl" / "prompts"
@@ -69,6 +70,19 @@ def make_map_fn(split, format='flat', system_prompt=None, user_prompt_suffix=Non
 
     return process_fn
 
+
+def map_with_progress(dataset, split, format, system_prompt=None, user_prompt_suffix=None):
+    mapper = make_map_fn(
+        split,
+        format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+    )
+    rows = []
+    for idx, example in enumerate(tqdm(dataset, desc=f"Processing {split}", unit="example")):
+        rows.append(mapper(example, idx))
+    return datasets.Dataset.from_list(rows)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_save_dir", default="./data/logiqa2k", help="The save directory for the preprocessed dataset.")
@@ -122,9 +136,27 @@ if __name__ == "__main__":
         train_dataset = train_dataset.select(range(min(len(train_dataset), args.num_samples)))
 
     # Transform datasets
-    train_dataset = train_dataset.map(function=make_map_fn("train", args.format, system_prompt=system_prompt, user_prompt_suffix=user_prompt_suffix), with_indices=True)
-    val_dataset = val_dataset.map(function=make_map_fn("validation", args.format, system_prompt=system_prompt, user_prompt_suffix=user_prompt_suffix), with_indices=True)
-    test_dataset = test_dataset.map(function=make_map_fn("test", args.format, system_prompt=system_prompt, user_prompt_suffix=user_prompt_suffix), with_indices=True)
+    train_dataset = map_with_progress(
+        train_dataset,
+        "train",
+        args.format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+    )
+    val_dataset = map_with_progress(
+        val_dataset,
+        "validation",
+        args.format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+    )
+    test_dataset = map_with_progress(
+        test_dataset,
+        "test",
+        args.format,
+        system_prompt=system_prompt,
+        user_prompt_suffix=user_prompt_suffix,
+    )
 
     # Save to parquet
     train_dataset.to_parquet(os.path.join(local_save_dir, "train.parquet"))
