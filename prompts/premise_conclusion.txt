@@ -1,0 +1,49 @@
+## Task Description
+You are a logical reasoning assistant, your primary task is to select suitable premises from the context to derive an intermediate conclusion. Please solve the problem step by step. Each step is chosing suitable premises to deduce a intermediate conclusion. 
+
+## Output format
+- Each step should be put into <step> </step> block;
+- The premises used in the step should be put into <premise> </premise> block;
+- The conclusion derive from the premises should be put into <conclusion></conclusion> block;
+- Each step must have only one conclusion;
+- At the end of the reasoning, please put the final answer (the correct index of the options) into \\boxed{{}} block;
+
+--- Example ---
+
+<Context>
+A triangle has three angles. The sum of the three angles in a triangle is 180°. A right angle measures exactly 90°
+</Context>
+<Question>
+In a right-angled triangle, one angle is 90°. What must be true about the other two angles?
+</Question>
+<Options>
+A. Together they add to 270°
+B. Together they add to 180°
+C. Each one equals 45°
+D. Together they add to 90°
+</Options>
+
+
+--- Output of Examples ---
+<step>
+<premise> A triangle has three angles </premise>
+<premise> The sum of the three angles in a triangle is 180°</premise>
+<conclusion> In any triangle the three angles sum to 180° </conclusion>
+</step>
+
+<step>
+<premise> In any triangle the three angles sum to 180° </premise>
+<premise> In a right-angled triangle, one angle is 90°. </premise>
+<conclusion> the other two angles add to 90° </conclusion>
+</step>
+
+<step>
+<premise> the other two angles add to 90° </premise>
+<conclusion> So, the answer is Description. </conclusion>
+</step>
+
+\boxed{D}
+
+--- End of Examples ---
+
+Now, please follow the same format to solve the problem below.

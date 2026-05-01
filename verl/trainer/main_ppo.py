@@ -228,6 +228,9 @@ class TaskRunner:
         elif reward_manager_name == "mcts":
             from verl.workers.reward_manager import MCTSRewardManager
             reward_manager_cls = MCTSRewardManager
+        elif reward_manager_name == "naive_format":
+            from verl.workers.reward_manager import NaiveFormatRewardManager
+            reward_manager_cls = NaiveFormatRewardManager
         else:
             raise NotImplementedError
 
