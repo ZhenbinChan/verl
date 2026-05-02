@@ -23,20 +23,23 @@ from verl.utils.reward_score import _default_compute_score
 
 class NaiveFormatRewardManager:
     """Reward manager with dual rewards:
-    1. Format reward: +1 at the last token of each correctly formatted <step>...</step> block.
+    1. Format reward: placed at the last token of each correctly formatted <step>...</step> block.
+       Normalized as: num_valid_steps / max(total_step_blocks, target_format_steps).
+       This incentivizes multi-step reasoning (at least target_format_steps steps)
+       while penalizing the 1-step shortcut.
     2. Answer reward: +1 at the last valid token if the final answer (extracted from \\boxed{})
        matches the ground truth.
     
-    The GRPO advantage estimator sums all token-level rewards per sequence,
-    so total_reward = num_valid_steps + answer_correct (0 or 1).
+    The GRPO advantage estimator sums all token-level rewards per sequence.
     """
 
     def __init__(self, tokenizer, num_examine, compute_score=None,
-                 reward_fn_key="data_source", **kwargs) -> None:
+                 reward_fn_key="data_source", target_format_steps=3, **kwargs) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
+        self.target_format_steps = target_format_steps
 
     # ------------------------------------------------------------------
     # Format parsing helpers
@@ -58,7 +61,10 @@ class NaiveFormatRewardManager:
         Uses a stack to handle nesting correctly.
 
         Returns:
-            List[int]: character offsets (pointing at '>' in '</step>') for valid steps.
+            tuple: (valid_end_positions, total_steps)
+                - valid_end_positions: List[int], character offsets for valid steps only.
+                - total_steps: int, total number of matched <step>...</step> pairs
+                  (regardless of content validity). Used as normalization denominator.
         """
         # Collect all <step> and </step> occurrences with their positions
         events = []
@@ -70,6 +76,7 @@ class NaiveFormatRewardManager:
         events.sort(key=lambda x: x[0])
 
         valid_end_positions = []
+        total_steps = 0
         stack = []  # stack of (open_char_pos)
 
         for pos, etype, end_pos in events:
@@ -78,6 +85,7 @@ class NaiveFormatRewardManager:
             elif etype == 'close':
                 if stack:
                     open_pos = stack.pop()
+                    total_steps += 1
                     # Extract the content between <step> and </step>
                     # end_pos is the character position right after '>', so
                     # the content goes from open_pos to (pos) (start of '</step>')
@@ -87,7 +95,7 @@ class NaiveFormatRewardManager:
                         valid_end_positions.append(end_pos - 1)
                 # else: unmatched </step>, ignore
 
-        return valid_end_positions
+        return valid_end_positions, total_steps
 
     def _find_token_idx_for_char(self, char_pos: int,
                                   offsets) -> int:
@@ -168,7 +176,7 @@ class NaiveFormatRewardManager:
             # 2. Parse format: find valid <step> blocks and their
             #    corresponding token positions
             # ----------------------------------------------------------
-            step_end_char_positions = self._parse_step_end_positions(response_str)
+            step_end_char_positions, total_step_blocks = self._parse_step_end_positions(response_str)
 
             # Re-encode the response to get token-to-character offset mapping
             encoded = self.tokenizer(response_str, return_offsets_mapping=True,
@@ -176,12 +184,13 @@ class NaiveFormatRewardManager:
             offsets = encoded["offset_mapping"]  # list of (start_char, end_char)
 
             step_format_rewards = 0
+            norm_factor = 1.0 / max(total_step_blocks, self.target_format_steps) if total_step_blocks > 0 else 0.0
             for char_pos in step_end_char_positions:
                 token_idx = self._find_token_idx_for_char(char_pos, offsets)
                 # Safety: clamp to valid response length
                 if 0 <= token_idx < valid_response_length:
-                    reward_tensor[i, token_idx] = 1.0
-                    step_format_rewards += 1
+                    reward_tensor[i, token_idx] = norm_factor
+                    step_format_rewards += norm_factor
 
             # ----------------------------------------------------------
             # 3. Place answer reward at the last valid response token
