@@ -72,6 +72,70 @@ python3 examples/data_preprocess/logiqa_tree.py --local_dir data/logiqa_tree
 python3 examples/data_preprocess/logiqa_action.py --local_dir data/logiqa_action
 ```
 
+### Generic MCQ Dataset Preprocessor (`mcq_preprocess.py`)
+
+A unified preprocessor for any multiple-choice question dataset. Supports optional FOL metadata extraction for use with step-level TreeRL (FOL as PRM).
+
+#### Quick Start
+
+```bash
+# ReClor — convert from existing parquet (no FOL extraction)
+python examples/data_preprocess/mcq_preprocess.py \
+    --input_parquet data/reclor/train.parquet \
+    --output_dir data/reclor \
+    --skip_fol_extraction
+
+# LogiQA — convert from existing parquet
+python examples/data_preprocess/mcq_preprocess.py \
+    --input_parquet data/logiqa/train.parquet \
+    --output_dir data/logiqa \
+    --preset logiqa \
+    --skip_fol_extraction
+```
+
+#### With FOL Metadata Extraction (for FOL-as-PRM)
+
+```bash
+# Extract FOL metadata using LLM API (requires running LLM service)
+python examples/data_preprocess/mcq_preprocess.py \
+    --input_parquet data/reclor/train.parquet \
+    --output_dir data/reclor_fol \
+    --preset reclor \
+    --api_key "your-api-key"
+
+#后台运行大批量提取
+nohup python examples/data_preprocess/mcq_preprocess.py \
+    --input_parquet data/reclor/train.parquet \
+    --output_dir data/reclor_fol \
+    --preset reclor \
+    > reclor_fol.log 2>&1 &
+```
+
+Output files:
+- `train.parquet` / `test.parquet` — dataset files for training
+- `fol_metadata.json` — FOL metadata (required by `trainer.step_treerl_config.prm=fol`)
+
+#### Key Parameters
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--input_parquet` | Path to existing train.parquet | — |
+| `--output_dir` | Output directory | `./data/mcq` |
+| `--preset` | Dataset preset (`reclor`, `logiqa`) | — |
+| `--context_field` | Field name for context | `context` |
+| `--question_field` | Field name for question | `question` |
+| `--answers_field` | Field name for answer choices | `answers` |
+| `--label_field` | Field name for ground-truth label | `label` |
+| `--raw_prompt_template` | Prompt template with `{context}`, `{question}`, `{answers}` | See below |
+| `--skip_fol_extraction` | Skip FOL metadata extraction | `False` |
+| `--api_key` | API key for LLM (or set `DASHSCOPE_API_KEY` env var) | — |
+| `--num_samples` | Limit number of samples (for testing) | All |
+
+Default `raw_prompt_template`:
+```
+<Context>{context}</Context><Question>{question}</Question><Options>{answers}</Options>
+```
+
 
 # Evaluation
 ### Method 1:
