@@ -231,6 +231,12 @@ class TaskRunner:
         elif reward_manager_name == "naive_format":
             from verl.workers.reward_manager import NaiveFormatRewardManager
             reward_manager_cls = NaiveFormatRewardManager
+        elif reward_manager_name == "step_tree":
+            from verl.workers.reward_manager import StepTreeRewardManager
+            reward_manager_cls = StepTreeRewardManager
+        elif reward_manager_name == "ig":
+            from verl.workers.reward_manager import IGRewardManager
+            reward_manager_cls = IGRewardManager
         else:
             raise NotImplementedError
 

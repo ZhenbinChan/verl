@@ -48,6 +48,10 @@ class MCTSNode:
     # --- Heuristic (can be used for selection) ---
     heuristic: float = 0.0               # = R by default; available for custom strategies
 
+    # --- KL-StepTreeRL specific ---
+    is_branch_point: bool = False        # True if this step was selected for branching
+    kl_score: float = 0.0                # KL divergence at this step (for IG selection)
+
     def __hash__(self):
         return hash((self.tree_idx, self.node_idx))
 
@@ -125,6 +129,24 @@ def leaf_backpropagate(node: MCTSNode) -> None:
         parent.accumulated_value += node.R
         node = parent
         parent = node.parent
+
+
+def leaf_backpropagate_correct(leaf: MCTSNode) -> None:
+    """Propagate leaf correctness counts up the tree (for KL-StepTreeRL).
+
+    Increments terminal_in_subtree for each ancestor.
+    Increments correct_terminal_in_subtree if leaf.is_correct is True.
+    This computes V = correct_terminal_in_subtree / terminal_in_subtree.
+    """
+    if leaf.is_correct:
+        leaf.correct_terminal_in_subtree += 1
+
+    node = leaf
+    while node.parent is not None:
+        node.parent.terminal_in_subtree += 1
+        if leaf.is_correct:
+            node.parent.correct_terminal_in_subtree += 1
+        node = node.parent
 
 
 def selected_backpropagate(node: MCTSNode) -> None:

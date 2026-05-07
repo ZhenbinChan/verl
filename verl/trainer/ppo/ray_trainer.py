@@ -95,6 +95,8 @@ class AdvantageEstimator(str, Enum):
     Tree_GAE = "tree_gae"
     ENTROPY_REINFORCE = "entropy_reinforce"
     MCTS_GRPO = "mcts_grpo"
+    STEP_TREERL_GRPO = "step_treerl_grpo"
+    IG_GRPO = "ig_grpo"
 
 
 @dataclass
@@ -319,6 +321,38 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.STEP_TREERL_GRPO:
+        step_correctness = data.batch.get(
+            "step_correctness_scores", data.batch["reward_fn_scores"]
+        )
+        advantages, returns = core_algos.compute_step_treerl_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            score_idx=data.batch["score_ids"],
+            reward_mask=data.batch["reward_mask"],
+            step_correctness_scores=step_correctness,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.IG_GRPO:
+        step_correctness = data.batch.get(
+            "step_correctness_scores", data.batch["reward_fn_scores"]
+        )
+        advantages, returns = core_algos.compute_ig_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            score_idx=data.batch["score_ids"],
+            reward_mask=data.batch["reward_mask"],
+            step_correctness_scores=step_correctness,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -450,6 +484,8 @@ class RayPPOTrainer:
             AdvantageEstimator.Tree_GAE,
             AdvantageEstimator.ENTROPY_REINFORCE,
             AdvantageEstimator.MCTS_GRPO,
+            AdvantageEstimator.STEP_TREERL_GRPO,
+            AdvantageEstimator.IG_GRPO,
         ]:
             self.use_critic = False
         else:
@@ -600,6 +636,32 @@ class RayPPOTrainer:
                 f"sampling_strategy='treerl' requires reward_model.reward_manager='entropy', "
                 f"but got '{reward_manager_name}'. "
                 f"Use EntropyRewardManager for tree-level value back-propagation rewards."
+            )
+
+        # step_treerl strategy requires step_tree reward manager
+        if str(config.trainer.get("sampling_strategy", "")).lower() == "step_treerl":
+            reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            assert reward_manager_name == "step_tree", (
+                f"sampling_strategy='step_treerl' requires reward_model.reward_manager='step_tree', "
+                f"but got '{reward_manager_name}'. "
+                f"Use StepTreeRewardManager for step-level PRM-based dense rewards."
+            )
+            assert config.algorithm.adv_estimator in [AdvantageEstimator.STEP_TREERL_GRPO], (
+                f"sampling_strategy='step_treerl' requires algorithm.adv_estimator='step_treerl_grpo', "
+                f"but got '{config.algorithm.adv_estimator}'."
+            )
+
+        # information_gain strategy requires ig reward manager
+        if str(config.trainer.get("sampling_strategy", "")).lower() == "information_gain":
+            reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            assert reward_manager_name == "ig", (
+                f"sampling_strategy='information_gain' requires reward_model.reward_manager='ig', "
+                f"but got '{reward_manager_name}'. "
+                f"Use IGRewardManager for step-level PRM-based dense rewards."
+            )
+            assert config.algorithm.adv_estimator in [AdvantageEstimator.IG_GRPO], (
+                f"sampling_strategy='information_gain' requires algorithm.adv_estimator='ig_grpo', "
+                f"but got '{config.algorithm.adv_estimator}'."
             )
 
         print("[validate_config] All configuration checks passed successfully!")

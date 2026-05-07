@@ -492,6 +492,10 @@ class ParallelMCTSStrategy(SamplingStrategy):
 
             selected = select_terminal(tree_leaves, self.num_traces)
 
+            # Pad to exactly num_traces paths per prompt so repeat_times is exact
+            while len(selected) < self.num_traces:
+                selected.append(selected[-1])
+
             # --- Optional: weighted update ---
             if self.use_weighted_value:
                 for leaf in selected:

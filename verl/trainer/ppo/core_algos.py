@@ -430,6 +430,129 @@ def compute_mcts_advantage(
     return combined_adv, combined_adv
 
 
+def compute_step_treerl_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    score_idx: torch.Tensor,
+    reward_mask: torch.Tensor,
+    step_correctness_scores: torch.Tensor,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+):
+    """Step-level advantage for step_treerl sampling strategy.
+
+    A_step = PRM - V_baseline per step, broadcast to all tokens within the step.
+    V_baseline = correct_terminal_in_subtree / terminal_in_subtree per step node.
+    Optionally applies GRPO-style group normalization.
+
+    Args:
+        token_level_rewards: step rewards per token [B, L_resp]
+        response_mask: mask over valid response tokens [B, L_resp]
+        index: prompt indices for grouping [B]
+        score_idx: step end token positions [B, max_steps], padded with -1
+        reward_mask: mask for valid steps [B, max_steps]
+        step_correctness_scores: V per step [B, max_steps]
+        epsilon: numerical stability
+        norm_adv_by_std_in_grpo: whether to normalize by std (GRPO style)
+
+    Returns:
+        advantages, returns: both [B, L_resp]
+    """
+    bsz, resp_len = token_level_rewards.shape
+    max_steps = score_idx.size(1)
+
+    # Step-level: A = PRM - V(correct/terminal), broadcast to step span
+    step_adv = torch.zeros_like(token_level_rewards)
+    for i in range(bsz):
+        last_end = -1
+        for j in range(max_steps):
+            if reward_mask[i, j] <= 0:
+                continue
+            end_pos = score_idx[i, j]
+            if end_pos < 0 or end_pos >= resp_len:
+                continue
+            start_pos = max(0, last_end + 1)
+            end_pos = min(end_pos, resp_len - 1)
+            step_a = token_level_rewards[i, end_pos] - step_correctness_scores[i, j]
+            step_adv[i, start_pos : end_pos + 1] = step_a
+            last_end = end_pos
+    step_adv = step_adv * response_mask
+
+    # GRPO-style group normalization
+    if norm_adv_by_std_in_grpo:
+        with torch.no_grad():
+            id2mean = {}
+            id2std = {}
+            for i in range(bsz):
+                pid = index[i]
+                if pid not in id2mean:
+                    mask = index == pid
+                    group_adv = step_adv[mask]
+                    group_scores = group_adv.sum(dim=-1)
+                    id2mean[pid] = group_scores.mean()
+                    id2std[pid] = group_scores.std() if len(group_scores) > 1 else torch.tensor(1.0, device=step_adv.device)
+            for i in range(bsz):
+                pid = index[i]
+                step_adv[i] = (step_adv[i] - id2mean[pid]) / (id2std[pid] + epsilon)
+    else:
+        with torch.no_grad():
+            id2mean = {}
+            for i in range(bsz):
+                pid = index[i]
+                if pid not in id2mean:
+                    mask = index == pid
+                    group_adv = step_adv[mask]
+                    id2mean[pid] = group_adv.sum(dim=-1).mean()
+            for i in range(bsz):
+                pid = index[i]
+                step_adv[i] = step_adv[i] - id2mean[pid]
+
+    step_adv = step_adv * response_mask
+    return step_adv, step_adv
+
+
+def compute_ig_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    score_idx: torch.Tensor,
+    reward_mask: torch.Tensor,
+    step_correctness_scores: torch.Tensor,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+):
+    """Step-level advantage for information_gain sampling strategy.
+
+    Identical formula to compute_step_treerl_advantage:
+    A_step = PRM - V_baseline per step, broadcast to all tokens within the step.
+    Separate function for potential future divergence.
+
+    Args:
+        token_level_rewards: step rewards per token [B, L_resp]
+        response_mask: mask over valid response tokens [B, L_resp]
+        index: prompt indices for grouping [B]
+        score_idx: step end token positions [B, max_steps], padded with -1
+        reward_mask: mask for valid steps [B, max_steps]
+        step_correctness_scores: V per step [B, max_steps]
+        epsilon: numerical stability
+        norm_adv_by_std_in_grpo: whether to normalize by std (GRPO style)
+
+    Returns:
+        advantages, returns: both [B, L_resp]
+    """
+    return compute_step_treerl_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        score_idx=score_idx,
+        reward_mask=reward_mask,
+        step_correctness_scores=step_correctness_scores,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    )
+
+
 def compute_reinforce_plus_plus_baseline_outcome_advantage(token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, epsilon: float = 1e-6):
     """
     Compute advantage for RF++-baseline (https://arxiv.org/abs/2501.03262), operating only on Outcome reward

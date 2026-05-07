@@ -1,5 +1,6 @@
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
+export WANDB_ENTITY='zhenbin'
 
 set -x
 
@@ -55,7 +56,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.reward_kwargs.reward_style=null \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
-    trainer.project_name='verl' \
+    trainer.project_name='zhenbinchan' \
     trainer.experiment_name='Qwen2.5-7B_Reclor_GRPO_ORM' \
     trainer.rollout_data_dir=$HOME/record/ \
     trainer.n_gpus_per_node=$GPUS \

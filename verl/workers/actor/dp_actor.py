@@ -20,7 +20,7 @@ Single Process Actor
 import itertools
 import logging
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
@@ -62,11 +62,12 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
 
-    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False, return_last_logits=False) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            last_logits: # (bs, vocab_size) or None
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -80,6 +81,7 @@ class DataParallelPPOActor(BasePPOActor):
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
             entropy = None
+            last_logits = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
@@ -113,6 +115,10 @@ class DataParallelPPOActor(BasePPOActor):
                 )  # prevent model thinks we are generating
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
+                # Save raw logits before temperature for last-position extraction
+                if return_last_logits:
+                    raw_logits_rmpad = logits_rmpad.detach().clone()
+
                 logits_rmpad.div_(temperature)
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
@@ -131,6 +137,15 @@ class DataParallelPPOActor(BasePPOActor):
                     log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
                     if calculate_entropy:
                         entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    if return_last_logits:
+                        raw_logits_rmpad = gather_outpus_and_unpad(raw_logits_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+
+                # Pad raw logits back to full shape and extract last position
+                if return_last_logits:
+                    full_raw_logits = pad_input(hidden_states=raw_logits_rmpad, indices=indices, batch=batch_size, seqlen=seqlen)
+                    # full_raw_logits: (batch_size, seqlen, vocab_size)
+                    last_logits = full_raw_logits[:, -1, :].detach().clone()  # (bsz, vocab_size)
+
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
                     full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
@@ -150,13 +165,18 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                 )  # prevent model thinks we are generating
                 logits = output.logits
+
+                # Save logits at the last position before temperature division
+                if return_last_logits:
+                    last_logits = logits[:, -1, :].detach().clone()  # (bsz, vocab_size)
+
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                 log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                 if calculate_entropy:
                     entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
-            return entropy, log_probs
+            return entropy, log_probs, last_logits
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -193,7 +213,7 @@ class DataParallelPPOActor(BasePPOActor):
                 ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
 
         Returns:
-            torch.Tensor: the log_prob tensor
+            torch.Tensor or tuple: the log_prob tensor, optionally with entropy and last_logits
         """
         # set to eval
         self.actor_module.eval()
@@ -201,6 +221,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        return_last_logits = data.meta_info.get("return_last_logits", False)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
@@ -219,14 +240,20 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
+        last_logits_lst = [] if return_last_logits else None
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
+                entropy, log_probs, last_logits = self._forward_micro_batch(
+                    micro_batch, temperature=temperature, calculate_entropy=calculate_entropy,
+                    return_last_logits=return_last_logits,
+                )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            if return_last_logits and last_logits is not None:
+                last_logits_lst.append(last_logits)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -238,6 +265,11 @@ class DataParallelPPOActor(BasePPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
+        if return_last_logits:
+            last_logits = torch.concat(last_logits_lst, dim=0)
+            if use_dynamic_bsz:
+                last_logits = last_logits[revert_indices]
+            return log_probs, entropys, last_logits
         return log_probs, entropys
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -312,7 +344,8 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
+                    result = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
+                    entropy, log_prob = result[0], result[1]
                     """
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                         old_log_prob=old_log_prob,

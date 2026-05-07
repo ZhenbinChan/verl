@@ -251,7 +251,7 @@ trainer:
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   validation_data_dir: null # directory for logging the validation data, no dump if null
   # --- Sampling strategy ---
-  sampling_strategy: null # Accepted values: null | tree_search | treerl | parallel_mcts
+  sampling_strategy: null # Accepted values: null | tree_search | treerl | parallel_mcts | step_treerl | information_gain
   # tree_search-specific settings
   branch_level: step    # step: previous implementation; token: per-token node expansion
   step_reward_type: random  # random | fol | format
@@ -287,6 +287,25 @@ trainer:
     use_weighted_value: false    # use weighted update for accumulated_value
     normalize_style: step        # step | token normalization for accumulated_value
     average_one_generation: false
+  # step_treerl-specific settings (step-level entropy-guided tree, simplified)
+  step_treerl_config:
+    max_depth: 40               # max step depth
+    max_token_num: 512          # max new tokens per step generation
+    top_k: 2                   # number of high-entropy steps to select per round
+    iter_rounds: 3            # number of branching rounds
+    prm: format               # process reward model: format | fol
+    # FOL verification settings (used when prm: fol)
+    fol_metadata_path: null   # path to FOL metadata JSON file
+  # information_gain-specific settings (KL-divergence-guided tree, simplified)
+  ig_config:
+    max_depth: 40               # max step depth
+    max_token_num: 512          # max new tokens per step generation
+    prefix_text: "So far, the most likely answer is \\boxed{" # prefix appended to probe model belief
+    top_k: 2                   # number of high-KL steps to select per round
+    iter_rounds: 3            # number of branching rounds
+    prm: format               # process reward model: format | fol
+    # FOL verification settings (used when prm: fol)
+    fol_metadata_path: null   # path to FOL metadata JSON file
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

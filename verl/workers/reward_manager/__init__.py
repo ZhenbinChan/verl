@@ -15,12 +15,14 @@
 from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .entropy import EntropyRewardManager
+from .ig import IGRewardManager
 from .mcts import MCTSRewardManager
 from .naive import NaiveRewardManager
 from .naive_format import NaiveFormatRewardManager
 from .prime import PrimeRewardManager
 from .naive_math220k import NaiveMath220KRewardManager
 from .naive_plus import NaivePlusRewardManager
+from .step_tree import StepTreeRewardManager
 from .tree import TreeRewardManager
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "EntropyRewardManager", "MCTSRewardManager", "NaiveRewardManager", "NaiveFormatRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager", "TreeRewardManager"]
+__all__ = ["BatchRewardManager", "DAPORewardManager", "EntropyRewardManager", "IGRewardManager", "MCTSRewardManager", "NaiveRewardManager", "NaiveFormatRewardManager", "PrimeRewardManager", "NaiveMath220KRewardManager", "NaivePlusRewardManager", "StepTreeRewardManager", "TreeRewardManager"]

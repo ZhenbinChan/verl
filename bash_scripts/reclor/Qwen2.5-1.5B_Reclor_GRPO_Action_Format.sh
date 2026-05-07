@@ -2,6 +2,7 @@ set -x
 
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
+export WANDB_ENTITY='verl-fol'
 
 
 HOME=/home/chenzhb/Workspaces/verl
