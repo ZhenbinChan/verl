@@ -208,6 +208,12 @@ reward_model:
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
   reward_manager: naive
+  # DAPO Overlong buffer configuration
+  overlong_buffer:
+    enable: False  # Enable overlong reward shaping for DAPO
+    len: 4096
+    penalty_factor: 1.0
+    log: False
   # Extra kwargs passed to the reward manager ctor (e.g. EntropyRewardManager: reward_style).
   # Must exist for Hydra struct-mode overrides like reward_model.reward_kwargs.reward_style=...
   reward_kwargs:
@@ -239,6 +245,11 @@ algorithm:
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
+  # DAPO Filter Groups configuration (Dynamic Sampling)
+  filter_groups:
+    enable: False  # Enable dynamic sampling for DAPO
+    metric: null  # acc / score / seq_reward / seq_final_reward / ...
+    max_num_gen_batches: 0  # Non-positive values mean no upper limit
 
 trainer:
   balance_batch: True

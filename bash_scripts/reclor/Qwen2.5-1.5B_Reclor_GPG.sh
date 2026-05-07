@@ -8,8 +8,20 @@ HOME=/home/chenzhb/Workspaces/verl
 
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
+# GPG Training Configuration
+# Guided Policy Gradient (simpler, no clipping)
+# Reference: https://github.com/AMAP-ML/GPG
+
 python3 -m verl.trainer.main_ppo \
+    # GPG uses GRPO advantage but simpler policy loss (no clipping)
     algorithm.adv_estimator=grpo \
+    # GPG-specific: Filter Groups (Dynamic Sampling)
+    algorithm.filter_groups.enable=True \
+    algorithm.filter_groups.metric=acc \
+    algorithm.filter_groups.max_num_gen_batches=10 \
+    # GPG uses standard clip_ratio (no asymmetric clipping)
+    actor_rollout_ref.actor.clip_ratio=0.2 \
+    actor_rollout_ref.actor.loss_agg_mode='token-mean' \
     data.train_files=$HOME/data/reclor/train.parquet \
     data.val_files=$HOME/data/reclor/test.parquet \
     data.train_batch_size=8 \
@@ -25,7 +37,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.loss_agg_mode='seq-mean-token-mean' \
     actor_rollout_ref.actor.kl_loss_coef=0.0001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -43,14 +54,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     reward_model.enable=False \
-    reward_model.reward_manager='naive_format' \
+    reward_model.reward_manager='dapo' \
+    reward_model.overlong_buffer.enable=False \
+    reward_model.overlong_buffer.len=4096 \
+    reward_model.overlong_buffer.penalty_factor=1.0 \
     reward_model.micro_batch_size_per_gpu=2 \
     reward_model.model.fsdp_config.optimizer_offload=True \
     reward_model.reward_kwargs.reward_style=null \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
     trainer.project_name='verl' \
-    trainer.experiment_name='Qwen2.5-1.5B_GRPO_Reclor_Format_Action' \
+    trainer.experiment_name='Qwen2.5-1.5B_GPG_Reclor' \
     trainer.rollout_data_dir=$HOME/record/ \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \

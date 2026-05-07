@@ -17,11 +17,11 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score import _default_compute_score
+from verl.utils.reward_score import default_compute_score
 
 
 class DAPORewardManager:
-    """The reward manager."""
+    """The reward manager for DAPO algorithm."""
 
     def __init__(
         self,
@@ -34,13 +34,23 @@ class DAPORewardManager:
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
-        self.compute_score = compute_score or _default_compute_score
+        self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = max_resp_len
 
         if self.overlong_buffer_cfg is not None:
-            assert self.max_resp_len is not None, f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
+            assert self.max_resp_len is not None, (
+                f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
+            )
+            assert self.max_resp_len >= self.overlong_buffer_cfg.len, (
+                "max_resp_len must be larger than overlong_buffer.len"
+            )
+            assert not self.overlong_buffer_cfg.enable or self.overlong_buffer_cfg.len > 0, (
+                "overlong_buffer.len must be positive when overlong penalty is enabled,"
+                f"but got {self.overlong_buffer_cfg.len}."
+                "To disable the overlong penalty, set overlong_buffer.enable = False"
+            )
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         """We will expand this function gradually based on the available datasets"""
@@ -82,7 +92,10 @@ class DAPORewardManager:
 
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
-            extra_info = data_item.non_tensor_batch.get("extra_info", None)
+            extra_info = data_item.non_tensor_batch.get("extra_info", {})
+
+            rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
+            extra_info["rollout_reward_scores"] = rollout_reward_scores
 
             result = self.compute_score(
                 data_source=data_source,
@@ -99,10 +112,11 @@ class DAPORewardManager:
                     reward_extra_info[key].append(value)
             else:
                 score = result
+                reward_extra_info["acc"].append(score)
 
             reward = score
 
-            if self.overlong_buffer_cfg.enable:
+            if self.overlong_buffer_cfg is not None and self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
                 expected_len = self.max_resp_len - overlong_buffer_len
                 exceed_len = valid_response_length - expected_len

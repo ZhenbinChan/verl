@@ -8,8 +8,23 @@ HOME=/home/chenzhb/Workspaces/verl
 
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
+# SAPO Training Configuration
+# Smoothed Policy Optimization with adaptive temperature gating
+# Reference: https://arxiv.org/pdf/2511.20347
+
 python3 -m verl.trainer.main_ppo \
+    # SAPO uses GRPO advantage but different policy loss
     algorithm.adv_estimator=grpo \
+    # SAPO-specific: Filter Groups (Dynamic Sampling)
+    algorithm.filter_groups.enable=True \
+    algorithm.filter_groups.metric=acc \
+    algorithm.filter_groups.max_num_gen_batches=10 \
+    # SAPO-specific: tau_pos and tau_neg for adaptive gating
+    # Higher tau = more aggressive update
+    actor_rollout_ref.actor.tau_pos=1.0 \
+    actor_rollout_ref.actor.tau_neg=1.0 \
+    # SAPO-specific: seq-mean-token-mean loss aggregation (recommended)
+    actor_rollout_ref.actor.loss_agg_mode='seq-mean-token-mean' \
     data.train_files=$HOME/data/reclor/train.parquet \
     data.val_files=$HOME/data/reclor/test.parquet \
     data.train_batch_size=8 \
@@ -25,7 +40,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.loss_agg_mode='seq-mean-token-mean' \
     actor_rollout_ref.actor.kl_loss_coef=0.0001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -43,14 +57,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     reward_model.enable=False \
-    reward_model.reward_manager='naive_format' \
+    reward_model.reward_manager='dapo' \
+    reward_model.overlong_buffer.enable=False \
+    reward_model.overlong_buffer.len=4096 \
+    reward_model.overlong_buffer.penalty_factor=1.0 \
     reward_model.micro_batch_size_per_gpu=2 \
     reward_model.model.fsdp_config.optimizer_offload=True \
     reward_model.reward_kwargs.reward_style=null \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
     trainer.project_name='verl' \
-    trainer.experiment_name='Qwen2.5-1.5B_GRPO_Reclor_Format_Action' \
+    trainer.experiment_name='Qwen2.5-1.5B_SAPO_Reclor' \
     trainer.rollout_data_dir=$HOME/record/ \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \

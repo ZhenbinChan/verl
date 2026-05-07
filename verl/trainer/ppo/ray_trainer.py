@@ -97,6 +97,14 @@ class AdvantageEstimator(str, Enum):
     MCTS_GRPO = "mcts_grpo"
     STEP_TREERL_GRPO = "step_treerl_grpo"
     IG_GRPO = "ig_grpo"
+    # New algorithms from latest verl
+    CISPO = "cispo"
+    DPPO_TV = "dppo_tv"
+    DPPO_KL = "dppo_kl"
+    GSPO = "gspo"
+    SAPO = "sapo"
+    GPG = "gpg"
+    GEO_MEAN = "geo_mean"
 
 
 @dataclass
@@ -349,6 +357,44 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             reward_mask=data.batch["reward_mask"],
             step_correctness_scores=step_correctness,
             epsilon=1e-6,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.IG_GRPO:
+        step_correctness = data.batch.get(
+            "step_correctness_scores", data.batch["reward_fn_scores"]
+        )
+        advantages, returns = core_algos.compute_ig_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            score_idx=data.batch["score_ids"],
+            reward_mask=data.batch["reward_mask"],
+            step_correctness_scores=step_correctness,
+            epsilon=1e-6,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    # New algorithms (use GRPO advantage computation, different policy loss)
+    elif adv_estimator in (
+        AdvantageEstimator.CISPO,
+        AdvantageEstimator.DPPO_TV,
+        AdvantageEstimator.DPPO_KL,
+        AdvantageEstimator.GSPO,
+        AdvantageEstimator.SAPO,
+        AdvantageEstimator.GPG,
+        AdvantageEstimator.GEO_MEAN,
+    ):
+        grpo_calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = grpo_calculation_mask.size(1)
+            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]
+        advantages, returns = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=grpo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
         data.batch["advantages"] = advantages

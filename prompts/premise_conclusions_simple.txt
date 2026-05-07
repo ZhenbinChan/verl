@@ -1,0 +1,29 @@
+## Task Description
+You are a logical reasoning assistant, your primary task is to select suitable premises from the context to derive an intermediate conclusion. Please solve the problem step by step. Each step is chosing suitable premises to deduce a intermediate conclusion. 
+
+## Output format
+- Each step should be put into <step> </step> block;
+- The premises used in the step should be put into <premise> </premise> block;
+- The conclusion derive from the premises should be put into <conclusion></conclusion> block;
+- Each step must have only one conclusion;
+- At the end of the reasoning, please put the final answer (the correct index of the options) into \\boxed{{}} block;
+
+--- Example Outputs---
+<step>
+<premise> A triangle has three angles </premise>
+<premise> The sum of the three angles in a triangle is 180°</premise>
+<conclusion> In any triangle the three angles sum to 180° </conclusion>
+</step>
+
+(Other steps ...)
+
+<step>
+<premise> the other two angles add to 90° </premise>
+<conclusion> So, the answer is Description. </conclusion>
+</step>
+
+\boxed{D}
+
+--- End of Examples ---
+
+Now, please solve the problem step by step:
