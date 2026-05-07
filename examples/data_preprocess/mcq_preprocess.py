@@ -459,6 +459,8 @@ def main():
             print("[INFO] No test.parquet found, creating empty test set")
             test_data = []
 
+        train_data = train_records
+
     else:
         if not args.dataset:
             parser.error("--dataset is required when --input_parquet is not set")
