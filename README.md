@@ -107,7 +107,10 @@ python examples/data_preprocess/mcq_preprocess.py \
 nohup python examples/data_preprocess/mcq_preprocess.py \
     --input_parquet data/reclor/train.parquet \
     --output_dir data/reclor_fol \
-    --preset reclor \
+    --base_url "http://localhost:4869/v1" \
+    --model "qwen2.5-7b-coder" \
+    --max_retries -1 \
+    --verbose \
     > reclor_fol.log 2>&1 &
 ```
 
@@ -129,6 +132,10 @@ Output files:
 | `--raw_prompt_template` | Prompt template with `{context}`, `{question}`, `{answers}` | See below |
 | `--skip_fol_extraction` | Skip FOL metadata extraction | `False` |
 | `--api_key` | API key for LLM (or set `DASHSCOPE_API_KEY` env var) | — |
+| `--base_url` | Base URL for LLM service | `http://localhost:4869/v1` |
+| `--model` | Model name served by vLLM | — |
+| `--max_retries` | Max retry attempts per sample (-1 = retry forever) | `3` |
+| `--verbose` | Print first 100 chars of each extracted FOL field | `False` |
 | `--num_samples` | Limit number of samples (for testing) | All |
 
 Default `raw_prompt_template`:

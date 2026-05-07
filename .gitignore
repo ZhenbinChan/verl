@@ -136,9 +136,13 @@ outputs
 eval_output/
 eval/
 
+data/
 visualization/
 ckpt/
 output_models/
 results/
 homogeneous_data/
 record/
+
+*.pid
+*.log

@@ -114,6 +114,18 @@ def load_from_parquet(parquet_path: str, num_samples: Optional[int] = None) -> L
     return df.to_dict("records")
 
 
+def _parse_full_question(full_text: str) -> tuple:
+    """从完整 prompt 文本中解析出 context, question, options"""
+    ctx_m = re.search(r'<Context>(.*?)</Context>', full_text, re.DOTALL)
+    q_m = re.search(r'<Question>(.*?)</Question>', full_text, re.DOTALL)
+    opt_m = re.search(r'<Options>(.*?)</Options>', full_text, re.DOTALL)
+    return (
+        ctx_m.group(1).strip() if ctx_m else "",
+        q_m.group(1).strip() if q_m else "",
+        opt_m.group(1).strip() if opt_m else "",
+    )
+
+
 def extract_fields_from_record(
     record: Dict,
     context_field: str,
@@ -123,11 +135,43 @@ def extract_fields_from_record(
     option_mapping: List[str],
     raw_prompt_template: str,
 ) -> Dict:
-    """从原始记录中提取并标准化字段"""
+    """从原始记录中提取并标准化字段
+
+    优先从顶层字段取值；若为空，则：
+    1. 尝试从 extra_info 嵌套结构中取
+    2. 若 extra_info.question 存在（完整带标签文本），用正则解析出三个字段
+    """
+    # 顶层字段
     raw_context = record.get(context_field, "")
     raw_question = record.get(question_field, "")
     raw_answers = record.get(answers_field, [])
     raw_label = record.get(label_field, 0)
+
+    # 顶层为空时，从 extra_info 中取
+    if not raw_context or not isinstance(raw_context, str):
+        raw_context = ""
+    if not raw_question or not isinstance(raw_question, str):
+        raw_question = ""
+    if not raw_answers or not isinstance(raw_answers, list):
+        raw_answers = []
+
+    extra_info = record.get("extra_info", {})
+    if isinstance(extra_info, dict):
+        # 顶层为空时从 extra_info 取
+        if not raw_context:
+            raw_context = extra_info.get(context_field, "") or extra_info.get("context", "") or ""
+        if not raw_question:
+            raw_question = extra_info.get(question_field, "") or extra_info.get("question", "") or ""
+        if not raw_answers:
+            raw_answers = extra_info.get(answers_field, []) or extra_info.get("options", []) or []
+        if not raw_label:
+            raw_label = extra_info.get(label_field, 0) or extra_info.get("label", 0)
+
+        # 若仍为空，尝试从 extra_info.question 解析完整 prompt
+        if not raw_context or not raw_question or not raw_answers:
+            full_q = extra_info.get("question", "") or extra_info.get("raw_prompt", "") or ""
+            if full_q and "<Context>" in full_q:
+                raw_context, raw_question, raw_answers = _parse_full_question(full_q)
 
     if not isinstance(raw_context, str):
         raw_context = str(raw_context) if raw_context else ""
@@ -284,27 +328,34 @@ def extract_fol_batch(
             continue
 
         extra_info = sample.get("extra_info", {})
-        context = extra_info.get("context", "")
-        query = extra_info.get("query", "")
-        options = extra_info.get("options", "")
+        context = extra_info.get("context", "") or ""
+        query = extra_info.get("query", "") or ""
+        options = extra_info.get("options", "") or ""
 
         # Fallback: parse from raw_prompt if fields are missing
         if not context or not query or not options:
             # raw_prompt can be in sample['raw_prompt'] or extra_info['question']
-            raw_prompt = sample.get("raw_prompt", "") or extra_info.get("question", "")
+            raw_prompt = str(sample.get("raw_prompt", "") or extra_info.get("question", "") or "")
             ctx_m = re.search(r'<Context>(.*?)</Context>', raw_prompt, re.DOTALL)
             q_m = re.search(r'<Question>(.*?)</Question>', raw_prompt, re.DOTALL)
             opt_m = re.search(r'<Options>(.*?)</Options>', raw_prompt, re.DOTALL)
             context = ctx_m.group(1).strip() if ctx_m else ""
             query = q_m.group(1).strip() if q_m else ""
             options = opt_m.group(1).strip() if opt_m else ""
+            if verbose:
+                print(f"  [DEBUG] fallback parsed: ctx={repr(context[:20])}, q={repr(query[:20])}, opt={repr(options[:20])}")
 
         sample_id = sample.get("sample_id", f"sample_{i}")
 
         print(f"[{i + 1}/{len(samples)}] Processing {sample_id}...")
 
         fol_metadata = None
-        for attempt in range(max_retries):
+        attempt = 0
+        while fol_metadata is None:
+            attempt += 1
+            if max_retries != -1 and attempt > max_retries:
+                print(f"  [Skip] Max retries ({max_retries}) reached, skipping {sample_id}")
+                break
             try:
                 fol_metadata = preprocessor.extract_fol_metadata(
                     context=context,
@@ -312,13 +363,11 @@ def extract_fol_batch(
                     options=options,
                     sample_id=sample_id,
                 )
-                if fol_metadata is not None:
-                    break
+                if fol_metadata is None:
+                    retry_msg = f"  [Retry {attempt}] Returned None" if max_retries == -1 or attempt < max_retries else f"  [Retry {attempt}/{max_retries}] Returned None"
+                    print(f"{retry_msg}, retrying..." if max_retries == -1 or attempt < max_retries else f"{retry_msg}, skipping...")
             except Exception as e:
-                if attempt < max_retries - 1:
-                    print(f"  [Retry {attempt + 2}/{max_retries}] Failed: {e}")
-                else:
-                    print(f"  [Error] {sample_id}: {e}")
+                print(f"  [Retry {attempt}/{max_retries}] Failed: {e}" if max_retries != -1 else f"  [Retry {attempt}] Failed: {e}")
 
         if fol_metadata:
             fol_metadata.ground_truth = sample.get("answer", "")
@@ -432,7 +481,7 @@ def main():
         "--max_retries",
         type=int,
         default=3,
-        help="Max retry attempts per sample for FOL extraction.",
+        help="Max retry attempts per sample. -1 means retry forever until success.",
     )
     parser.add_argument(
         "--verbose",

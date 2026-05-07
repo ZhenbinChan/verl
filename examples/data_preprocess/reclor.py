@@ -58,6 +58,7 @@ if __name__ == "__main__":
                         "<Question>" + question_raw + "</Question>" + \
                         "<Options>" + answers + "</Options>"
 
+            sample_id = f"reclor_{idx}"
             data = {
                 "data_source": "reclor",
                 "prompt": [
@@ -68,6 +69,9 @@ if __name__ == "__main__":
                 ],
                 "ability": "logic",
                 "reward_model": {"style": "rule", "ground_truth": solution},
+                "answer": solution,
+                "raw_prompt": question,
+                "sample_id": sample_id,
                 "extra_info": {
                     "split": split,
                     "index": idx,

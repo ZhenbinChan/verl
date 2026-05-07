@@ -5,6 +5,6 @@ CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization 0.9 \
     --max-model-len 8192 \
     --tensor-parallel-size 2 \
-    --served-model-name qwen2.5-3b \
+    --served-model-name qwen2.5-7b-coder \
     --trust-remote-code \
     --structured-outputs-config '{"backend":"outlines"}'
