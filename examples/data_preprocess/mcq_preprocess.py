@@ -36,9 +36,10 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 
 import datasets
 import pandas as pd
@@ -286,6 +287,18 @@ def extract_fol_batch(
         context = extra_info.get("context", "")
         query = extra_info.get("query", "")
         options = extra_info.get("options", "")
+
+        # Fallback: parse from raw_prompt if fields are missing
+        if not context or not query or not options:
+            # raw_prompt can be in sample['raw_prompt'] or extra_info['question']
+            raw_prompt = sample.get("raw_prompt", "") or extra_info.get("question", "")
+            ctx_m = re.search(r'<Context>(.*?)</Context>', raw_prompt, re.DOTALL)
+            q_m = re.search(r'<Question>(.*?)</Question>', raw_prompt, re.DOTALL)
+            opt_m = re.search(r'<Options>(.*?)</Options>', raw_prompt, re.DOTALL)
+            context = ctx_m.group(1).strip() if ctx_m else ""
+            query = q_m.group(1).strip() if q_m else ""
+            options = opt_m.group(1).strip() if opt_m else ""
+
         sample_id = sample.get("sample_id", f"sample_{i}")
 
         print(f"[{i + 1}/{len(samples)}] Processing {sample_id}...")
