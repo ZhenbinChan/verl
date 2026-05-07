@@ -378,10 +378,11 @@ def extract_fol_batch(
                 print(f"  -> entities: {entities_str}")
                 predicates_str = str(fol_metadata.predicates)[:100]
                 print(f"  -> predicates: {predicates_str}")
+            results.append(sample)
         else:
-            sample["fol_metadata"] = None
-
-        results.append(sample)
+            # max_retries exhausted and still failed — drop this sample
+            print(f"  [Dropped] {sample_id} — {attempt - 1} attempts failed, removed from dataset")
+            continue
 
         if batch_save > 0 and (i + 1) % batch_save == 0:
             print(f"[Progress] Processed {i + 1}/{len(samples)}")
@@ -611,10 +612,14 @@ def main():
         save_fol_metadata(save_data, fol_path)
         print(f"[INFO] Saved FOL metadata to {fol_path}")
 
-        # Filter out samples without FOL metadata
+        # Filter out samples without FOL metadata (should already be dropped by extract_fol_batch)
         n_before = len(train_data)
         train_data = [s for s in train_data if s.get("fol_metadata") is not None]
-        print(f"[INFO] Filtered: {n_before} -> {len(train_data)} samples with valid fol_metadata")
+        n_dropped = n_before - len(train_data)
+        if n_dropped > 0:
+            print(f"[INFO] Filtered: {n_before} -> {len(train_data)} samples ({n_dropped} failed samples dropped)")
+        else:
+            print(f"[INFO] Filtered: {n_before} samples with valid fol_metadata")
 
     # ── Save parquet ────────────────────────────────────────────────────────
     os.makedirs(args.output_dir, exist_ok=True)
