@@ -271,6 +271,7 @@ def extract_fol_batch(
     preprocessor: FOLPreprocessor,
     batch_save: int = 50,
     max_retries: int = 3,
+    verbose: bool = False,
 ) -> List[Dict]:
     """批量提取 FOL 元数据"""
     import json
@@ -309,6 +310,12 @@ def extract_fol_batch(
         if fol_metadata:
             fol_metadata.ground_truth = sample.get("answer", "")
             sample["fol_metadata"] = fol_metadata.to_dict()
+            if verbose:
+                print(f"  -> rephrased_context: {fol_metadata.rephrased_context[:100] if fol_metadata.rephrased_context else '(empty)'}")
+                entities_str = str(fol_metadata.entities)[:100]
+                print(f"  -> entities: {entities_str}")
+                predicates_str = str(fol_metadata.predicates)[:100]
+                print(f"  -> predicates: {predicates_str}")
         else:
             sample["fol_metadata"] = None
 
@@ -318,7 +325,6 @@ def extract_fol_batch(
             print(f"[Progress] Processed {i + 1}/{len(samples)}")
 
     return results
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -414,6 +420,11 @@ def main():
         type=int,
         default=3,
         help="Max retry attempts per sample for FOL extraction.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print first 10 chars of each extracted FOL field.",
     )
 
     args = parser.parse_args()
@@ -526,7 +537,7 @@ def main():
         preprocessor = FOLPreprocessor(llm_client=llm_client)
         print(f"[INFO] Extracting FOL metadata for {len(train_data)} samples...")
 
-        train_data = extract_fol_batch(train_data, preprocessor, batch_save=50, max_retries=args.max_retries)
+        train_data = extract_fol_batch(train_data, preprocessor, batch_save=50, max_retries=args.max_retries, verbose=args.verbose)
 
         # Save fol_metadata.json
         os.makedirs(args.output_dir, exist_ok=True)
