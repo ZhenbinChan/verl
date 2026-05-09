@@ -5,6 +5,8 @@ data:
   data_source_key: data_source
   reward_model_key: reward_model
 
+sample_agg: mean # choices: mean, best, any_correct
+
 custom_reward_function:
   path: null
   name: compute_score

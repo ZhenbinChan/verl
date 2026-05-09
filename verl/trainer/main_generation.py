@@ -80,7 +80,10 @@ def main_task(config):
         tokenizer.pad_token = tokenizer.eos_token
 
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(ActorRolloutRefWorker), config=config, role="rollout")
-    resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
+    resource_pool = RayResourcePool(
+        process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        max_colocate_count=config.trainer.max_colocate_count,
+    )
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
     wg.init_model()
 

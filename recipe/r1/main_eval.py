@@ -57,11 +57,21 @@ def get_custom_reward_fn(config):
     return getattr(module, function_name)
 
 
+def aggregate_scores(score_lst, mode):
+    if mode == "mean":
+        return float(np.mean(score_lst))
+    if mode in {"best", "max", "best_of_n"}:
+        return float(np.max(score_lst))
+    if mode in {"any", "any_correct"}:
+        return float(np.max(score_lst) > 0)
+    raise ValueError(f"Unsupported sample_agg mode: {mode}")
+
+
 @ray.remote
-def process_item(reward_fn, data_source, response_lst, reward_data):
+def process_item(reward_fn, data_source, response_lst, reward_data, sample_agg):
     ground_truth = reward_data["ground_truth"]
     score_lst = [reward_fn(data_source, r, ground_truth) for r in response_lst]
-    return data_source, np.mean(score_lst)
+    return data_source, aggregate_scores(score_lst, sample_agg)
 
 
 @hydra.main(config_path="config", config_name="evaluation", version_base=None)
@@ -82,8 +92,10 @@ def main(config):
     data_source_reward = defaultdict(list)
     compute_score = get_custom_reward_fn(config)
 
+    sample_agg = config.get("sample_agg", "mean")
+
     # Create remote tasks
-    remote_tasks = [process_item.remote(compute_score, data_sources[i], responses[i], reward_model_data[i]) for i in range(total)]
+    remote_tasks = [process_item.remote(compute_score, data_sources[i], responses[i], reward_model_data[i], sample_agg) for i in range(total)]
 
     # Process results as they come in
     with tqdm(total=total) as pbar:

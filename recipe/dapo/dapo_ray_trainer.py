@@ -269,7 +269,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    should_save = is_last_step or (
+                        self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0
+                    )
+                    if should_save:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 

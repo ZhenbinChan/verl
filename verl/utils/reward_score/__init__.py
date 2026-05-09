@@ -66,3 +66,8 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         return float(res)
     else:
         return float(res[0])
+
+
+default_compute_score = _default_compute_score
+
+__all__ = ["_default_compute_score", "default_compute_score"]

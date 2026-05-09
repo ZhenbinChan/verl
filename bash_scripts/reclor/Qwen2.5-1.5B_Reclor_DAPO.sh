@@ -1,77 +1,79 @@
-set -x
+#!/usr/bin/env bash
+set -xeuo pipefail
 
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
 
-
 HOME=/home/chenzhb/Workspaces/verl
-
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
-# DAPO Training Configuration
-# Available adv_estimators: cispo, dppo_tv, dppo_kl, gspo, sapo, gpg, geo_mean
-# For DAPO Clip-Higher: set clip_ratio_low and clip_ratio_high separately
+TRAIN_PROMPT_BSZ=8
+GEN_PROMPT_BSZ=16
+TRAIN_PROMPT_MINI_BSZ=8
+N_RESP_PER_PROMPT=8
+N_GPUS_PER_NODE=2
 
-python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
-    # DAPO-specific: use CISPO as the advantage estimator
-    algorithm.adv_estimator=grpo \
-    # DAPO-specific: Filter Groups (Dynamic Sampling)
-    algorithm.filter_groups.enable=True \
-    algorithm.filter_groups.metric=acc \
-    algorithm.filter_groups.max_num_gen_batches=10 \
-    # DAPO-specific: Clip-Higher (asymmetric clipping)
-    actor_rollout_ref.actor.clip_ratio_low=0.2 \
-    actor_rollout_ref.actor.clip_ratio_high=0.28 \
-    # DAPO-specific: use token-mean loss aggregation
-    actor_rollout_ref.actor.loss_agg_mode='token-mean' \
+python3 -m recipe.dapo.main_dapo \
     data.train_files=$HOME/data/reclor/train.parquet \
     data.val_files=$HOME/data/reclor/test.parquet \
-    data.train_batch_size=8 \
+    data.prompt_key=prompt \
+    data.prompt_path=$HOME/prompts/base.txt \
+    data.truncation='error' \
+    data.filter_overlong_prompts=True \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
-    data.filter_overlong_prompts=True \
-    data.prompt_path=$HOME/prompts/premise_conclusion.txt \
-    data.truncation='error' \
+    data.train_batch_size=${TRAIN_PROMPT_BSZ} \
+    data.gen_batch_size=${GEN_PROMPT_BSZ} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_PROMPT_MINI_BSZ} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.0001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.clip_ratio_low=0.2 \
+    actor_rollout_ref.actor.clip_ratio_high=0.28 \
+    actor_rollout_ref.actor.clip_ratio_c=10.0 \
+    actor_rollout_ref.actor.loss_agg_mode='token-mean' \
     actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
-    actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.temperature=0.8 \
-    actor_rollout_ref.rollout.top_p=0.95 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${N_GPUS_PER_NODE} \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.n=${N_RESP_PER_PROMPT} \
+    actor_rollout_ref.rollout.temperature=0.8 \
+    actor_rollout_ref.rollout.top_p=0.95 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+    actor_rollout_ref.rollout.val_kwargs.temperature=0 \
+    algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
+    algorithm.filter_groups.enable=True \
+    algorithm.filter_groups.metric=acc \
+    algorithm.filter_groups.max_num_gen_batches=10 \
     reward_model.enable=False \
-    # DAPO-specific: use DAPO reward manager
-    reward_model.reward_manager='dapo' \
+    reward_model.reward_manager=dapo \
     reward_model.overlong_buffer.enable=False \
     reward_model.overlong_buffer.len=4096 \
     reward_model.overlong_buffer.penalty_factor=1.0 \
-    reward_model.micro_batch_size_per_gpu=2 \
-    reward_model.model.fsdp_config.optimizer_offload=True \
-    reward_model.reward_kwargs.reward_style=null \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
     trainer.project_name='verl' \
     trainer.experiment_name='Qwen2.5-1.5B_DAPO_Reclor' \
     trainer.rollout_data_dir=$HOME/record/ \
-    trainer.n_gpus_per_node=2 \
+    trainer.default_local_dir=$HOME/ckpt/Qwen2.5-1.5B_DAPO_Reclor \
+    trainer.resume_mode=disable \
+    trainer.val_before_train=True \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
+    trainer.save_freq=-1 \
     trainer.test_freq=20 \
-    trainer.total_epochs=1 $@
+    trainer.total_epochs=1 "$@"
