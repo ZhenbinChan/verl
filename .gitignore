@@ -134,7 +134,6 @@ outputs
 .tmp_*
 
 eval_output/
-eval/
 
 data/
 visualization/
