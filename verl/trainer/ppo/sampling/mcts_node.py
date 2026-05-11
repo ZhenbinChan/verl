@@ -47,6 +47,7 @@ class MCTSNode:
 
     # --- Heuristic (can be used for selection) ---
     heuristic: float = 0.0               # = R by default; available for custom strategies
+    cached_entropy: Optional[float] = None  # cached StepTreeRL score; computed once per node
 
     # --- KL-StepTreeRL specific ---
     is_branch_point: bool = False        # True if this step was selected for branching

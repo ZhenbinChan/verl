@@ -93,7 +93,10 @@ class RLHFDataset(Dataset):
         # Read instruction from prompt path
         self.prompt_instruction = None
         prompt_path = config.get("prompt_path", None)
-        if prompt_path is not None and os.path.isfile(prompt_path):
+        if prompt_path is not None:
+            prompt_path = os.path.expanduser(prompt_path)
+            if not os.path.isfile(prompt_path):
+                raise FileNotFoundError(f"Prompt instruction file not found: {prompt_path}")
             with open(prompt_path, "r", encoding="utf-8") as f:
                 self.prompt_instruction = f.read()
         self.serialize_dataset = False

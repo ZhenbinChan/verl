@@ -40,7 +40,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.prompt_path=$HOME/prompts/premise_conclusion_simple.txt \
+    data.prompt_path=$HOME/prompts/premise_conclusions_simple.txt \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \

@@ -302,6 +302,7 @@ trainer:
   step_treerl_config:
     max_depth: 40               # max step depth
     max_token_num: 512          # max new tokens per step generation
+    branch_max_new_tokens: 512  # hard cap for a single branch continuation before remaining-budget clamp
     top_k: 2                   # number of high-entropy steps to select per round
     iter_rounds: 3            # number of branching rounds
     prm: format               # process reward model: format | fol

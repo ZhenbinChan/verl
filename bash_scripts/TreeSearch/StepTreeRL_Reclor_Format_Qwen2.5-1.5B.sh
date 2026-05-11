@@ -5,19 +5,19 @@ set -x
 # LogiQA + StepTreeRL smoke run
 # sampling_strategy=step_treerl
 # PRM: format reward (<step>/<premise>/<conclusion> tags)
-# Selection: per-step entropy (highest-entropy step → branch)
+# Selection: per-tree Top-K nodes by step entropy (prefix branching)
 #
 # Simplified parameters:
 #   rollout.n     — initial generation count per prompt
 #   top_k         — number of high-entropy steps to select per round
 #   iter_rounds   — number of branching rounds
 #
-# Final samples per tree: 1 + top_k × iter_rounds
-# Example: 1 + 2 × 3 = 7 samples per tree
 # ----------------------------------------------------------
 
 HOME=/home/chenzhb/Workspaces/verl
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+
+VERL_LOGI_DEBUG=disabled
 
 # Single-node GPU count
 N_GPUS_PER_NODE=2
@@ -28,8 +28,6 @@ N_GPUS_PER_NODE=2
 ROLLOUT_N=4          # Initial generation count per prompt
 TOP_K=2               # Number of high-entropy steps to select per round
 ITER_ROUNDS=3        # Number of branching rounds
-# Final: 1 + 2 × 3 = 7 samples per tree
-
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_grpo \
     algorithm.use_kl_in_reward=False \
@@ -40,7 +38,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.prompt_path=$HOME/prompts/premise_conclusion_simple.txt \
+    data.prompt_path=$HOME/prompts/premise_conclusions_simple.txt \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \

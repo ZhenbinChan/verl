@@ -5,29 +5,15 @@
 # - Example: N_GPUS=2 and MAX_COLOCATE_COUNT=10 needs about CPU:20 + GPU:2.
 # - Example: N_GPUS=2 and MAX_COLOCATE_COUNT=1 needs about CPU:2 + GPU:2.
 
-######################
-# N_SAMPLES=1
-# TEMPERATURE=0.0
-# TOP_P=1.0
-# SAMPLE_AGG=mean
-# ######################
-# N_SAMPLES=8
-# TEMPERATURE=0.7
-# TOP_P=0.95
-# TOP_K=50
-# SAMPLE_AGG=best
-######################
-
-
 MAX_COLOCATE_COUNT=1
 VERL_LOGI_DEBUG=0 # Set to 1 to enable debug mode for LogiQA evaluation, which may print more detailed logs.
 
 
 ROOT_DIR=/home/chenzhb/Workspaces/verl
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
-DATA_PATH=${DATA_PATH:-$ROOT_DIR/data/logiqa/test.parquet}
-OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_1.5b_instruct_logiqa}
-DATASET_NAME=logiqa
+MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-7B-Instruct
+DATA_PATH=${DATA_PATH:-$ROOT_DIR/data/reclor_base/test.parquet}
+OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_7b_instruct_reclor}
+DATASET_NAME=reclor
 REWARD_FN_PATH=$ROOT_DIR/custom_module.py
 
 MAX_SAMPLES=${MAX_SAMPLES:-0}
@@ -46,7 +32,7 @@ TEMPERATURE=${TEMPERATURE:-0.0}
 TOP_P=${TOP_P:-1.0}
 PROMPT_LENGTH=${PROMPT_LENGTH:-1024}
 RESPONSE_LENGTH=${RESPONSE_LENGTH:-2048}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.6}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
 
 GENERATED_PATH=$OUTPUT_DIR/${DATASET_NAME}_generated.parquet

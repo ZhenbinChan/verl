@@ -24,45 +24,41 @@ import datasets
 from verl.utils.hdfs_io import copy, makedirs
 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="./data/logiqa_action/")
+    parser.add_argument("--local_dir", default="./data/logiqa")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
 
     data_source = "lucasmccabe/logiqa"
-    import pdb;pdb.set_trace()
-
 
     dataset = datasets.load_dataset(data_source, "default")
+
 
     train_dataset = dataset["train"]
     validate_dataset = dataset["validation"]
     test_dataset = dataset["test"]
 
-    with open("./mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
-        instruction_following = f.read()
-        print(instruction_following)
-    instruction_following = str(instruction_following)
-
-    print(instruction_following)
+    option_mapping = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
-        option_mapping = ["A", "B", "C", "D","E", "F", "G", "H", "I", "J"]
         def process_fn(example, idx):
             context = example.pop("context")
             question_raw = example.pop("query")
             answer_raw = example.pop("options")# list
-            label = example.pop("correct_option")
+            label = example.pop("correct_option")# int
+
+            # Map integer label to letter (A, B, C, D, ...)
             solution = option_mapping[int(label)]
 
-            answers = "\n\n".join(["Option (" + option_mapping[i] +")"+ answer_raw[i] + "." for i in range(len(answer_raw))])
-            question = "## Task Instructions\n\n" + instruction_following + "\n\n<Context>" + context + "</Context>\n\n" + "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
-            # solution = extract_solution(answer_raw)
+            answers = "\n".join([f"({option_mapping[i]}): " + answer_raw[i] + ".\n" for i in range(len(answer_raw))])
+            question = "<Context>" + context + "</Context>" + \
+                        "<Question>" + question_raw + "</Question>" + \
+                        "<Options>" + answers + "</Options>"
 
-            # import pdb;pdb.set_trace()
             sample_id = f"logiqa_{idx}"
             data = {
                 "data_source": "logiqa",
@@ -91,6 +87,7 @@ if __name__ == "__main__":
     train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
     validate_dataset = validate_dataset.map(function=make_map_fn("validate"), with_indices=True)
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
+
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir

@@ -3,8 +3,8 @@
 Performs multi-round tree expansion where nodes are selected for branching
 based on per-step average entropy (instead of UCT). Each generation may
 produce multiple ``<step>...</step>`` blocks, which are split into individual
-MCTSNodes. The step with the highest average token entropy is selected for
-the next round of expansion.
+MCTSNodes. Branching candidates are drawn from all non-root nodes in each
+tree, not only the current leaves.
 
 Simplified parameters:
     rollout.n     — initial generation count per prompt
@@ -44,7 +44,7 @@ class StepTreeRLStrategy(SamplingStrategy):
 
     Multi-round tree expansion where:
     1. Initial complete solutions are parsed into steps
-    2. Multi-round: select Top-K high-entropy steps and branch
+    2. Multi-round: select per-tree Top-K high-entropy nodes and branch
     3. Output all leaves with GPU padding
 
     Config key: ``trainer.step_treerl_config``
@@ -56,6 +56,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         # Simplified parameters
         self.max_depth = cfg.get("max_depth", 40)
         self.max_token_num = cfg.get("max_token_num", 4096)
+        self.branch_max_new_tokens = cfg.get("branch_max_new_tokens", self.max_token_num)
 
         # New simplified params
         self.top_k = cfg.get("top_k", 2)
@@ -167,10 +168,18 @@ class StepTreeRLStrategy(SamplingStrategy):
 
             # 1. Parse initial solutions into step chains
             roots = self._init_roots(gen_batch, device)
-            self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
+            initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
+            candidate_pool = self._build_candidate_pool(roots, initial_nodes)
+            self._score_new_candidates(initial_nodes, compute_log_prob_fn, device)
 
-            # 2. Multi-round Top-K selection + branching
-            self._branch_by_entropy(roots, generate_fn, compute_log_prob_fn, device)
+            # 2. Multi-round per-tree Top-K selection + branching
+            self._branch_by_entropy(
+                roots=roots,
+                candidate_pool=candidate_pool,
+                generate_fn=generate_fn,
+                compute_log_prob_fn=compute_log_prob_fn,
+                device=device,
+            )
 
             # 3. Backpropagate
             self._backpropagate_all(roots, gen_batch)
@@ -222,10 +231,11 @@ class StepTreeRLStrategy(SamplingStrategy):
         gen_batch_output: DataProto,
         roots: List[MCTSNode],
         batch_size: int,
-    ) -> None:
+    ) -> List[MCTSNode]:
         """Parse initial complete solutions (from rollout.n) into step chains."""
         responses = gen_batch_output.batch["responses"]
         n_rollout = responses.size(0) // batch_size
+        created_nodes: List[MCTSNode] = []
 
         for tree_idx in range(batch_size):
             root = roots[tree_idx]
@@ -282,6 +292,9 @@ class StepTreeRLStrategy(SamplingStrategy):
                     )
                     current_parent.children.append(child)
                     current_parent = child
+                    created_nodes.append(child)
+
+        return created_nodes
 
     def _split_by_step_end(
         self, full_text: str, full_tokens: List[int],
@@ -313,34 +326,28 @@ class StepTreeRLStrategy(SamplingStrategy):
     def _branch_by_entropy(
         self,
         roots: List[MCTSNode],
+        candidate_pool: Dict[int, List[MCTSNode]],
         generate_fn: Callable[[DataProto], DataProto],
         compute_log_prob_fn: Callable[[DataProto], DataProto],
         device: torch.device,
     ) -> None:
-        """Multi-round: select Top-K high-entropy steps and branch."""
-        for round_idx in range(self.iter_rounds):
-            # Collect all expandable steps (non-root, non-terminal)
-            all_steps: List[MCTSNode] = []
-            for root in roots:
-                for node in collect_all_nodes(root):
-                    if node.parent is not None and not node.children:
-                        all_steps.append(node)
-
-            if not all_steps:
+        """Multi-round: select per-tree Top-K high-entropy nodes and branch."""
+        for _round_idx in range(self.iter_rounds):
+            candidate_groups = self._collect_branch_candidates(roots, candidate_pool)
+            if not candidate_groups:
                 break
 
-            # Compute entropy for each step
-            step_entropies = self._compute_step_entropies(
-                all_steps, compute_log_prob_fn, device,
-            )
-
-            if not step_entropies:
-                break
-
-            # Select Top-K by entropy
-            k = min(self.top_k, len(all_steps))
-            pairs = sorted(zip(step_entropies, all_steps), key=lambda x: x[0], reverse=True)
-            selected = [node for _, node in pairs[:k]]
+            selected: List[MCTSNode] = []
+            for nodes in candidate_groups.values():
+                if not nodes:
+                    continue
+                pairs = sorted(
+                    ((node.cached_entropy, node) for node in nodes if node.cached_entropy is not None),
+                    key=lambda x: x[0],
+                    reverse=True,
+                )
+                k = min(self.top_k, len(pairs))
+                selected.extend(node for _, node in pairs[:k])
 
             if not selected:
                 break
@@ -349,22 +356,86 @@ class StepTreeRLStrategy(SamplingStrategy):
             for step in selected:
                 step.is_branch_point = True
 
-            self._continue_from_steps(selected, generate_fn, device)
+            new_nodes = self._continue_from_steps(selected, generate_fn, device)
+            if new_nodes:
+                self._add_candidates(candidate_pool, new_nodes)
+                self._score_new_candidates(new_nodes, compute_log_prob_fn, device)
+
+    def _build_candidate_pool(self, roots: List[MCTSNode], initial_nodes: List[MCTSNode]) -> Dict[int, List[MCTSNode]]:
+        candidate_pool: Dict[int, List[MCTSNode]] = {root.tree_idx: [] for root in roots}
+        self._add_candidates(candidate_pool, initial_nodes)
+        return candidate_pool
+
+    def _add_candidates(self, candidate_pool: Dict[int, List[MCTSNode]], nodes: List[MCTSNode]) -> None:
+        for node in nodes:
+            if node.parent is None:
+                continue
+            bucket = candidate_pool.setdefault(node.tree_idx, [])
+            if node not in bucket:
+                bucket.append(node)
+
+    def _score_new_candidates(
+        self,
+        nodes: List[MCTSNode],
+        compute_log_prob_fn: Callable[[DataProto], DataProto],
+        device: torch.device,
+    ) -> None:
+        pending = [node for node in nodes if node.parent is not None and node.cached_entropy is None]
+        if not pending:
+            return
+        entropies = self._compute_step_entropies(pending, compute_log_prob_fn, device)
+        for node, entropy in zip(pending, entropies):
+            node.cached_entropy = entropy
+
+    def _collect_branch_candidates(
+        self,
+        roots: List[MCTSNode],
+        candidate_pool: Dict[int, List[MCTSNode]],
+    ) -> Dict[int, List[MCTSNode]]:
+        """Collect cached non-root nodes for each tree."""
+        candidates: Dict[int, List[MCTSNode]] = {}
+        for root in roots:
+            nodes = [
+                node
+                for node in candidate_pool.get(root.tree_idx, [])
+                if node.parent is not None and node.cached_entropy is not None
+            ]
+            if nodes:
+                candidates[root.tree_idx] = nodes
+        return candidates
 
     def _continue_from_steps(
         self,
         steps: List[MCTSNode],
         generate_fn: Callable[[DataProto], DataProto],
         device: torch.device,
-    ) -> None:
-        """Generate continuation from selected steps, with deduplication."""
+    ) -> List[MCTSNode]:
+        """Generate continuation from selected nodes, preserving existing branches."""
         if not steps:
-            return
+            return []
 
-        seqs = [torch.tensor(s.state, dtype=torch.long, device=device) for s in steps]
+        branch_plans: List[Tuple[MCTSNode, int]] = []
+        skipped_steps = 0
+        for step in steps:
+            remaining_budget = self.max_model_len - len(step.state)
+            branch_budget = min(self.branch_max_new_tokens, self.max_token_num, remaining_budget)
+            if branch_budget <= 0:
+                skipped_steps += 1
+                continue
+            branch_plans.append((step, branch_budget))
+
+        if not branch_plans:
+            if skipped_steps > 0:
+                print(f"[StepTreeRL] Skipped {skipped_steps} selected nodes due to exhausted context budget")
+            return []
+
+        active_steps = [step for step, _ in branch_plans]
+        round_budget = min(branch_budget for _, branch_budget in branch_plans)
+
+        seqs = [torch.tensor(s.state, dtype=torch.long, device=device) for s in active_steps]
         input_ids, attention_mask, position_ids = _pad_sequences(seqs, self.pad_token_id, device)
 
-        batch_size = len(steps)
+        batch_size = len(active_steps)
         ws = max(self._n_gpus, 1)
         padded_size = ((batch_size + ws - 1) // ws) * ws
         pad_slots = padded_size - batch_size
@@ -382,7 +453,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 "prompts": input_ids.clone(),
             },
             non_tensors={},
-            meta_info={"max_new_tokens": self.max_token_num},
+            meta_info={"max_new_tokens": round_budget},
         )
 
         output = generate_fn(data)
@@ -391,8 +462,9 @@ class StepTreeRLStrategy(SamplingStrategy):
 
         total_new_nodes = 0
         total_duplicates = 0
+        created_nodes: List[MCTSNode] = []
 
-        for i, step in enumerate(steps):
+        for i, step in enumerate(active_steps):
             resp = responses[i]
             real_mask = resp != self.pad_token_id
             step_tokens_raw = resp[real_mask].tolist()
@@ -416,7 +488,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 accumulated_text = current_parent.accumulated_text + block_text
                 new_state = current_parent.state + block_tokens
 
-                # Deduplication: skip if this step_tokens already exists in ancestor path
+                # Deduplication is limited to sibling branches from the same parent.
                 if self._is_duplicate_step(block_tokens, current_parent):
                     total_duplicates += 1
                     continue
@@ -443,22 +515,19 @@ class StepTreeRLStrategy(SamplingStrategy):
                 current_parent.children.append(child)
                 current_parent = child
                 total_new_nodes += 1
+                created_nodes.append(child)
 
+        if skipped_steps > 0:
+            print(f"[StepTreeRL] Skipped {skipped_steps} selected nodes due to exhausted context budget")
         if total_duplicates > 0:
             print(f"[StepTreeRL] Deduplicated {total_duplicates} duplicate steps, added {total_new_nodes} new nodes")
+        return created_nodes
 
     def _is_duplicate_step(self, block_tokens: List[int], parent_node: MCTSNode) -> bool:
-        """Check if block_tokens already exists in the ancestor path (excluding parent)."""
-        # Check siblings (previous children of the same parent) first for efficiency
+        """Check whether the parent already has a child with identical step tokens."""
         for sibling in parent_node.children:
             if sibling.step_tokens == block_tokens:
                 return True
-        # Check ancestor path (grandparent and above)
-        current = parent_node.parent
-        while current is not None:
-            if current.step_tokens == block_tokens:
-                return True
-            current = current.parent
         return False
 
     # ------------------------------------------------------------------
@@ -563,35 +632,37 @@ class StepTreeRLStrategy(SamplingStrategy):
         compute_log_prob_fn: Callable[[DataProto], DataProto],
         device: torch.device,
     ) -> List[float]:
-        """Batch-compute per-step average entropy for a list of nodes."""
+        """Batch-compute per-step average ``-log p(token)`` for a list of nodes."""
         if not nodes:
             return []
 
-        seqs = [torch.tensor(node.state, dtype=torch.long, device=device) for node in nodes]
-        input_ids, attention_mask, position_ids = _pad_sequences(seqs, self.pad_token_id, device)
-
-        max_state_len = max(len(node.state) for node in nodes)
+        prompt_prefixes: List[List[int]] = [
+            node.parent.state if node.parent is not None else node.state
+            for node in nodes
+        ]
+        max_prompt_len = max(len(prefix) for prefix in prompt_prefixes)
         max_step_len = max(len(node.step_tokens) for node in nodes)
         if max_step_len == 0:
             return [0.0] * len(nodes)
 
         batch_size = len(nodes)
-        total_len = max_state_len + max_step_len
+        total_len = max_prompt_len + max_step_len
 
         full_input_ids = torch.full((batch_size, total_len), self.pad_token_id, dtype=torch.long, device=device)
         full_attention_mask = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
         responses = torch.full((batch_size, max_step_len), self.pad_token_id, dtype=torch.long, device=device)
 
         for i, node in enumerate(nodes):
-            state_len = len(node.state)
+            prompt_tokens = prompt_prefixes[i]
+            state_len = len(prompt_tokens)
             step_len = len(node.step_tokens)
-            p_offset = max_state_len - state_len
-            full_input_ids[i, p_offset:max_state_len] = torch.tensor(node.state, dtype=torch.long, device=device)
-            full_attention_mask[i, p_offset:max_state_len] = 1
-            full_input_ids[i, max_state_len:max_state_len + step_len] = torch.tensor(
+            p_offset = max_prompt_len - state_len
+            full_input_ids[i, p_offset:max_prompt_len] = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
+            full_attention_mask[i, p_offset:max_prompt_len] = 1
+            full_input_ids[i, max_prompt_len:max_prompt_len + step_len] = torch.tensor(
                 node.step_tokens, dtype=torch.long, device=device,
             )
-            full_attention_mask[i, max_state_len:max_state_len + step_len] = 1
+            full_attention_mask[i, max_prompt_len:max_prompt_len + step_len] = 1
             responses[i, :step_len] = torch.tensor(node.step_tokens, dtype=torch.long, device=device)
 
         position_ids_full = full_attention_mask.long().cumsum(dim=-1) - 1
@@ -613,7 +684,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 "input_ids": full_input_ids,
                 "attention_mask": full_attention_mask,
                 "position_ids": position_ids_full,
-                "prompts": full_input_ids[:, :max_state_len],
+                "prompts": full_input_ids[:, :max_prompt_len],
                 "responses": responses,
             },
             non_tensors={},

@@ -5,28 +5,15 @@
 # - Example: N_GPUS=2 and MAX_COLOCATE_COUNT=10 needs about CPU:20 + GPU:2.
 # - Example: N_GPUS=2 and MAX_COLOCATE_COUNT=1 needs about CPU:2 + GPU:2.
 
-######################
-# N_SAMPLES=1
-# TEMPERATURE=0.0
-# TOP_P=1.0
-# SAMPLE_AGG=mean
-# ######################
-# N_SAMPLES=8
-# TEMPERATURE=0.7
-# TOP_P=0.95
-# TOP_K=50
-# SAMPLE_AGG=best
-######################
-
 
 MAX_COLOCATE_COUNT=1
 VERL_LOGI_DEBUG=0 # Set to 1 to enable debug mode for LogiQA evaluation, which may print more detailed logs.
 
 
 ROOT_DIR=/home/chenzhb/Workspaces/verl
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-7B-Instruct
 DATA_PATH=${DATA_PATH:-$ROOT_DIR/data/logiqa/test.parquet}
-OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_1.5b_instruct_logiqa}
+OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_7b_instruct_logiqa}
 DATASET_NAME=logiqa
 REWARD_FN_PATH=$ROOT_DIR/custom_module.py
 
