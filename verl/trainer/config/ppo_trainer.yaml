@@ -207,15 +207,16 @@ reward_model:
   ulysses_sequence_parallel_size: 1 # sp size
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
+  reward_manager: auto
   # DAPO Overlong buffer configuration
   overlong_buffer:
     enable: False  # Enable overlong reward shaping for DAPO
     len: 4096
     penalty_factor: 1.0
     log: False
-  # Extra kwargs passed to the reward manager ctor (e.g. EntropyRewardManager: reward_style).
-  # Must exist for Hydra struct-mode overrides like reward_model.reward_kwargs.reward_style=...
+  # Extra kwargs passed to the reward manager ctor.
+  # Note: reward_model.reward_kwargs.reward_style remains in use for non-PRM managers
+  # such as EntropyRewardManager. PRM/FOL settings now live under trainer.process_reward.
   reward_kwargs:
     reward_style: state_value
     # EntropyRewardManager: print value tree after back-prop (verbose; use local rank gate in multi-worker)
@@ -290,9 +291,6 @@ trainer:
     backprop: true
     random_pick: false          # random node selection (true) or UCT (false)
     selection_policy: importance_sampling  # greedy | importance_sampling
-    prm: format                 # process reward model: format | fol
-    # FOL verification settings (used when prm: fol)
-    fol_metadata_path: null     # path to FOL metadata JSON file
     fol_verify_max_retries: 3   # max retries for Z3 code correction
     fol_verify_timeout: 10.0    # Z3 execution timeout in seconds
     use_weighted_value: false    # use weighted update for accumulated_value
@@ -305,9 +303,6 @@ trainer:
     branch_max_new_tokens: 512  # hard cap for a single branch continuation before remaining-budget clamp
     top_k: 2                   # number of high-entropy steps to select per round
     iter_rounds: 3            # number of branching rounds
-    prm: format               # process reward model: format | fol
-    # FOL verification settings (used when prm: fol)
-    fol_metadata_path: null   # path to FOL metadata JSON file
   # information_gain-specific settings (KL-divergence-guided tree, simplified)
   ig_config:
     max_depth: 40               # max step depth
@@ -315,9 +310,20 @@ trainer:
     prefix_text: "So far, the most likely answer is \\boxed{" # prefix appended to probe model belief
     top_k: 2                   # number of high-KL steps to select per round
     iter_rounds: 3            # number of branching rounds
-    prm: format               # process reward model: format | fol
-    # FOL verification settings (used when prm: fol)
-    fol_metadata_path: null   # path to FOL metadata JSON file
+  process_reward:
+    type: none                # none | format | fol
+    fol:
+      metadata_path: null
+      verify_timeout: 10.0
+      max_retries: 3
+      debug_dir: null
+      llm:
+        api_base_url: "http://localhost:4869/v1"
+        api_key: "EMPTY"
+        model_name: null
+        max_tokens: 4096
+        temperature: 0.1
+        top_p: 0.8
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

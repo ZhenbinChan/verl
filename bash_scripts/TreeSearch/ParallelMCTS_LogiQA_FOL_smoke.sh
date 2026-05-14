@@ -59,11 +59,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     reward_model.enable=false \
-    reward_model.reward_manager='mcts' \
-    reward_model.reward_kwargs.reward_style=fol \
-    reward_model.reward_kwargs.fol_metadata_path=${FOL_METADATA_PATH} \
+    reward_model.reward_manager='auto' \
     trainer.val_before_train=False \
     trainer.sampling_strategy=parallel_mcts \
+    trainer.process_reward.type=fol \
+    trainer.process_reward.fol.metadata_path=${FOL_METADATA_PATH} \
+    trainer.process_reward.fol.llm.api_base_url="http://localhost:4869/v1" \
+    trainer.process_reward.fol.llm.api_key="EMPTY" \
+    trainer.process_reward.fol.llm.model_name="qwen2.5-7b-coder" \
     trainer.parallel_mcts_config.max_nodes=${MAX_NODES} \
     trainer.parallel_mcts_config.max_depth=20 \
     trainer.parallel_mcts_config.max_children=${MAX_CHILDREN} \
@@ -76,8 +79,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.parallel_mcts_config.backprop=true \
     trainer.parallel_mcts_config.random_pick=false \
     trainer.parallel_mcts_config.selection_policy=importance_sampling \
-    trainer.parallel_mcts_config.prm=fol \
-    trainer.parallel_mcts_config.fol_metadata_path=${FOL_METADATA_PATH} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \

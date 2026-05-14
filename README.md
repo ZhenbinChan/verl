@@ -116,7 +116,8 @@ nohup python examples/data_preprocess/mcq_preprocess.py \
 
 Output files:
 - `train.parquet` / `test.parquet` — dataset files for training
-- `fol_metadata.json` — FOL metadata (required by `trainer.step_treerl_config.prm=fol`)
+- `fol_metadata.json` — FOL metadata (required by `trainer.process_reward.type=fol`)
+  The metadata file must contain every sample that will be scored during training or validation.
 
 #### Key Parameters
 

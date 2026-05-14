@@ -23,7 +23,6 @@ fields that other managers understand (e.g. ``print_entropy_tree``,
 from __future__ import annotations
 
 import json
-import os
 from collections import defaultdict
 from typing import Callable, Dict, Optional
 
@@ -31,6 +30,11 @@ import torch
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
+from verl.utils.process_reward import (
+    build_process_reward_runtime,
+    get_item_sample_id,
+    normalize_process_reward_cfg,
+)
 
 
 class MCTSRewardManager:
@@ -38,7 +42,7 @@ class MCTSRewardManager:
 
     Supports two reward styles:
     - 'format': checks <step>/<premise>/<conclusion> tag structure
-    - 'fol': FOL/Z3 verification (requires fol_metadata_path)
+    - 'fol': FOL/Z3 verification (requires trainer.process_reward.fol.*)
     """
 
     def __init__(
@@ -47,69 +51,28 @@ class MCTSRewardManager:
         num_examine: int,
         compute_score: Optional[Callable] = None,
         reward_fn_key: str = "data_source",
-        reward_style: str = "format",   # "format" | "fol"
-        fol_metadata_path: Optional[str] = None,
+        process_reward_cfg: Optional[dict] = None,
         **kwargs,                         # absorb all other yaml reward_kwargs
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
-        self.reward_style = reward_style
-
-        # Lazy-load the PRM function so we don't pay the import cost unless needed
-        self._step_prm_fn: Optional[Callable[[str], float]] = None
-
-        # FOL verifier initialization
-        self.fol_verifier = None
-        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
-
-        if reward_style == "fol" and fol_metadata_path:
-            self._init_fol_verifier(fol_metadata_path)
-
-    def _init_fol_verifier(self, metadata_path: str) -> None:
-        """Initialize FOL verifier from metadata file."""
-        if not os.path.exists(metadata_path):
-            print(f"[FOL Warning] FOL metadata path not found: {metadata_path}")
-            return
-
-        try:
-            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
-
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for item in data:
-                if item.get("fol_metadata"):
-                    sample_id = (
-                        item.get("sample_id")
-                        or item.get("extra_info", {}).get("index")
-                        or item.get("extra_info", {}).get("id")
-                    )
-                    if sample_id is not None:
-                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
-                            item["fol_metadata"]
-                        )
-
-            self.fol_verifier = FOLVerifier()
-            print(f"[FOL] RewardManager loaded {len(self.fol_metadata_map)} FOL metadata entries")
-
-        except Exception as e:
-            print(f"[FOL Warning] Failed to initialize FOL verifier: {e}")
+        if process_reward_cfg is None:
+            raise ValueError("MCTSRewardManager requires process_reward_cfg.")
+        self.process_reward_cfg = normalize_process_reward_cfg(process_reward_cfg)
+        self.process_reward_runtime = build_process_reward_runtime(self.process_reward_cfg)
+        self.process_reward_type = self.process_reward_runtime.reward_type
+        if self.process_reward_type == "none":
+            raise ValueError(
+                "MCTSRewardManager requires trainer.process_reward.type to be 'format' or 'fol'."
+            )
+        self._step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self.fol_verifier = self.process_reward_runtime.fol_verifier
+        self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
 
     @property
     def step_prm_fn(self) -> Callable[[str], float]:
-        if self._step_prm_fn is None:
-            from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn
-
-            if self.reward_style == "fol" and self.fol_verifier:
-                self._step_prm_fn = get_prm_fn(
-                    self.reward_style,
-                    verifier=self.fol_verifier,
-                    metadata_map=self.fol_metadata_map,
-                )
-            else:
-                self._step_prm_fn = get_prm_fn(self.reward_style)
         return self._step_prm_fn
 
     # ------------------------------------------------------------------
@@ -130,16 +93,17 @@ class MCTSRewardManager:
         response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         return prompt_str, response_str, valid_response_len
 
-    def _fallback_format_score(self, response_str: str) -> float:
-        """Whole-response format check: all <step> blocks must be well-formed."""
+    def _fallback_prm_score(self, response_str: str, sample_id: Optional[str] = None) -> float:
+        """Whole-response PRM check: all <step> blocks must score 1.0."""
         import re
         steps = re.findall(r"<step>(.*?)</step>", response_str, re.DOTALL)
         if not steps:
             return 0.0
-        try:
-            return 1.0 if all(self.step_prm_fn(s) == 1.0 for s in steps) else 0.0
-        except NotImplementedError:
-            return 0.0
+        if self.process_reward_type == "fol":
+            if sample_id is None:
+                raise ValueError("FOL process reward fallback requires sample_id.")
+            return 1.0 if all(self.step_prm_fn(s, sample_id=sample_id) == 1.0 for s in steps) else 0.0
+        return 1.0 if all(self.step_prm_fn(s) == 1.0 for s in steps) else 0.0
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -182,7 +146,8 @@ class MCTSRewardManager:
 
             # --- Fallback PRM fill (only when no precomputed scores) ---
             if not has_precomputed and valid_resp_len > 0:
-                fmt_score = self._fallback_format_score(response_str)
+                sample_id = get_item_sample_id(item.non_tensor_batch)
+                fmt_score = self._fallback_prm_score(response_str, sample_id=sample_id)
                 reward_tensor[i, valid_resp_len - 1] = fmt_score
 
             # --- ORM verifiable reward ---------------------------------

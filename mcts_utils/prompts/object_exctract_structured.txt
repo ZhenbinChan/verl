@@ -1,0 +1,97 @@
+You are an experienced natural language processing expert, familiar with named entity recognition, semantic typing, and ontology construction for logical reasoning.
+
+## Task Description
+Given the context, question, and candidate options of a multiple-choice reasoning problem, extract the entities that are useful for formal reasoning.
+
+This is an open-world typing task:
+- You MUST invent appropriate type names from the text when needed, such as `person`, `direction`, `shipment`, `day`, `literary_work`, `event`, `year`.
+- Type names are NOT from a fixed vocabulary.
+
+However, the OUTPUT STRUCTURE is fixed and must be followed exactly.
+
+## Output Structure
+Return a JSON object with exactly one top-level field:
+
+{
+  "entity_groups": [
+    {
+      "type": "person",
+      "sort_kind": "uninterpreted",
+      "values": ["Paula", "Bill", "Damien"]
+    }
+  ]
+}
+
+## Field Rules
+For each item in `entity_groups`:
+1. `type`
+- Must be a singular noun phrase in snake_case.
+- Must describe a semantic category found in the text.
+- Examples: `person`, `direction`, `shipment`, `building`, `year`, `event`.
+- Do NOT use vague placeholder names such as `entity`, `target`, `object`, `thing`, `misc`, `key_predicate`, `key_relation`.
+
+2. `sort_kind`
+- Must be one of:
+  - `uninterpreted`
+  - `int`
+  - `real`
+- Use `int` for integer domains such as years, counts, rankings, positions.
+- Use `real` only when real-valued quantities are clearly needed.
+- Otherwise use `uninterpreted`.
+
+3. `values`
+- Must be a flat list.
+- Values should be constants or domain elements useful for reasoning.
+- For `int`, values should be numbers, not strings.
+- Do not output nested lists or dictionaries.
+
+## Extraction Rules
+1. Group constants by semantic type.
+2. Keep only entities useful for reasoning.
+3. If the text implies a finite domain, enumerate it when reasonable.
+4. Preserve concrete names from the text.
+5. Avoid duplicate values inside the same type.
+6. Prefer semantically specific types over generic ones.
+
+## Example
+Input:
+<Context>
+Paula will visit the dentist tomorrow morning only if Bill goes golfing in the morning. Bill will not go golfing unless Damien agrees to go golfing too.
+</Context>
+<Question>
+Which statement follows?
+</Question>
+<Options>
+(A) Paula will visit the dentist.
+(B) Bill will go golfing.
+</Options>
+
+Output:
+{
+  "entity_groups": [
+    {
+      "type": "person",
+      "sort_kind": "uninterpreted",
+      "values": ["Paula", "Bill", "Damien"]
+    },
+    {
+      "type": "event",
+      "sort_kind": "uninterpreted",
+      "values": ["visiting the dentist", "going golfing"]
+    }
+  ]
+}
+
+Now extract the entities from the following text.
+
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>

@@ -15,7 +15,6 @@ Simplified parameters:
 
 from __future__ import annotations
 
-import os
 import re
 from contextlib import contextmanager
 from typing import Callable, Dict, List, Optional, Tuple
@@ -31,7 +30,11 @@ from verl.trainer.ppo.sampling.mcts_node import (
     leaf_backpropagate_correct,
     leaf_normalize,
 )
-from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn, format_step_reward
+from verl.utils.process_reward import (
+    build_process_reward_runtime,
+    require_batch_sample_id,
+    resolve_process_reward_config,
+)
 
 
 @contextmanager
@@ -56,6 +59,7 @@ class InformationGainStrategy(SamplingStrategy):
     """
 
     def __init__(self, config, tokenizer):
+        process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("ig_config", {})
 
         self.max_depth = cfg.get("max_depth", 40)
@@ -66,20 +70,13 @@ class InformationGainStrategy(SamplingStrategy):
         self.top_k = cfg.get("top_k", 2)
         self.iter_rounds = cfg.get("iter_rounds", 3)
 
-        prm_type = cfg.get("prm", "format")
-
-        # FOL verifier initialization (lazy loading)
-        self.fol_verifier = None
-        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
-        self._fol_metadata_loaded = False
-        self._fol_metadata_path = cfg.get("fol_metadata_path", None)
-
-        if prm_type == "fol" and self._fol_metadata_path:
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn("format")
-        else:
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn(prm_type)
+        self.process_reward_cfg = process_reward_cfg
+        self.process_reward_runtime = build_process_reward_runtime(process_reward_cfg)
+        self.process_reward_type = self.process_reward_runtime.reward_type
+        self.fol_verifier = self.process_reward_runtime.fol_verifier
+        self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
+        self.step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self._sample_ids_by_tree: Dict[int, str] = {}
 
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
@@ -91,61 +88,31 @@ class InformationGainStrategy(SamplingStrategy):
         # KL computation cache
         self._option_cache: Dict[str, dict] = {}
 
-    # ------------------------------------------------------------------
-    # FOL Metadata Loading
-    # ------------------------------------------------------------------
-
-    def _load_fol_metadata(self, gen_batch: DataProto) -> None:
-        if self._fol_metadata_loaded:
-            return
-        if self.fol_verifier is not None:
-            return
-        if not self._fol_metadata_path or not os.path.exists(self._fol_metadata_path):
-            print(f"[FOL Warning] FOL metadata path not found: {self._fol_metadata_path}")
-            return
-
-        try:
-            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
-            import json
-
-            with open(self._fol_metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for item in data:
-                if item.get("fol_metadata"):
-                    sample_id = (
-                        item.get("sample_id")
-                        or item.get("extra_info", {}).get("index")
-                        or item.get("extra_info", {}).get("id")
-                    )
-                    if sample_id is not None:
-                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
-                            item["fol_metadata"]
-                        )
-
-            self.fol_verifier = FOLVerifier()
-            self.step_prm_fn = get_prm_fn(
-                "fol",
-                verifier=self.fol_verifier,
-                metadata_map=self.fol_metadata_map,
+    def _prepare_sample_ids(self, gen_batch: DataProto) -> None:
+        self._sample_ids_by_tree = {}
+        for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
+            self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
+                gen_batch.non_tensor_batch,
+                tree_idx,
+                context="FOL process reward",
             )
-            self._fol_metadata_loaded = True
-            print(f"[FOL] Loaded {len(self.fol_metadata_map)} FOL metadata entries")
 
-        except Exception as e:
-            print(f"[FOL Warning] Failed to load FOL metadata: {e}")
+    def _get_sample_id(self, tree_idx: int) -> str:
+        if tree_idx not in self._sample_ids_by_tree:
+            raise ValueError(
+                f"FOL process reward requires a cached sample_id for tree_idx={tree_idx}."
+            )
+        return self._sample_ids_by_tree[tree_idx]
 
-    def _get_sample_id(self, tree_idx: int, gen_batch: DataProto) -> str:
-        if gen_batch.non_tensor_batch is not None:
-            sample_ids = gen_batch.non_tensor_batch.get("sample_id", [])
-            if sample_ids and tree_idx < len(sample_ids):
-                return str(sample_ids[tree_idx])
-            extra_info = gen_batch.non_tensor_batch.get("extra_info", [])
-            if extra_info and tree_idx < len(extra_info):
-                sample_id = extra_info[tree_idx].get("index") or extra_info[tree_idx].get("id")
-                if sample_id is not None:
-                    return str(sample_id)
-        return str(tree_idx)
+    def _score_step_reward(self, step_text: str, tree_idx: int) -> float:
+        if self.process_reward_type == "format":
+            return self.step_prm_fn(step_text)
+        if self.process_reward_type == "fol":
+            return self.step_prm_fn(step_text, sample_id=self._get_sample_id(tree_idx))
+        raise ValueError(
+            f"InformationGainStrategy requires trainer.process_reward.type to be 'format' or 'fol', "
+            f"but got {self.process_reward_type!r}."
+        )
 
     # ------------------------------------------------------------------
     # Option detection
@@ -246,8 +213,8 @@ class InformationGainStrategy(SamplingStrategy):
         device = gen_batch.batch["input_ids"].device
 
         with _timer("information_gain", timing_raw):
-            if self._prm_type == "fol":
-                self._load_fol_metadata(gen_batch)
+            if self.process_reward_type == "fol":
+                self._prepare_sample_ids(gen_batch)
 
             batch_size = gen_batch.batch["input_ids"].size(0)
 
@@ -366,14 +333,7 @@ class InformationGainStrategy(SamplingStrategy):
         for block_text, block_tokens in step_blocks:
             r = 0.0
             if block_text.strip():
-                try:
-                    if self.fol_verifier is not None and str(tree_idx) in self.fol_metadata_map:
-                        sample_id = self._get_sample_id(tree_idx, gen_batch)
-                        r = self.step_prm_fn(block_text, sample_id=sample_id)
-                    else:
-                        r = format_step_reward(block_text)
-                except Exception:
-                    r = 0.0
+                r = self._score_step_reward(block_text, tree_idx)
 
             node = MCTSNode(
                 state=current.state + block_tokens,
@@ -607,13 +567,7 @@ class InformationGainStrategy(SamplingStrategy):
             for block_text, block_tokens in step_blocks:
                 r = 0.0
                 if block_text.strip():
-                    try:
-                        if self.fol_verifier is not None and str(step.tree_idx) in self.fol_metadata_map:
-                            r = self.step_prm_fn(block_text, sample_id=str(step.tree_idx))
-                        else:
-                            r = format_step_reward(block_text)
-                    except Exception:
-                        r = 0.0
+                    r = self._score_step_reward(block_text, step.tree_idx)
 
                 child = MCTSNode(
                     state=current.state + block_tokens,

@@ -14,7 +14,6 @@ Simplified parameters:
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -27,7 +26,11 @@ from verl.trainer.ppo.sampling.mcts_node import (
     collect_all_nodes,
     gather_path,
 )
-from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn, format_step_reward
+from verl.utils.process_reward import (
+    build_process_reward_runtime,
+    require_batch_sample_id,
+    resolve_process_reward_config,
+)
 
 
 @contextmanager
@@ -51,6 +54,7 @@ class StepTreeRLStrategy(SamplingStrategy):
     """
 
     def __init__(self, config, tokenizer):
+        process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("step_treerl_config", {})
 
         # Simplified parameters
@@ -62,20 +66,13 @@ class StepTreeRLStrategy(SamplingStrategy):
         self.top_k = cfg.get("top_k", 2)
         self.iter_rounds = cfg.get("iter_rounds", 3)
 
-        prm_type = cfg.get("prm", "format")
-
-        # FOL verifier initialization (lazy loading)
-        self.fol_verifier = None
-        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
-        self._fol_metadata_loaded = False
-        self._fol_metadata_path = cfg.get("fol_metadata_path", None)
-
-        if prm_type == "fol" and self._fol_metadata_path:
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn("format")
-        else:
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn(prm_type)
+        self.process_reward_cfg = process_reward_cfg
+        self.process_reward_runtime = build_process_reward_runtime(process_reward_cfg)
+        self.process_reward_type = self.process_reward_runtime.reward_type
+        self.fol_verifier = self.process_reward_runtime.fol_verifier
+        self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
+        self.step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self._sample_ids_by_tree: Dict[int, str] = {}
 
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
@@ -90,61 +87,32 @@ class StepTreeRLStrategy(SamplingStrategy):
         # Step boundary delimiter
         self.step_end_marker = "</step>"
 
-    # ------------------------------------------------------------------
-    # FOL Metadata Loading
-    # ------------------------------------------------------------------
-
-    def _load_fol_metadata(self, gen_batch: DataProto) -> None:
-        if self._fol_metadata_loaded:
-            return
-        if self.fol_verifier is not None:
-            return
-        if not self._fol_metadata_path or not os.path.exists(self._fol_metadata_path):
-            print(f"[FOL Warning] FOL metadata path not found: {self._fol_metadata_path}")
-            return
-
-        try:
-            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
-            import json
-
-            with open(self._fol_metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for item in data:
-                if item.get("fol_metadata"):
-                    sample_id = (
-                        item.get("sample_id")
-                        or item.get("extra_info", {}).get("index")
-                        or item.get("extra_info", {}).get("id")
-                    )
-                    if sample_id is not None:
-                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
-                            item["fol_metadata"]
-                        )
-
-            self.fol_verifier = FOLVerifier()
-            self.step_prm_fn = get_prm_fn(
-                "fol",
-                verifier=self.fol_verifier,
-                metadata_map=self.fol_metadata_map,
+    def _prepare_sample_ids(self, gen_batch: DataProto) -> None:
+        self._sample_ids_by_tree = {}
+        for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
+            self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
+                gen_batch.non_tensor_batch,
+                tree_idx,
+                context="FOL process reward",
             )
-            self._fol_metadata_loaded = True
-            print(f"[FOL] Loaded {len(self.fol_metadata_map)} FOL metadata entries")
 
-        except Exception as e:
-            print(f"[FOL Warning] Failed to load FOL metadata: {e}")
+    def _get_sample_id(self, tree_idx: int) -> str:
+        if tree_idx not in self._sample_ids_by_tree:
+            raise ValueError(
+                f"FOL process reward requires a cached sample_id for tree_idx={tree_idx}."
+            )
+        return self._sample_ids_by_tree[tree_idx]
 
-    def _get_sample_id(self, tree_idx: int, gen_batch: DataProto) -> str:
-        if gen_batch.non_tensor_batch is not None:
-            sample_ids = gen_batch.non_tensor_batch.get("sample_id", [])
-            if sample_ids and tree_idx < len(sample_ids):
-                return str(sample_ids[tree_idx])
-            extra_info = gen_batch.non_tensor_batch.get("extra_info", [])
-            if extra_info and tree_idx < len(extra_info):
-                sample_id = extra_info[tree_idx].get("index") or extra_info[tree_idx].get("id")
-                if sample_id is not None:
-                    return str(sample_id)
-        return str(tree_idx)
+    def _score_step_reward(self, step_text: str, tree_idx: int) -> float:
+        if self.process_reward_type == "format":
+            return self.step_prm_fn(step_text)
+        if self.process_reward_type == "fol":
+            sample_id = self._get_sample_id(tree_idx)
+            return self.step_prm_fn(step_text, sample_id=sample_id)
+        raise ValueError(
+            f"StepTreeRLStrategy requires trainer.process_reward.type to be 'format' or 'fol', "
+            f"but got {self.process_reward_type!r}."
+        )
 
     # ------------------------------------------------------------------
     # SamplingStrategy interface
@@ -161,8 +129,8 @@ class StepTreeRLStrategy(SamplingStrategy):
         device = gen_batch.batch["input_ids"].device
 
         with _timer("step_treerl", timing_raw):
-            if self._prm_type == "fol":
-                self._load_fol_metadata(gen_batch)
+            if self.process_reward_type == "fol":
+                self._prepare_sample_ids(gen_batch)
 
             batch_size = gen_batch.batch["input_ids"].size(0)
 
@@ -270,11 +238,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                     accumulated_text = current_parent.accumulated_text + block_text
                     new_state = current_parent.state + block_tokens
 
-                    # Compute PRM reward for this step
-                    try:
-                        r = format_step_reward(block_text)
-                    except Exception:
-                        r = 0.0
+                    r = self._score_step_reward(block_text, tree_idx)
 
                     child = MCTSNode(
                         state=new_state,
@@ -493,10 +457,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                     total_duplicates += 1
                     continue
 
-                try:
-                    r = format_step_reward(block_text)
-                except Exception:
-                    r = 0.0
+                r = self._score_step_reward(block_text, step.tree_idx)
 
                 child = MCTSNode(
                     state=new_state,

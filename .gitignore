@@ -143,6 +143,7 @@ results/
 homogeneous_data/
 record/
 slurm/
+debug/
 
 *.pid
 *.log
