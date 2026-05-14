@@ -24,9 +24,9 @@ VERL_LOGI_DEBUG=0 # Set to 1 to enable debug mode for LogiQA evaluation, which m
 
 
 ROOT_DIR=/home/chenzhb/Workspaces/verl
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL_PATH=/home/chenzhb/Workspaces/verl/ckpt/verl/Qwen2.5-1.5B_LogiQA_GRPO_only/global_step_579/actor
 DATA_PATH=${DATA_PATH:-$ROOT_DIR/data/logiqa/test.parquet}
-OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_1.5b_instruct_logiqa}
+OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_1.5b_instruct_logiqa_grpo_only}
 DATASET_NAME=logiqa
 REWARD_FN_PATH=$ROOT_DIR/custom_module.py
 
