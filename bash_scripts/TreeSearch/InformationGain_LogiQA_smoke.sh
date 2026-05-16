@@ -60,15 +60,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     reward_model.enable=false \
-    reward_model.reward_manager='ig' \
-    reward_model.reward_kwargs.reward_style=format \
+    reward_model.reward_manager='auto' \
     trainer.val_before_train=True \
     trainer.sampling_strategy=information_gain \
+    trainer.process_reward.type=format \
     trainer.ig_config.max_depth=20 \
     trainer.ig_config.max_token_num=512 \
     trainer.ig_config.top_k=${TOP_K} \
     trainer.ig_config.iter_rounds=${ITER_ROUNDS} \
-    trainer.ig_config.prm=format \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \

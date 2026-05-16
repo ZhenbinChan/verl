@@ -684,6 +684,26 @@ class RayPPOTrainer:
                 f"Use EntropyRewardManager for tree-level value back-propagation rewards."
             )
 
+        process_reward_type = str(
+            config.trainer.get("process_reward", {}).get("type", "none")
+        ).lower()
+
+        if str(config.trainer.get("sampling_strategy", "")).lower() == "parallel_mcts":
+            reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            assert reward_manager_name == "mcts", (
+                f"sampling_strategy='parallel_mcts' requires reward_model.reward_manager='mcts', "
+                f"but got '{reward_manager_name}'. "
+                f"Use MCTSRewardManager for step-level PRM-based dense rewards."
+            )
+            assert config.algorithm.adv_estimator in [AdvantageEstimator.MCTS_GRPO], (
+                f"sampling_strategy='parallel_mcts' requires algorithm.adv_estimator='mcts_grpo', "
+                f"but got '{config.algorithm.adv_estimator}'."
+            )
+            assert process_reward_type in {"format", "fol"}, (
+                "sampling_strategy='parallel_mcts' requires trainer.process_reward.type to be "
+                f"'format' or 'fol', but got '{process_reward_type}'."
+            )
+
         # step_treerl strategy requires step_tree reward manager
         if str(config.trainer.get("sampling_strategy", "")).lower() == "step_treerl":
             reward_manager_name = config.reward_model.get("reward_manager", "naive")
@@ -695,6 +715,10 @@ class RayPPOTrainer:
             assert config.algorithm.adv_estimator in [AdvantageEstimator.STEP_TREERL_GRPO], (
                 f"sampling_strategy='step_treerl' requires algorithm.adv_estimator='step_treerl_grpo', "
                 f"but got '{config.algorithm.adv_estimator}'."
+            )
+            assert process_reward_type in {"format", "fol"}, (
+                "sampling_strategy='step_treerl' requires trainer.process_reward.type to be "
+                f"'format' or 'fol', but got '{process_reward_type}'."
             )
 
         # information_gain strategy requires ig reward manager
@@ -708,6 +732,10 @@ class RayPPOTrainer:
             assert config.algorithm.adv_estimator in [AdvantageEstimator.IG_GRPO], (
                 f"sampling_strategy='information_gain' requires algorithm.adv_estimator='ig_grpo', "
                 f"but got '{config.algorithm.adv_estimator}'."
+            )
+            assert process_reward_type in {"format", "fol"}, (
+                "sampling_strategy='information_gain' requires trainer.process_reward.type to be "
+                f"'format' or 'fol', but got '{process_reward_type}'."
             )
 
         print("[validate_config] All configuration checks passed successfully!")

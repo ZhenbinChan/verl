@@ -115,7 +115,9 @@ class TaskRunner:
         from omegaconf import OmegaConf
 
         from verl.utils.fs import copy_to_local
+        from verl.utils.process_reward import resolve_process_reward_config
 
+        resolve_process_reward_config(config)
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
 
@@ -200,7 +202,11 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         # load the reward manager
-        reward_manager_name = config.reward_model.get("reward_manager", "naive")
+        reward_manager_name = str(config.reward_model.get("reward_manager", "auto") or "auto")
+        if reward_manager_name == "auto":
+            raise ValueError(
+                "reward_model.reward_manager='auto' should be resolved before reward manager instantiation."
+            )
         if reward_manager_name == "naive":
             from verl.workers.reward_manager import NaiveRewardManager
             reward_manager_cls = NaiveRewardManager
@@ -241,8 +247,26 @@ class TaskRunner:
             raise NotImplementedError
 
         compute_score = get_custom_reward_fn(config)
-        reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, reward_fn_key=config.data.reward_fn_key, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score, reward_fn_key=config.data.reward_fn_key, **config.reward_model.get("reward_kwargs", {}))
+        reward_manager_kwargs = dict(config.reward_model.get("reward_kwargs", {}))
+        if reward_manager_name in {"step_tree", "mcts", "ig"}:
+            reward_manager_kwargs["process_reward_cfg"] = OmegaConf.to_container(
+                config.trainer.process_reward, resolve=True
+            )
+
+        reward_fn = reward_manager_cls(
+            tokenizer=tokenizer,
+            num_examine=0,
+            compute_score=compute_score,
+            reward_fn_key=config.data.reward_fn_key,
+            **reward_manager_kwargs,
+        )
+        val_reward_fn = reward_manager_cls(
+            tokenizer=tokenizer,
+            num_examine=1,
+            compute_score=compute_score,
+            reward_fn_key=config.data.reward_fn_key,
+            **reward_manager_kwargs,
+        )
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

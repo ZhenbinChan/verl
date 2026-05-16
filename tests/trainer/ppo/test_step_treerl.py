@@ -37,10 +37,19 @@ class DummyTokenizer:
         return [ord(ch) for ch in text]
 
 
-def make_strategy(top_k=1, iter_rounds=1):
+def make_strategy(top_k=1, iter_rounds=1, process_reward_type="format"):
     config = OmegaConf.create(
         {
             "trainer": {
+                "process_reward": {
+                    "type": process_reward_type,
+                    "fol": {
+                        "metadata_path": None,
+                        "llm": {
+                            "model_name": None,
+                        },
+                    },
+                },
                 "step_treerl_config": {
                     "top_k": top_k,
                     "iter_rounds": iter_rounds,
@@ -207,14 +216,65 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         def generate_fn(data):
             captured["max_new_tokens"] = data.meta_info["max_new_tokens"]
             captured["batch_size"] = data.batch["input_ids"].size(0)
-            return SimpleNamespace(batch={"responses": torch.tensor([[7, 0]], dtype=torch.long)})
+            return SimpleNamespace(batch={"responses": torch.tensor([[7, 0], [8, 0]], dtype=torch.long)})
 
         with patch.object(strategy, "_split_by_step_end", return_value=[]):
             created = strategy._continue_from_steps([almost_full, roomy], generate_fn, device)
 
         self.assertEqual(captured["max_new_tokens"], 1)
-        self.assertEqual(captured["batch_size"], 1)
+        self.assertEqual(captured["batch_size"], 2)
         self.assertEqual(created, [])
+
+    def test_generate_full_solutions_uses_shared_step_reward(self):
+        strategy = make_strategy()
+
+        root = MCTSNode(state=[1], tree_idx=0)
+        gen_batch_output = SimpleNamespace(
+            batch={"responses": torch.tensor([[5, 6, 0]], dtype=torch.long)},
+            meta_info={"n_samples": 1},
+        )
+
+        with patch.object(strategy, "_split_by_step_end", return_value=[("step-a", [11, 12])]), patch.object(
+            strategy, "_score_step_reward", return_value=0.75
+        ) as mocked_score:
+            created = strategy._generate_full_solutions(
+                gen_batch=None,
+                gen_batch_output=gen_batch_output,
+                roots=[root],
+                batch_size=1,
+            )
+
+        mocked_score.assert_called_once_with("step-a", 0)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].R, 0.75)
+
+    def test_continue_from_steps_uses_cached_fol_sample_id(self):
+        strategy = make_strategy()
+        strategy.process_reward_type = "fol"
+        strategy._sample_ids_by_tree = {0: "sample-0"}
+        strategy.step_prm_fn = MagicMock(return_value=0.8)
+        device = torch.device("cpu")
+
+        root = MCTSNode(state=[1], tree_idx=0)
+        parent = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, step_text="parent")
+        root.children = [parent]
+
+        def generate_fn(_data):
+            return SimpleNamespace(batch={"responses": torch.tensor([[7, 8, 0]], dtype=torch.long)})
+
+        with patch.object(
+            strategy,
+            "_split_by_step_end",
+            return_value=[("<step><premise>a</premise><conclusion>b</conclusion></step>", [11, 12])],
+        ):
+            created = strategy._continue_from_steps([parent], generate_fn, device)
+
+        strategy.step_prm_fn.assert_called_once_with(
+            "<step><premise>a</premise><conclusion>b</conclusion></step>",
+            sample_id="sample-0",
+        )
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].R, 0.8)
 
 
 if __name__ == "__main__":

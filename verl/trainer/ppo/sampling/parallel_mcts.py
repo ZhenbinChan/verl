@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 import random
 from collections import deque
 from contextlib import contextmanager
@@ -21,7 +19,11 @@ from verl.trainer.ppo.sampling.mcts_node import (
     select_terminal,
     uct,
 )
-from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn, format_step_reward
+from verl.utils.process_reward import (
+    build_process_reward_runtime,
+    require_batch_sample_id,
+    resolve_process_reward_config,
+)
 
 
 @contextmanager
@@ -72,6 +74,7 @@ class ParallelMCTSStrategy(SamplingStrategy):
     """
 
     def __init__(self, config, tokenizer):
+        process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("parallel_mcts_config", {})
         self.max_nodes = cfg.get("max_nodes", 20)
         self.max_depth = cfg.get("max_depth", 40)
@@ -89,84 +92,61 @@ class ParallelMCTSStrategy(SamplingStrategy):
         self.normalize_style = cfg.get("normalize_style", "step")
         self.average_one_generation = cfg.get("average_one_generation", False)
 
-        prm_type = cfg.get("prm", "format")
-
-        # FOL verifier initialization (lazy loading)
-        self.fol_verifier = None
-        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
-        self._fol_metadata_loaded = False
-        self._fol_metadata_path = cfg.get("fol_metadata_path", None)
-
-        # Create PRM function
-        if prm_type == "fol" and self._fol_metadata_path:
-            # Defer FOL verifier initialization to first run() call
-            # when we have access to gen_batch data
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn("format")  # Temporary fallback
-        else:
-            self._prm_type = prm_type
-            self.step_prm_fn = get_prm_fn(prm_type)
+        self.process_reward_cfg = process_reward_cfg
+        self.process_reward_runtime = build_process_reward_runtime(process_reward_cfg)
+        self.process_reward_type = self.process_reward_runtime.reward_type
+        self.fol_verifier = self.process_reward_runtime.fol_verifier
+        self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
+        self.step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self._sample_ids_by_tree: Dict[int, str] = {}
 
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
         self.eos_token_id: Optional[int] = getattr(tokenizer, "eos_token_id", None)
 
-    # ------------------------------------------------------------------
-    # FOL Metadata Loading
-    # ------------------------------------------------------------------
-
-    def _load_fol_metadata(self, gen_batch: DataProto) -> None:
-        """Load FOL metadata from file and initialize FOL verifier."""
-        if self._fol_metadata_loaded:
-            return
-        if self.fol_verifier is not None:
-            return
-        if not self._fol_metadata_path or not os.path.exists(self._fol_metadata_path):
-            print(f"[FOL Warning] FOL metadata path not found: {self._fol_metadata_path}")
-            return
-
-        try:
-            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
-
-            with open(self._fol_metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for item in data:
-                if item.get("fol_metadata"):
-                    sample_id = (
-                        item.get("sample_id")
-                        or item.get("extra_info", {}).get("index")
-                        or item.get("extra_info", {}).get("id")
-                    )
-                    if sample_id is not None:
-                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
-                            item["fol_metadata"]
-                        )
-
-            self.fol_verifier = FOLVerifier()
-            self.step_prm_fn = get_prm_fn(
-                "fol",
-                verifier=self.fol_verifier,
-                metadata_map=self.fol_metadata_map,
+    def _prepare_sample_ids(self, gen_batch: DataProto) -> None:
+        self._sample_ids_by_tree = {}
+        for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
+            self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
+                gen_batch.non_tensor_batch,
+                tree_idx,
+                context="FOL process reward",
             )
-            self._fol_metadata_loaded = True
-            print(f"[FOL] Loaded {len(self.fol_metadata_map)} FOL metadata entries")
 
-        except Exception as e:
-            print(f"[FOL Warning] Failed to load FOL metadata: {e}")
+    def _get_sample_id(self, tree_idx: int) -> str:
+        if tree_idx not in self._sample_ids_by_tree:
+            raise ValueError(
+                f"FOL process reward requires a cached sample_id for tree_idx={tree_idx}."
+            )
+        return self._sample_ids_by_tree[tree_idx]
 
-    def _get_sample_id(self, tree_idx: int, gen_batch: DataProto) -> str:
-        """Get sample_id for a given tree index."""
-        if gen_batch.non_tensor_batch is not None:
-            sample_ids = gen_batch.non_tensor_batch.get("sample_id", [])
-            if sample_ids and tree_idx < len(sample_ids):
-                return str(sample_ids[tree_idx])
-            extra_info = gen_batch.non_tensor_batch.get("extra_info", [])
-            if extra_info and tree_idx < len(extra_info):
-                sample_id = extra_info[tree_idx].get("index") or extra_info[tree_idx].get("id")
-                if sample_id is not None:
-                    return str(sample_id)
-        return str(tree_idx)
+    def _score_step_reward(self, step_text: str, tree_idx: int) -> float:
+        if self.process_reward_type == "format":
+            return self.step_prm_fn(step_text)
+        if self.process_reward_type == "fol":
+            return self.step_prm_fn(step_text, sample_id=self._get_sample_id(tree_idx))
+        raise ValueError(
+            f"ParallelMCTSStrategy requires trainer.process_reward.type to be 'format' or 'fol', "
+            f"but got {self.process_reward_type!r}."
+        )
+
+    def _terminal_leaf_is_correct(self, terminal_text: str, tree_idx: int, ground_truth: Optional[str]) -> bool:
+        from verl.utils.reward_score.logi import compute_score
+
+        if self.process_reward_type == "fol":
+            import re
+
+            steps = re.findall(r"<step>(.*?)</step>", terminal_text, re.DOTALL)
+            if not steps:
+                return False
+            sample_id = self._get_sample_id(tree_idx)
+            return all(self.step_prm_fn(step_text, sample_id=sample_id) == 1.0 for step_text in steps)
+
+        if ground_truth is None or not terminal_text:
+            return False
+
+        score, _ = compute_score(terminal_text, ground_truth)
+        return float(score) == 1.0
 
     # ------------------------------------------------------------------
     # SamplingStrategy interface
@@ -183,9 +163,8 @@ class ParallelMCTSStrategy(SamplingStrategy):
         device = gen_batch.batch["input_ids"].device
 
         with _timer("parallel_mcts", timing_raw):
-            # Load FOL metadata on first run if prm='fol'
-            if self._prm_type == "fol":
-                self._load_fol_metadata(gen_batch)
+            if self.process_reward_type == "fol":
+                self._prepare_sample_ids(gen_batch)
 
             roots = self._init_roots(gen_batch, device)
             batch_size = len(roots)
@@ -372,19 +351,7 @@ class ParallelMCTSStrategy(SamplingStrategy):
                     depth_counts[tree_idx].get(node.depth + 1, 0) + 1
                 )
 
-                # Compute PRM reward
-                try:
-                    if self.fol_verifier is not None and str(tree_idx) in self.fol_metadata_map:
-                        # FOL verification mode
-                        sample_id = self._get_sample_id(tree_idx, gen_batch)
-                        r = self.step_prm_fn(step_text, sample_id=sample_id)
-                    else:
-                        # Fallback to format check
-                        r = format_step_reward(step_text)
-                except NotImplementedError:
-                    r = 0.0
-                except Exception:
-                    r = 0.0
+                r = self._score_step_reward(step_text, tree_idx)
 
                 child = MCTSNode(
                     state=new_state,
@@ -453,27 +420,11 @@ class ParallelMCTSStrategy(SamplingStrategy):
             for leaf in tree_leaves:
                 terminal_text = leaf.accumulated_text
                 if gt is not None and terminal_text:
-                    # Try FOL verification first
-                    if self.fol_verifier is not None and str(i) in self.fol_metadata_map:
-                        try:
-                            sample_id = self._get_sample_id(i, gen_batch)
-                            metadata = self.fol_metadata_map[str(sample_id)]
-                            reward = self.fol_verifier.verify_step(metadata, terminal_text, use_llm=True)
-                            leaf.is_correct = (reward == 1.0)
-                        except Exception:
-                            # Fallback to compute_score
-                            try:
-                                score, _ = compute_score(terminal_text, gt)
-                                leaf.is_correct = float(score) == 1.0
-                            except Exception:
-                                leaf.is_correct = False
-                    else:
-                        # Fallback to compute_score
-                        try:
-                            score, _ = compute_score(terminal_text, gt)
-                            leaf.is_correct = float(score) == 1.0
-                        except Exception:
-                            leaf.is_correct = False
+                    leaf.is_correct = self._terminal_leaf_is_correct(
+                        terminal_text,
+                        tree_idx=i,
+                        ground_truth=gt,
+                    )
                 else:
                     leaf.is_correct = None
                 if leaf.is_correct:

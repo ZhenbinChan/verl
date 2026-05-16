@@ -1,0 +1,107 @@
+You are an experienced natural language processing expert with strong skill in relation extraction, semantic role labeling, and formal predicate design.
+
+## Task Description
+Given the context, question, candidate options, and an entity ontology, extract predicates and relations that are useful for logical reasoning.
+
+This is an open-world predicate design task:
+- Predicate names are NOT from a fixed vocabulary.
+- You should invent appropriate predicate names when needed.
+
+However, the OUTPUT STRUCTURE is fixed and must be followed exactly.
+
+## Output Structure
+Return a JSON object with exactly one top-level field:
+
+{
+  "predicates": [
+    {
+      "name": "earlier_than",
+      "arg_types": ["partner", "partner"],
+      "return_type": "bool"
+    },
+    {
+      "name": "join_year",
+      "arg_types": ["partner"],
+      "return_type": "year"
+    }
+  ]
+}
+
+## Field Rules
+For each item in `predicates`:
+1. `name`
+- Must be a snake_case predicate or function name.
+- Must describe a real semantic relation or function from the text.
+- Do NOT use meta labels such as `key_predicate`, `key_relation`, `relation`, `predicate`, `entities`, `assumption`, `conclusion`.
+
+2. `arg_types`
+- Must be a flat list of type names.
+- Every type name here must come from the provided entity ontology.
+
+3. `return_type`
+- Must be exactly one of:
+  - `bool`
+  - `int`
+  - `real`
+  - one entity type from the provided ontology
+
+## Modeling Rules
+1. Use `return_type = "bool"` for truth-valued relations.
+2. Use entity-typed or numeric return types for functions.
+3. Include only predicates/functions that are useful for solving or checking reasoning steps.
+4. Prefer semantically precise names.
+5. Do not emit commentary or extra fields.
+
+## Example
+Input:
+<Context>
+The law firm has eight partners. From 1961 to 1968, one partner joined the firm each year. Hodges joined before Nader.
+</Context>
+<Question>
+Which statement cannot be true?
+</Question>
+<Options>
+(A) Hodges joined in 1961.
+</Options>
+<Entity_Ontology>
+{
+  "entity_groups": [
+    {"type": "partner", "sort_kind": "uninterpreted", "values": ["Hodges", "Nader"]},
+    {"type": "year", "sort_kind": "int", "values": [1961, 1962, 1963]}
+  ]
+}
+</Entity_Ontology>
+
+Output:
+{
+  "predicates": [
+    {
+      "name": "join_year",
+      "arg_types": ["partner"],
+      "return_type": "year"
+    },
+    {
+      "name": "earlier_than",
+      "arg_types": ["partner", "partner"],
+      "return_type": "bool"
+    }
+  ]
+}
+
+Now extract the predicates from the following text.
+
+<Context>
+${context}
+</Context>
+
+<Question>
+${question}
+</Question>
+
+<Options>
+${options}
+</Options>
+
+<Entity_Ontology>
+${obj_list}
+</Entity_Ontology>

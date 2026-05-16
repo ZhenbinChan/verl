@@ -15,7 +15,6 @@ Two reward signals are produced:
 
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from typing import Callable, Dict, Optional
 
@@ -23,6 +22,11 @@ import torch
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
+from verl.utils.process_reward import (
+    build_process_reward_runtime,
+    get_item_sample_id,
+    normalize_process_reward_cfg,
+)
 
 
 class IGRewardManager:
@@ -39,68 +43,28 @@ class IGRewardManager:
         num_examine: int,
         compute_score: Optional[Callable] = None,
         reward_fn_key: str = "data_source",
-        reward_style: str = "format",
-        fol_metadata_path: Optional[str] = None,
+        process_reward_cfg: Optional[dict] = None,
         **kwargs,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
-        self.reward_style = reward_style
-
-        self._step_prm_fn: Optional[Callable[[str], float]] = None
-
-        # FOL verifier initialization
-        self.fol_verifier = None
-        self.fol_metadata_map: Dict[str, "FOLMetadata"] = {}
-
-        if reward_style == "fol" and fol_metadata_path:
-            self._init_fol_verifier(fol_metadata_path)
-
-    def _init_fol_verifier(self, metadata_path: str) -> None:
-        if not os.path.exists(metadata_path):
-            print(f"[FOL Warning] FOL metadata path not found: {metadata_path}")
-            return
-
-        try:
-            from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
-            import json
-
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            for item in data:
-                if item.get("fol_metadata"):
-                    sample_id = (
-                        item.get("sample_id")
-                        or item.get("extra_info", {}).get("index")
-                        or item.get("extra_info", {}).get("id")
-                    )
-                    if sample_id is not None:
-                        self.fol_metadata_map[str(sample_id)] = FOLMetadata.from_dict(
-                            item["fol_metadata"]
-                        )
-
-            self.fol_verifier = FOLVerifier()
-            print(f"[FOL] IG RewardManager loaded {len(self.fol_metadata_map)} FOL metadata entries")
-
-        except Exception as e:
-            print(f"[FOL Warning] Failed to initialize FOL verifier: {e}")
+        if process_reward_cfg is None:
+            raise ValueError("IGRewardManager requires process_reward_cfg.")
+        self.process_reward_cfg = normalize_process_reward_cfg(process_reward_cfg)
+        self.process_reward_runtime = build_process_reward_runtime(self.process_reward_cfg)
+        self.process_reward_type = self.process_reward_runtime.reward_type
+        if self.process_reward_type == "none":
+            raise ValueError(
+                "IGRewardManager requires trainer.process_reward.type to be 'format' or 'fol'."
+            )
+        self._step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self.fol_verifier = self.process_reward_runtime.fol_verifier
+        self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
 
     @property
     def step_prm_fn(self) -> Callable[[str], float]:
-        if self._step_prm_fn is None:
-            from verl.trainer.ppo.sampling.mcts_prm import get_prm_fn
-
-            if self.reward_style == "fol" and self.fol_verifier:
-                self._step_prm_fn = get_prm_fn(
-                    self.reward_style,
-                    verifier=self.fol_verifier,
-                    metadata_map=self.fol_metadata_map,
-                )
-            else:
-                self._step_prm_fn = get_prm_fn(self.reward_style)
         return self._step_prm_fn
 
     def _decode_response(self, data_item, prompt_length: int):
@@ -116,7 +80,7 @@ class IGRewardManager:
         response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         return prompt_str, response_str, valid_response_len
 
-    def _fallback_step_scores(self, response_str: str) -> list:
+    def _fallback_step_scores(self, response_str: str, sample_id: Optional[str] = None) -> list:
         import re
 
         steps = re.findall(r"<step>(.*?)</step>", response_str, re.DOTALL)
@@ -124,12 +88,12 @@ class IGRewardManager:
             return []
         scores = []
         for s in steps:
-            try:
+            if self.process_reward_type == "fol":
+                if sample_id is None:
+                    raise ValueError("FOL process reward fallback requires sample_id.")
+                scores.append(self.step_prm_fn(s, sample_id=sample_id))
+            else:
                 scores.append(self.step_prm_fn(s))
-            except NotImplementedError:
-                scores.append(0.0)
-            except Exception:
-                scores.append(0.0)
         return scores
 
     def __call__(self, data: DataProto, return_dict: bool = False):
@@ -156,7 +120,8 @@ class IGRewardManager:
             response_lens.append(valid_resp_len)
 
             if not has_precomputed and valid_resp_len > 0:
-                step_scores = self._fallback_step_scores(response_str)
+                sample_id = get_item_sample_id(item.non_tensor_batch)
+                step_scores = self._fallback_step_scores(response_str, sample_id=sample_id)
                 if step_scores:
                     response_ids = item.batch["responses"][:valid_resp_len]
                     full_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)

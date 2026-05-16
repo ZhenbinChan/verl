@@ -32,10 +32,7 @@ def fol_step_reward(
     Returns:
         1.0 if unsat (conclusion follows from premises), 0.0 otherwise.
     """
-    try:
-        return verifier.verify_step(metadata, step_text, use_llm=True)
-    except Exception:
-        return 0.0
+    return verifier.verify_step(metadata, step_text, use_llm=True)
 
 
 def fol_step_reward_with_context(
@@ -49,8 +46,10 @@ def fol_step_reward_with_context(
 
     Used for batch verification where sample metadata is looked up by sample_id.
     """
+    if sample_id is None:
+        raise ValueError("FOL step reward requires sample_id.")
     if sample_id not in sample_metadata_map:
-        return 0.0
+        raise KeyError(f"Missing FOL metadata for sample_id={sample_id!r}.")
     metadata = sample_metadata_map[sample_id]
     return fol_step_reward(step_text, metadata=metadata, verifier=verifier)
 

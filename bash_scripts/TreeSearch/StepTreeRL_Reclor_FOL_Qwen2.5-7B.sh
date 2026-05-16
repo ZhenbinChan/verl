@@ -4,7 +4,7 @@ set -x
 # ----------------------------------------------------------
 # LogiQA + StepTreeRL smoke run
 # sampling_strategy=step_treerl
-# PRM: format reward (<step>/<premise>/<conclusion> tags)
+# PRM: fol reward (FOL/Z3 verification)
 # Selection: per-step entropy (highest-entropy step → branch)
 #
 # Simplified parameters:
@@ -62,16 +62,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     reward_model.enable=false \
-    reward_model.reward_manager='step_tree' \
-    reward_model.reward_kwargs.reward_style=format \
-    trainer.val_before_train=True \
+    reward_model.reward_manager='auto' \
+    trainer.val_before_train=False \
     trainer.sampling_strategy=step_treerl \
+    trainer.process_reward.type=fol \
+    trainer.process_reward.fol.metadata_path=$HOME/data/reclor_fol/fol_metadata.json \
+    trainer.process_reward.fol.llm.api_base_url="http://localhost:4869/v1" \
+    trainer.process_reward.fol.llm.api_key="EMPTY" \
+    trainer.process_reward.fol.llm.model_name="qwen2.5-7b-coder" \
     trainer.step_treerl_config.max_depth=20 \
     trainer.step_treerl_config.max_token_num=4096 \
     trainer.step_treerl_config.top_k=${TOP_K} \
     trainer.step_treerl_config.iter_rounds=${ITER_ROUNDS} \
-    trainer.step_treerl_config.prm=fol \
-    trainer.step_treerl_config.fol_metadata_path=$HOME/data/reclor_fol/fol_metadata.json \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
@@ -79,5 +81,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
-    trainer.test_freq=20 \
+    trainer.test_freq=-1 \
     trainer.total_epochs=1  $@

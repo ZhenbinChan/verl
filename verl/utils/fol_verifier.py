@@ -6,38 +6,41 @@ FOL Verifier Module for MCTS Training
 2. 将 NL 推理链转换为 Z3 FOL 代码
 3. 执行 Z3 验证并返回 sat/unsat 结果
 
-Usage:
-    # 预计算模式 (训练时使用)
-    from verl.utils.fol_verifier import FOLVerifier, FOLMetadata
+    Usage:
+        from verl.utils.fol_verifier import FOLVerifier, FOLMetadata, LLMClient
 
-    metadata = FOLMetadata(
-        sample_id="logiqa_0",
-        rephrased_context="...",
-        entities={"Person": ["Alice", "Bob"]},
-        predicates={"married_to": ["Person", "Person"]},
-        z3_declaration_code="from z3 import *\n...",
-        ground_truth="A",
-        axioms=[]
-    )
+        metadata = FOLMetadata(
+            sample_id="logiqa_0",
+            rephrased_context="...",
+            entities={"Person": ["Alice", "Bob"]},
+            predicates={"married_to": ["Person", "Person"]},
+            z3_declaration_code="from z3 import *\n...",
+            ground_truth="A",
+            axioms=[]
+        )
 
-    verifier = FOLVerifier()
-    reward = verifier.verify_step(metadata, step_text, use_llm=True)
+        llm_client = LLMClient(model="qwen2.5-7b-coder")
+        verifier = FOLVerifier(llm_client=llm_client)
+        reward = verifier.verify_step(metadata, step_text, use_llm=True)
 """
 
 from __future__ import annotations
 
 import json
+import keyword
 import os
 import re
 import string
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # =============================================================================
@@ -47,6 +50,26 @@ from pydantic import BaseModel
 class OutputSchema(BaseModel):
     """LLM 约束生成的输出格式"""
     data: Dict[str, List[Any]]
+
+
+class EntityGroupSchema(BaseModel):
+    type: str
+    sort_kind: Literal["uninterpreted", "int", "real"] = "uninterpreted"
+    values: List[Any] = Field(default_factory=list)
+
+
+class EntityGroupsSchema(BaseModel):
+    entity_groups: List[EntityGroupSchema] = Field(default_factory=list)
+
+
+class PredicateSpecSchema(BaseModel):
+    name: str
+    arg_types: List[str] = Field(default_factory=list)
+    return_type: str = "bool"
+
+
+class PredicateExtractionSchema(BaseModel):
+    predicates: List[PredicateSpecSchema] = Field(default_factory=list)
 
 
 @dataclass
@@ -60,15 +83,33 @@ class FOLMetadata:
     ground_truth: str = ""
     axioms: List[str] = field(default_factory=list)
 
+    @staticmethod
+    def _normalize_json_value(value: Any) -> Any:
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        elif hasattr(value, "item") and not isinstance(value, (str, bytes)):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+
+        if isinstance(value, dict):
+            return {str(k): FOLMetadata._normalize_json_value(v) for k, v in value.items()}
+        if isinstance(value, tuple):
+            return [FOLMetadata._normalize_json_value(v) for v in value]
+        if isinstance(value, list):
+            return [FOLMetadata._normalize_json_value(v) for v in value]
+        return value
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "sample_id": self.sample_id,
             "rephrased_context": self.rephrased_context,
-            "entities": self.entities,
-            "predicates": self.predicates,
+            "entities": self._normalize_json_value(self.entities),
+            "predicates": self._normalize_json_value(self.predicates),
             "z3_declaration_code": self.z3_declaration_code,
             "ground_truth": self.ground_truth,
-            "axioms": self.axioms,
+            "axioms": self._normalize_json_value(self.axioms),
         }
 
     @classmethod
@@ -76,11 +117,11 @@ class FOLMetadata:
         return cls(
             sample_id=d.get("sample_id", ""),
             rephrased_context=d.get("rephrased_context", ""),
-            entities=d.get("entities", {}),
-            predicates=d.get("predicates", {}),
+            entities=cls._normalize_json_value(d.get("entities", {})),
+            predicates=cls._normalize_json_value(d.get("predicates", {})),
             z3_declaration_code=d.get("z3_declaration_code", ""),
             ground_truth=d.get("ground_truth", ""),
-            axioms=d.get("axioms", []),
+            axioms=cls._normalize_json_value(d.get("axioms", [])),
         )
 
 
@@ -111,9 +152,20 @@ class LLMClient:
     @property
     def client(self):
         if self._client is None:
+            import httpx
             from openai import OpenAI
-            self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+            client_kwargs = {
+                "base_url": self.base_url,
+                "api_key": self.api_key,
+            }
+            if self._should_bypass_env_proxy():
+                client_kwargs["http_client"] = httpx.Client(trust_env=False)
+            self._client = OpenAI(**client_kwargs)
         return self._client
+
+    def _should_bypass_env_proxy(self) -> bool:
+        hostname = urlparse(self.base_url).hostname
+        return hostname in {"localhost", "127.0.0.1", "::1"}
 
     def generate(
         self,
@@ -172,10 +224,14 @@ class FOLVerifier:
         llm_client: Optional[LLMClient] = None,
         verify_timeout: float = 10.0,
         max_retries: int = 3,
+        debug_dir: Optional[str] = None,
     ):
         self.llm_client = llm_client
         self.verify_timeout = verify_timeout
         self.max_retries = max_retries
+        self.debug_dir = Path(debug_dir).expanduser() if debug_dir else None
+        if self.debug_dir is not None:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
         self._prompt_templates: Dict[str, str] = {}
         self._load_prompts()
 
@@ -184,7 +240,9 @@ class FOLVerifier:
         prompt_files = {
             "rephrase": "rephrase.txt",
             "object_extract": "object_exctract.txt",
+            "object_extract_strict": "object_exctract_structured.txt",
             "predicate_extract": "predicate_extraction.txt",
+            "predicate_extract_strict": "predicate_extraction_structured.txt",
             "translate_step": "translate_step.txt",
             "correct_code": "correct_code.txt",
         }
@@ -202,6 +260,178 @@ class FOLVerifier:
         template = Template(self._prompt_templates[name])
         return template.safe_substitute(**kwargs)
 
+    @staticmethod
+    def _sanitize_symbol_name(name: Any) -> str:
+        text = str(name or "").strip()
+        text = re.sub(r"\W+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("_").lower()
+        if not text:
+            text = "sym"
+        if text[0].isdigit():
+            text = f"sym_{text}"
+        if keyword.iskeyword(text):
+            text = f"{text}_sym"
+        return text
+
+    @staticmethod
+    def _make_unique_symbol(base: str, used: set[str]) -> str:
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
+    @staticmethod
+    def _singularize_symbol(name: str) -> str:
+        if name.endswith("ies") and len(name) > 3:
+            return name[:-3] + "y"
+        if name.endswith("s") and not name.endswith("ss") and len(name) > 1:
+            return name[:-1]
+        return name
+
+    @staticmethod
+    def _builtin_sort_expr(sort_kind: Any) -> Optional[str]:
+        text = str(sort_kind or "").strip()
+        if not text:
+            return None
+        normalized = text.lower()
+        if normalized in {"bool", "boolsort()"}:
+            return "BoolSort()"
+        if normalized in {"int", "intsort()"}:
+            return "IntSort()"
+        if normalized in {"real", "realsort()"}:
+            return "RealSort()"
+        return None
+
+    def _build_entity_schema(self, entities: Dict[str, List[str]]) -> Dict[str, Any]:
+        generic_schema = {"entity_type", "entity_value"}.issubset(set(entities.keys()))
+        structured_groups = entities.get("entity_groups")
+        used_symbols: set[str] = set()
+
+        sort_specs: list[dict[str, str]] = []
+        sort_symbol_by_norm: dict[str, str] = {}
+
+        def register_sort(sort_label: str, sort_kind: str = "uninterpreted") -> str:
+            norm = self._sanitize_symbol_name(sort_label)
+            if norm in sort_symbol_by_norm:
+                return sort_symbol_by_norm[norm]
+            builtin_expr = self._builtin_sort_expr(sort_kind)
+            if builtin_expr is not None:
+                sort_symbol_by_norm[norm] = builtin_expr
+                sort_specs.append(
+                    {
+                        "label": sort_label,
+                        "expr": builtin_expr,
+                        "kind": sort_kind,
+                        "declare": "false",
+                    }
+                )
+                return builtin_expr
+
+            sort_symbol = self._make_unique_symbol(f"{norm}_sort", used_symbols)
+            sort_symbol_by_norm[norm] = sort_symbol
+            sort_specs.append(
+                {
+                    "label": sort_label,
+                    "expr": sort_symbol,
+                    "kind": "uninterpreted",
+                    "declare": "true",
+                }
+            )
+            return sort_symbol
+
+        constant_entries: list[tuple[str, str, str]] = []
+        declared_constant_names: set[str] = set()
+
+        fallback_sort_symbol: Optional[str] = None
+
+        def ensure_fallback_sort() -> str:
+            nonlocal fallback_sort_symbol
+            if fallback_sort_symbol is None:
+                fallback_sort_symbol = self._make_unique_symbol("entity_sort", used_symbols)
+                sort_specs.append(
+                    {
+                        "label": "entity",
+                        "expr": fallback_sort_symbol,
+                        "kind": "uninterpreted",
+                        "declare": "true",
+                    }
+                )
+            return fallback_sort_symbol
+
+        def infer_sort_symbol(name: str) -> str:
+            norm = self._sanitize_symbol_name(name)
+            singular_norm = self._singularize_symbol(norm)
+            if norm in sort_symbol_by_norm:
+                return sort_symbol_by_norm[norm]
+            if singular_norm in sort_symbol_by_norm:
+                return sort_symbol_by_norm[singular_norm]
+
+            tokens = [self._singularize_symbol(tok) for tok in norm.split("_") if tok]
+            best_match: Optional[tuple[int, str]] = None
+            for sort_norm, sort_symbol in sort_symbol_by_norm.items():
+                sort_singular = self._singularize_symbol(sort_norm)
+                if sort_singular in tokens or sort_singular in singular_norm:
+                    score = len(sort_singular)
+                    if best_match is None or score > best_match[0]:
+                        best_match = (score, sort_symbol)
+            if best_match is not None:
+                return best_match[1]
+            return ensure_fallback_sort()
+
+        if isinstance(structured_groups, list):
+            for group in structured_groups:
+                if not isinstance(group, dict):
+                    continue
+                sort_label = str(group.get("type", "")).strip()
+                if not sort_label:
+                    continue
+                sort_expr = register_sort(sort_label, str(group.get("sort_kind", "uninterpreted")))
+                for const_name in group.get("values") or []:
+                    const_name = str(const_name).strip()
+                    if not const_name or const_name in declared_constant_names:
+                        continue
+                    declared_constant_names.add(const_name)
+                    const_symbol = self._make_unique_symbol(self._sanitize_symbol_name(const_name), used_symbols)
+                    constant_entries.append((const_name, const_symbol, sort_expr))
+        elif generic_schema:
+            for sort_label in entities.get("entity_type", []) or []:
+                if str(sort_label).strip():
+                    register_sort(str(sort_label).strip())
+            for const_name in entities.get("entity_value", []) or []:
+                const_name = str(const_name).strip()
+                if not const_name or const_name in declared_constant_names:
+                    continue
+                declared_constant_names.add(const_name)
+                const_symbol = self._make_unique_symbol(self._sanitize_symbol_name(const_name), used_symbols)
+                constant_entries.append((const_name, const_symbol, infer_sort_symbol(const_name)))
+        else:
+            for sort_label, names in entities.items():
+                sort_label = str(sort_label).strip()
+                if not sort_label:
+                    continue
+                sort_symbol = register_sort(sort_label)
+                for const_name in names or []:
+                    const_name = str(const_name).strip()
+                    if not const_name or const_name in declared_constant_names:
+                        continue
+                    declared_constant_names.add(const_name)
+                    const_symbol = self._make_unique_symbol(self._sanitize_symbol_name(const_name), used_symbols)
+                    constant_entries.append((const_name, const_symbol, sort_symbol))
+
+        if not sort_specs:
+            ensure_fallback_sort()
+
+        return {
+            "sort_specs": sort_specs,
+            "sort_symbol_by_norm": sort_symbol_by_norm,
+            "constant_entries": constant_entries,
+            "fallback_sort_symbol": fallback_sort_symbol or ensure_fallback_sort(),
+            "used_symbols": used_symbols,
+        }
+
     # =========================================================================
     # 预计算相关的纯函数
     # =========================================================================
@@ -216,38 +446,43 @@ class FOLVerifier:
         Returns:
             Z3 声明代码字符串
         """
-        code_lines = []
+        schema = self._build_entity_schema(entities)
+        code_lines = ["# Z3 Type Declaration"]
 
-        # Z3 Type Declaration
-        code_lines.append("# Z3 Type Declaration")
-        for entity_type in entities.keys():
-            line = f"{entity_type} = DeclareSort('{entity_type}')"
-            code_lines.append(line)
+        for sort_spec in schema["sort_specs"]:
+            if sort_spec["declare"] == "true":
+                code_lines.append(f"{sort_spec['expr']} = DeclareSort({sort_spec['label']!r})")
 
-        # Constants Definition
         code_lines.append("\n# Constants Definition")
-        for entity_type, names in entities.items():
-            for name in names:
-                # 处理空格，将实体名中的空格替换为下划线
-                formatted_name = name.replace(" ", "_")
-                line = f"{formatted_name} = Const('{formatted_name}', {entity_type})"
-                code_lines.append(line)
+        for original_name, const_symbol, sort_symbol in schema["constant_entries"]:
+            if sort_symbol == "IntSort()":
+                try:
+                    code_lines.append(f"{const_symbol} = IntVal({int(original_name)})")
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            elif sort_symbol == "RealSort()":
+                try:
+                    code_lines.append(f"{const_symbol} = RealVal({float(original_name)!r})")
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            code_lines.append(f"{const_symbol} = Const({original_name!r}, {sort_symbol})")
 
-        # Variable Declarations
         code_lines.append("\n# Variable Declarations")
         alphabet = string.ascii_lowercase
-
-        for i, entity_type in enumerate(entities.keys()):
-            if i < len(alphabet):
-                var_name = alphabet[i]
-                line = f"{var_name} = Const('{var_name}', {entity_type})"
-                code_lines.append(line)
-            else:
-                break
+        sort_symbols = [sort_spec["expr"] for sort_spec in schema["sort_specs"]]
+        for i, sort_symbol in enumerate(sort_symbols[: len(alphabet)]):
+            var_name = alphabet[i]
+            code_lines.append(f"{var_name} = Const({var_name!r}, {sort_symbol})")
 
         return "\n".join(code_lines)
 
-    def generate_z3_functions(self, predicates: Dict[str, List[str]]) -> str:
+    def generate_z3_functions(
+        self,
+        predicates: Dict[str, List[str]],
+        entities: Optional[Dict[str, List[str]]] = None,
+    ) -> str:
         """生成 Z3 函数/谓词声明
 
         Args:
@@ -257,14 +492,60 @@ class FOLVerifier:
         Returns:
             Z3 函数声明代码字符串
         """
-        code_lines = []
-        code_lines.append("# Z3 Function/Predicate Declaration")
+        schema = self._build_entity_schema(entities or {})
+        sort_symbol_by_norm = schema["sort_symbol_by_norm"]
+        fallback_sort_symbol = schema["fallback_sort_symbol"]
+        used_symbols = set(schema["used_symbols"])
 
-        for func_name, types in predicates.items():
-            types_str = ", ".join(types)
-            line = f"{func_name} = Function('{func_name}', {types_str})"
-            code_lines.append(line)
+        def resolve_arg_sort(arg_hint: Any) -> str:
+            builtin_expr = self._builtin_sort_expr(arg_hint)
+            if builtin_expr is not None:
+                return builtin_expr
+            norm = self._sanitize_symbol_name(arg_hint)
+            singular_norm = self._singularize_symbol(norm)
+            if norm in sort_symbol_by_norm:
+                return sort_symbol_by_norm[norm]
+            if singular_norm in sort_symbol_by_norm:
+                return sort_symbol_by_norm[singular_norm]
+            for sort_norm, sort_symbol in sort_symbol_by_norm.items():
+                sort_singular = self._singularize_symbol(sort_norm)
+                tokens = [self._singularize_symbol(tok) for tok in norm.split("_") if tok]
+                if sort_singular in tokens or sort_singular in singular_norm:
+                    return sort_symbol
+            return fallback_sort_symbol
+
+        code_lines = ["# Z3 Function/Predicate Declaration"]
+
+        structured_predicates = predicates.get("predicates") if isinstance(predicates, dict) else None
+        if isinstance(structured_predicates, list):
+            for spec in structured_predicates:
+                if not isinstance(spec, dict):
+                    continue
+                func_name = str(spec.get("name", "")).strip()
+                if not func_name:
+                    continue
+                func_symbol = self._make_unique_symbol(self._sanitize_symbol_name(func_name), used_symbols)
+                sort_args = [resolve_arg_sort(arg_hint) for arg_hint in (spec.get("arg_types") or [])]
+                return_sort = resolve_arg_sort(spec.get("return_type", "bool"))
+                args_str = ", ".join([*sort_args, return_sort])
+                code_lines.append(f"{func_symbol} = Function({func_name!r}, {args_str})")
+            return "\n".join(code_lines)
+
+        for func_name, arg_types in predicates.items():
+            func_symbol = self._make_unique_symbol(self._sanitize_symbol_name(func_name), used_symbols)
+            sort_args = [resolve_arg_sort(arg_hint) for arg_hint in (arg_types or [])]
+            args_str = ", ".join([*sort_args, "BoolSort()"])
+            code_lines.append(f"{func_symbol} = Function({func_name!r}, {args_str})")
         return "\n".join(code_lines)
+
+    def build_z3_declaration_code(
+        self,
+        entities: Dict[str, List[str]],
+        predicates: Dict[str, List[str]],
+    ) -> str:
+        z3_declaration_code = self.generate_z3_declarations(entities)
+        z3_function_code = self.generate_z3_functions(predicates, entities=entities)
+        return z3_declaration_code + "\n\n" + z3_function_code
 
     def get_step_list(self, text_content: str) -> List[str]:
         """从文本中提取 <step>...</step> 块
@@ -333,6 +614,8 @@ class FOLVerifier:
         question: str,
         options: str,
         args: Optional[Dict] = None,
+        schema_variant: str = "legacy",
+        feedback: Optional[str] = None,
     ) -> Dict[str, List[str]]:
         """提取实体类型和常量
 
@@ -348,6 +631,17 @@ class FOLVerifier:
         if self.llm_client is None:
             raise RuntimeError("LLM client required for object_extract")
 
+        if schema_variant == "strict_v1":
+            prompt = self._get_prompt("object_extract_strict", context=context, question=question, options=options)
+            if feedback:
+                prompt += (
+                    "\n\n## Previous attempt failed validation\n"
+                    f"{feedback}\n"
+                    "Regenerate the full output and obey the schema exactly."
+                )
+            result = self.llm_client.constrain_generate(prompt, EntityGroupsSchema, args=args)
+            return result.model_dump()
+
         prompt = self._get_prompt("object_extract", context=context, question=question, options=options)
         result = self.llm_client.constrain_generate(prompt, OutputSchema, args=args)
         return result.data
@@ -359,6 +653,8 @@ class FOLVerifier:
         options: str,
         obj_list: Dict[str, List[str]],
         args: Optional[Dict] = None,
+        schema_variant: str = "legacy",
+        feedback: Optional[str] = None,
     ) -> Dict[str, List[str]]:
         """提取谓词/关系
 
@@ -375,14 +671,28 @@ class FOLVerifier:
         if self.llm_client is None:
             raise RuntimeError("LLM client required for predicate_extract")
 
+        prompt_name = "predicate_extract"
+        response_schema: type[BaseModel] = OutputSchema
+        if schema_variant == "strict_v1":
+            prompt_name = "predicate_extract_strict"
+            response_schema = PredicateExtractionSchema
+
         prompt = self._get_prompt(
-            "predicate_extract",
+            prompt_name,
             context=context,
             question=question,
             options=options,
-            obj_list=obj_list,
+            obj_list=json.dumps(obj_list, ensure_ascii=False, indent=2),
         )
-        result = self.llm_client.constrain_generate(prompt, OutputSchema, args=args)
+        if feedback:
+            prompt += (
+                "\n\n## Previous attempt failed validation\n"
+                f"{feedback}\n"
+                "Regenerate the full output and obey the schema exactly."
+            )
+        result = self.llm_client.constrain_generate(prompt, response_schema, args=args)
+        if schema_variant == "strict_v1":
+            return result.model_dump()
         return result.data
 
     def translate_step_to_z3(
@@ -391,6 +701,7 @@ class FOLVerifier:
         declaration_code: str,
         step_content: str,
         args: Optional[Dict] = None,
+        debug_record: Optional[Dict[str, Any]] = None,
     ) -> str:
         """将 NL step 翻译为 Z3 FOL 代码
 
@@ -413,13 +724,19 @@ class FOLVerifier:
             step=step_content,
         )
         result = self.llm_client.generate(prompt, args=args)
-        return self._extract_python_block(result)
+        extracted = self._extract_python_block(result)
+        if debug_record is not None:
+            debug_record["translate_prompt"] = prompt
+            debug_record["translate_raw_response"] = result
+            debug_record["translated_z3_code"] = extracted
+        return extracted
 
     def correct_z3_code(
         self,
         code: str,
         error: str,
         args: Optional[Dict] = None,
+        debug_record: Optional[Dict[str, Any]] = None,
     ) -> str:
         """修正有错误的 Z3 代码
 
@@ -436,7 +753,17 @@ class FOLVerifier:
 
         prompt = self._get_prompt("correct_code", code=code, error=error)
         result = self.llm_client.generate(prompt, args=args)
-        return self._extract_python_block(result)
+        extracted = self._extract_python_block(result)
+        if debug_record is not None:
+            debug_record.setdefault("correction_attempts", []).append(
+                {
+                    "prompt": prompt,
+                    "raw_response": result,
+                    "corrected_z3_code": extracted,
+                    "error": error,
+                }
+            )
+        return extracted
 
     def _extract_python_block(self, code: str) -> str:
         """从代码中提取 python 块"""
@@ -467,7 +794,8 @@ class FOLVerifier:
         z3_code += "# --- Expressions ---\n\n"
         z3_code += expression + "\n\n"
         z3_code += "s.add(premise_fol)\n\n"
-        z3_code += "s.add(conclusion_fol)\n\n"
+        # Entailment check: premises /\ not(conclusion) is UNSAT iff premises entail conclusion.
+        z3_code += "s.add(Not(conclusion_fol))\n\n"
         z3_code += "result = s.check()\n"
         z3_code += "print(f'Result: {result}')\n"
         z3_code += "if result == sat:\n"
@@ -506,10 +834,45 @@ class FOLVerifier:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _debug_step_stem(self, metadata: FOLMetadata, step_text: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", step_text.strip())[:48].strip("_") or "step"
+        timestamp = int(time.time() * 1000)
+        return f"{metadata.sample_id}_{timestamp}_{slug}"
+
+    def _dump_debug_artifacts(
+        self,
+        *,
+        metadata: FOLMetadata,
+        step_text: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Path]:
+        if self.debug_dir is None:
+            return None
+
+        stem = self._debug_step_stem(metadata, step_text)
+        json_path = self.debug_dir / f"{stem}.json"
+        py_path = self.debug_dir / f"{stem}.py"
+
+        serializable_payload = {
+            "sample_id": metadata.sample_id,
+            "step_text": step_text,
+            **payload,
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(serializable_payload, f, ensure_ascii=False, indent=2)
+
+        wrapped_code = payload.get("wrapped_z3_code", None)
+        if wrapped_code:
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(wrapped_code)
+
+        return json_path
+
     def correct_loop(
         self,
         code: str,
         args: Optional[Dict] = None,
+        debug_record: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """代码修正循环
 
@@ -524,13 +887,15 @@ class FOLVerifier:
         tries = 0
 
         while not res["success"] and tries < self.max_retries:
-            code = self.correct_z3_code(code, res["error"], args=args)
+            code = self.correct_z3_code(code, res["error"], args=args, debug_record=debug_record)
             res = self.run_code(code)
             tries += 1
             # 每次迭代增加温度，鼓励模型生成更多样化的修正方案
             if args and "temperature" in args:
                 args = {**args, "temperature": min(args["temperature"] + 0.1, 1.0)}
 
+        res["code"] = code
+        res["tries"] = tries
         return res
 
     # =========================================================================
@@ -543,13 +908,14 @@ class FOLVerifier:
         step_text: str,
         use_llm: bool = True,
         args: Optional[Dict] = None,
+        debug_dump: bool = False,
     ) -> float:
         """验证单个 step
 
         Args:
             metadata: FOL 元数据
             step_text: 需要验证的 step 文本
-            use_llm: 是否使用 LLM 翻译（False 则只做格式检查）
+            use_llm: 是否使用 LLM 翻译
             args: LLM 生成参数
 
         Returns:
@@ -561,10 +927,23 @@ class FOLVerifier:
         if not premises or not conclusion:
             return 0.0
 
-        if not use_llm or self.llm_client is None:
-            # 只做格式检查
-            return 1.0 if (len(premises) >= 1 and conclusion) else 0.0
+        if not use_llm:
+            raise RuntimeError(
+                "FOL verification requires use_llm=True. "
+                "Format-only fallback has been removed."
+            )
+        if self.llm_client is None:
+            raise RuntimeError(
+                "FOL verification requires an LLM client. "
+                "Format-only fallback has been removed."
+            )
 
+        debug_record: Dict[str, Any] = {
+            "premises": premises,
+            "conclusion": conclusion,
+            "use_llm": use_llm,
+            "llm_args": dict(args or {}),
+        }
         try:
             # 2. 调用 translate_step_to_z3 (LLM)
             trans_code = self.translate_step_to_z3(
@@ -572,33 +951,48 @@ class FOLVerifier:
                 declaration_code=metadata.z3_declaration_code,
                 step_content=step_text,
                 args=args,
+                debug_record=debug_record,
             )
 
             # 3. 包装为完整代码
             wrapped_code = self.wrap_z3_code(metadata.z3_declaration_code, trans_code)
+            debug_record["wrapped_z3_code"] = wrapped_code
 
             # 4. 执行 Z3 验证
             result = self.run_code(wrapped_code)
+            debug_record["initial_run_result"] = result
 
             if not result["success"]:
                 # 5. 如失败，调用 correct_loop
-                corrected_result = self.correct_loop(wrapped_code, args=args)
+                corrected_result = self.correct_loop(wrapped_code, args=args, debug_record=debug_record)
+                debug_record["corrected_run_result"] = corrected_result
                 if corrected_result["success"]:
                     result = corrected_result
+                    debug_record["wrapped_z3_code_after_correction"] = corrected_result.get("code", wrapped_code)
                 else:
+                    debug_record["final_score"] = 0.0
+                    dump_path = self._dump_debug_artifacts(metadata=metadata, step_text=step_text, payload=debug_record)
+                    if dump_path is not None:
+                        debug_record["debug_dump_path"] = str(dump_path)
                     return 0.0
 
             # 6. 解析结果: UNSAT = 正确 (premises 推出 conclusion)
             #            SAT/UNKNOWN = 错误
             output = result["output"]
-            if "UNSAT" in output:
-                return 1.0
-            else:
-                return 0.0
+            final_score = 1.0 if "UNSAT" in output else 0.0
+            debug_record["final_output"] = output
+            debug_record["final_score"] = final_score
+            if debug_dump:
+                dump_path = self._dump_debug_artifacts(metadata=metadata, step_text=step_text, payload=debug_record)
+                if dump_path is not None:
+                    debug_record["debug_dump_path"] = str(dump_path)
+            return final_score
 
-        except Exception as e:
-            print(f"[FOL Warning] Verification failed: {e}")
-            return 0.0
+        except Exception:
+            if debug_dump:
+                debug_record["exception"] = repr(sys.exc_info()[1])
+                self._dump_debug_artifacts(metadata=metadata, step_text=step_text, payload=debug_record)
+            raise
 
     def verify_step_batch(
         self,
@@ -623,8 +1017,7 @@ class FOLVerifier:
         rewards = []
         for step_text, sample_id in zip(step_texts, sample_ids):
             if sample_id not in metadata_map:
-                rewards.append(0.0)
-                continue
+                raise KeyError(f"Missing FOL metadata for sample_id={sample_id!r}.")
 
             metadata = metadata_map[sample_id]
             reward = self.verify_step(metadata, step_text, use_llm=use_llm, args=args)
@@ -644,30 +1037,15 @@ class FOLVerifierPrecomputed(FOLVerifier):
     """
 
     def __init__(self, precomputed_data: Dict[str, FOLMetadata]):
-        """初始化预计算验证器
-
-        Args:
-            precomputed_data: sample_id -> FOLMetadata 的映射
-        """
-        self.precomputed_data = precomputed_data
-        # 强制不使用 LLM
-        super().__init__(llm_client=None)
+        raise NotImplementedError(
+            "FOLVerifierPrecomputed is no longer supported. "
+            "Training-time FOL step verification now requires an LLM client."
+        )
 
     def verify_sample(self, sample_id: str, step_text: str) -> float:
-        """验证单个样本
-
-        Args:
-            sample_id: 样本 ID (用于查找预计算数据)
-            step_text: MCTS 生成的完整推理链
-
-        Returns:
-            1.0 if correct, 0.0 if incorrect
-        """
-        if sample_id not in self.precomputed_data:
-            return 0.0
-
-        metadata = self.precomputed_data[sample_id]
-        return self.verify_step(metadata, step_text, use_llm=False)
+        raise NotImplementedError(
+            "FOLVerifierPrecomputed.verify_sample is no longer supported."
+        )
 
 
 # =============================================================================
@@ -693,7 +1071,8 @@ def load_fol_metadata(metadata_path: str) -> Dict[str, FOLMetadata]:
     for item in data:
         if item.get("fol_metadata"):
             sample_id = item.get("sample_id", item.get("extra_info", {}).get("index"))
-            result[str(sample_id)] = FOLMetadata.from_dict(item["fol_metadata"])
+            metadata = FOLMetadata.from_dict(item["fol_metadata"])
+            result[str(sample_id)] = metadata
 
     return result
 

@@ -199,9 +199,7 @@ class FOLPreprocessor:
             )
 
             # Step 4: 生成 Z3 declarations (纯计算)
-            z3_declaration_code = self.fol_verifier.generate_z3_declarations(entities)
-            z3_function_code = self.fol_verifier.generate_z3_functions(predicates)
-            z3_declaration_code = z3_declaration_code + "\n\n" + z3_function_code
+            z3_declaration_code = self.fol_verifier.build_z3_declaration_code(entities, predicates)
 
             metadata = FOLMetadata(
                 sample_id=sample_id,
