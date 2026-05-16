@@ -1,0 +1,22 @@
+Please select the correct answer directly from the options based on the given question, without providing the reasoning process, and put the index of the correct answer within \\boxed{{}}.
+
+--- Example 1 ---
+
+<Contex>
+A triangle has three angles. The sum of the three angles in a triangle is 180°. A right angle measures exactly 90°
+</Context>
+
+<Question>
+In a right-angled triangle, one angle is 90°. What must be true about the other two angles?
+</Question>
+
+<Options>
+A. Together they add to 270°
+B. Together they add to 180°
+C. Each one equals 45°
+D. Together they add to 90°
+</Options>
+
+## The output of the Example 1:
+
+\\boxed{D}

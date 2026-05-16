@@ -43,8 +43,10 @@ if __name__ == "__main__":
 
     dataset = datasets.load_dataset(data_source, "main")
 
-    train_dataset = dataset["train"].select([i for i in range(500)])
-    test_dataset = dataset["test"].select([i for i in range(50)])
+    # train_dataset = dataset["train"].select([i for i in range(500)])
+    # test_dataset = dataset["test"].select([i for i in range(50)])
+    train_dataset = dataset["train"]
+    test_dataset = dataset["test"]
 
     instruction_following = 'Let\'s think step by step and output the final answer after "####".'
 

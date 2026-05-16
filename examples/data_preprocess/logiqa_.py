@@ -96,6 +96,8 @@ if __name__ == "__main__":
     validate_dataset.to_parquet(os.path.join(local_dir, "validate.parquet"))
     test_dataset.to_parquet(os.path.join(local_dir, "test.parquet"))
 
+    print(os.path.join(local_dir, "train.parquet"))
+
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
