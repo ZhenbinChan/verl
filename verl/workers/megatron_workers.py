@@ -43,6 +43,7 @@ from verl.utils.model import load_mcore_dist_weights, load_megatron_gptmodel_wei
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
+from verl.workers.rollout.sampling_params import extract_rollout_sampling_kwargs
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -423,6 +424,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        rollout_sampling_kwargs = extract_rollout_sampling_kwargs(prompts.meta_info)
         with self.sharding_manager:
             if self._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_module)
@@ -431,7 +433,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
 
             prompts = self.sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
+            output = self.rollout.generate_sequences(prompts=prompts, **rollout_sampling_kwargs)
             output = self.sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -471,9 +473,11 @@ class ActorRolloutRefWorker(MegatronWorker):
         # we should always recompute old_log_probs when it is HybridEngine
         output.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         output.meta_info["temperature"] = self.config.rollout.temperature
-        old_log_probs, entropys = self.actor.compute_log_prob(data=output, calculate_entropy=True)
+        calculate_entropy = bool(output.meta_info.get("calculate_entropy", True))
+        old_log_probs, entropys = self.actor.compute_log_prob(data=output, calculate_entropy=calculate_entropy)
         output.batch["old_log_probs"] = old_log_probs
-        output.batch["entropys"] = entropys
+        if entropys is not None:
+            output.batch["entropys"] = entropys
         output = output.to("cpu")
         # clear kv cache
         if self._is_offload_param:

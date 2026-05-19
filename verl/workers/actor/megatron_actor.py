@@ -36,7 +36,8 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
+from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.debug.profile import Profiler
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
@@ -177,7 +178,7 @@ class MegatronPPOActor(BasePPOActor):
         # TODO (zhangchi.usc1992): actually, this function should only return log_prob and this logic should be handled by user outside
         recompute_old_log_prob = self.config.get("recompute_old_log_prob", True)
 
-        entropys = torch.Tensor()
+        entropys = None
         if recompute_old_log_prob:
             select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
             batch = data.select(batch_keys=select_keys).batch
@@ -308,21 +309,32 @@ class MegatronPPOActor(BasePPOActor):
                 advantages = data["advantages"]
 
                 clip_ratio = meta_info["clip_ratio"]
-                clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
-                clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
-                clip_ratio_c = meta_info["clip_ratio_c"]
                 log_prob = vocab_parallel_log_probs_from_logits(logits, responses)
-                pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    cliprange=clip_ratio,
-                    cliprange_low=clip_ratio_low,
-                    cliprange_high=clip_ratio_high,
-                    clip_ratio_c=clip_ratio_c,
-                    loss_agg_mode=loss_agg_mode,
-                )
+                policy_loss_name = self.config.get("policy_loss", None)
+                if policy_loss_name:
+                    loss_fn = core_algos.get_policy_loss_fn(policy_loss_name)
+                    pg_loss, pg_metrics = loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=None,
+                    )
+                else:
+                    pg_loss, pg_clipfrac, ppo_kl, avg_ratio = core_algos.compute_policy_loss(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        eos_mask=response_mask,
+                        cliprange=clip_ratio,
+                    )
+                    pg_metrics = {
+                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                        "actor/ppo_kl": ppo_kl.detach().item(),
+                        "actor/avg_ratio": avg_ratio.detach().item(),
+                    }
                 policy_loss = pg_loss
             if calculate_entropy:
                 entropy = vocab_parallel_entropy(logits)
@@ -348,14 +360,7 @@ class MegatronPPOActor(BasePPOActor):
                     metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                 # return loss and stats
-                stats.update(
-                    {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                )
+                stats.update({"actor/pg_loss": pg_loss.detach().item(), **pg_metrics})
             append_to_dict(metrics, stats)
             return policy_loss, [metrics, ret_entropy]
 

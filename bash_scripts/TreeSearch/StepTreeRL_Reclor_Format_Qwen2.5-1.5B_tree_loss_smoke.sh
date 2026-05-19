@@ -1,37 +1,21 @@
 #!/usr/bin/env bash
 set -x
 
-# ----------------------------------------------------------
-# LogiQA + StepTreeRL smoke run
-# sampling_strategy=step_treerl
-# PRM: fol reward (FOL/Z3 verification)
-# Selection: per-step entropy (highest-entropy step → branch)
-#
-# TreeRL-style parameters:
-#   M - initial complete rollouts per prompt
-#   N - high-entropy branch points per initial rollout tree per round
-#   L - branching rounds
-#   T - continuations sampled per selected branch point
-#   NUM_TRACES - terminal traces selected per prompt for training
-# ----------------------------------------------------------
-
 HOME=/home/chenzhb/Workspaces/verl
-MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-7B-Instruct
+MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
 
-# Single-node GPU count
+VERL_LOGI_DEBUG=disabled
+
 N_GPUS_PER_NODE=2
-
-# ----------------------------------------------------------
-# TreeRL-style parameters
-# ----------------------------------------------------------
 M=6
 N=2
 L=1
 T=2
 NUM_TRACES=16
+LOGPROB_MICRO_BSZ=${LOGPROB_MICRO_BSZ:-2}
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=step_treerl_grpo \
+    algorithm.adv_estimator=step_treerl_reinforce \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/reclor/train.parquet \
     data.val_files=$HOME/data/reclor/test.parquet \
@@ -43,6 +27,7 @@ python3 -m verl.trainer.main_ppo \
     data.prompt_path=$HOME/prompts/premise_conclusions_simple.txt \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.policy_loss=tree_loss \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=2 \
@@ -53,23 +38,19 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOGPROB_MICRO_BSZ} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${N_GPUS_PER_NODE} \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.n=${M} \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOGPROB_MICRO_BSZ} \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     reward_model.enable=false \
     reward_model.reward_manager='auto' \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.sampling_strategy=step_treerl \
-    trainer.process_reward.type=fol \
-    trainer.process_reward.fol.metadata_path=$HOME/data/reclor_fol/fol_metadata.json \
-    trainer.process_reward.fol.llm.api_base_url="http://localhost:4869/v1" \
-    trainer.process_reward.fol.llm.api_key="EMPTY" \
-    trainer.process_reward.fol.llm.model_name="qwen2.5-7b-coder" \
+    trainer.process_reward.type=format \
     trainer.step_treerl_config.max_depth=20 \
     trainer.step_treerl_config.max_token_num=4096 \
     trainer.step_treerl_config.m=${M} \
@@ -84,9 +65,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
-    trainer.experiment_name='StepTreeRL_Reclor' \
+    trainer.experiment_name='StepTreeRL_Reclor_tree_loss_smoke' \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
-    trainer.test_freq=-1 \
+    trainer.save_freq=99999 \
+    trainer.test_freq=2 \
+    trainer.total_training_steps=5 \
     trainer.total_epochs=1  $@

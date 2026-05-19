@@ -44,6 +44,7 @@ actor_rollout_ref:
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
+    policy_loss: null # null: default PPO loss; tree_loss: TreeRL-style clipped policy loss
     loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
     entropy_coeff: 0
     use_kl_loss: False # True for GRPO
@@ -291,8 +292,6 @@ trainer:
     backprop: true
     random_pick: false          # random node selection (true) or UCT (false)
     selection_policy: importance_sampling  # greedy | importance_sampling
-    fol_verify_max_retries: 3   # max retries for Z3 code correction
-    fol_verify_timeout: 10.0    # Z3 execution timeout in seconds
     use_weighted_value: false    # use weighted update for accumulated_value
     normalize_style: step        # step | token normalization for accumulated_value
     average_one_generation: false
@@ -301,8 +300,22 @@ trainer:
     max_depth: 40               # max step depth
     max_token_num: 512          # max new tokens per step generation
     branch_max_new_tokens: 512  # hard cap for a single branch continuation before remaining-budget clamp
-    top_k: 2                   # number of high-entropy steps to select per round
-    iter_rounds: 3            # number of branching rounds
+    m: 6                       # initial complete rollouts per prompt
+    n: 2                       # high-entropy branch points per initial rollout tree per round
+    l: 1                       # branching rounds
+    t: 2                       # continuations sampled per selected branch point
+    top_k: 2                   # legacy alias for n
+    iter_rounds: 1             # legacy alias for l
+    path_selection: selected_terminals # all_leaves | selected_terminals
+    selected_num_traces: 16    # terminal traces selected per prompt for training
+    use_weighted_value: true
+    weighted_value_style: sqrt # sqrt | uniform | original
+    overall_norm_style: none   # none | step | token
+    length_penalty:
+      enabled: true
+      p_max: 0.1
+      k: 15.0
+      t0: 0.7
   # information_gain-specific settings (KL-divergence-guided tree, simplified)
   ig_config:
     max_depth: 40               # max step depth

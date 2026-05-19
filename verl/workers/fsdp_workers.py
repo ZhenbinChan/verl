@@ -53,6 +53,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from verl.workers.rollout.sampling_params import extract_rollout_sampling_kwargs
 
 import re
 import asyncio, aiohttp, time
@@ -609,6 +610,7 @@ class ActorRolloutRefWorker(Worker):
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        rollout_sampling_kwargs = extract_rollout_sampling_kwargs(prompts.meta_info)
         with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
@@ -618,11 +620,11 @@ class ActorRolloutRefWorker(Worker):
                 from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
 
                 if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
-                    output = self.rollout.generate_sequences_with_tools(prompts=prompts)
+                    output = self.rollout.generate_sequences_with_tools(prompts=prompts, **rollout_sampling_kwargs)
                 else:
-                    output = self.rollout.generate_sequences(prompts=prompts)
+                    output = self.rollout.generate_sequences(prompts=prompts, **rollout_sampling_kwargs)
             else:
-                output = self.rollout.generate_sequences(prompts=prompts)
+                output = self.rollout.generate_sequences(prompts=prompts, **rollout_sampling_kwargs)
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
@@ -646,17 +648,20 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        calculate_entropy = bool(data.meta_info.get("calculate_entropy", True))
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            result = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            result = self.actor.compute_log_prob(data=data, calculate_entropy=calculate_entropy)
             # Handle optional last_logits returned when meta_info["return_last_logits"]=True
             if isinstance(result, tuple) and len(result) == 3:
                 output, entropys, last_logits = result
             else:
                 output, entropys = result
                 last_logits = None
-            tensors = {"old_log_probs": output, "entropys": entropys}
+            tensors = {"old_log_probs": output}
+            if entropys is not None:
+                tensors["entropys"] = entropys
             if last_logits is not None:
                 tensors["last_logits"] = last_logits
             output = DataProto.from_dict(

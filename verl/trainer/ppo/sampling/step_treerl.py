@@ -6,15 +6,21 @@ produce multiple ``<step>...</step>`` blocks, which are split into individual
 MCTSNodes. Branching candidates are drawn from all non-root nodes in each
 tree, not only the current leaves.
 
-Simplified parameters:
-    rollout.n     — initial generation count per prompt
-    top_k         — number of high-entropy steps to select per round
-    iter_rounds   — number of branching rounds
+TreeRL-style parameters:
+    m / rollout.n       - initial complete rollouts per prompt
+    n / top_k           - high-entropy branch points per initial rollout tree per round
+    l / iter_rounds     - branching rounds
+    t / branch_repeats  - continuations sampled per selected branch point
+    selected_num_traces - terminal traces selected per prompt for training
 """
 
 from __future__ import annotations
 
+import math
+import random
+from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -26,11 +32,29 @@ from verl.trainer.ppo.sampling.mcts_node import (
     collect_all_nodes,
     gather_path,
 )
+from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format, format_step_reward
 from verl.utils.process_reward import (
+    StepRewardRequest,
     build_process_reward_runtime,
     require_batch_sample_id,
     resolve_process_reward_config,
 )
+
+
+@dataclass
+class StepTreeRLMetrics:
+    format_steps: int = 0
+    total_steps: int = 0
+    problem_count: int = 0
+    leaf_correct: int = 0
+    leaf_total: int = 0
+    selected_traces: int = 0
+    candidate_leaves: int = 0
+    terminal_padding: int = 0
+    trace_total: int = 0
+    full_format_correct_count: int = 0
+    answer_format_only_count: int = 0
+    step_format_only_count: int = 0
 
 
 @contextmanager
@@ -39,7 +63,7 @@ def _timer(name: str, dest: dict):
 
     start = time.perf_counter()
     yield
-    dest[name] = time.perf_counter() - start
+    dest[name] = dest.get(name, 0.0) + time.perf_counter() - start
 
 
 class StepTreeRLStrategy(SamplingStrategy):
@@ -48,7 +72,7 @@ class StepTreeRLStrategy(SamplingStrategy):
     Multi-round tree expansion where:
     1. Initial complete solutions are parsed into steps
     2. Multi-round: select per-tree Top-K high-entropy nodes and branch
-    3. Output all leaves with GPU padding
+    3. Select terminal traces and output step-level training rewards with GPU padding
 
     Config key: ``trainer.step_treerl_config``
     """
@@ -57,14 +81,30 @@ class StepTreeRLStrategy(SamplingStrategy):
         process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("step_treerl_config", {})
 
-        # Simplified parameters
+        # Shared generation bounds
         self.max_depth = cfg.get("max_depth", 40)
         self.max_token_num = cfg.get("max_token_num", 4096)
         self.branch_max_new_tokens = cfg.get("branch_max_new_tokens", self.max_token_num)
 
-        # New simplified params
-        self.top_k = cfg.get("top_k", 2)
-        self.iter_rounds = cfg.get("iter_rounds", 3)
+        # TreeRL-style params. Legacy aliases are kept for existing scripts.
+        self.rollout_n = int(config.actor_rollout_ref.rollout.get("n", 1))
+        self.m = int(cfg.get("m", self.rollout_n))
+        self.top_k = int(cfg.get("n", cfg.get("top_k", 2)))
+        self.iter_rounds = int(cfg.get("l", cfg.get("iter_rounds", 3)))
+        self.branch_repeats = int(cfg.get("t", cfg.get("branch_repeats", 1)))
+        self.path_selection = str(cfg.get("path_selection", "selected_terminals")).lower()
+        self.selected_num_traces = cfg.get("selected_num_traces", cfg.get("num_traces", self.rollout_n))
+        self.overall_norm_style = str(cfg.get("overall_norm_style", "none")).lower()
+        self.use_weighted_value = bool(cfg.get("use_weighted_value", False))
+        self.weighted_value_style = str(cfg.get("weighted_value_style", "original")).lower()
+        length_penalty_cfg = cfg.get("length_penalty", {}) or {}
+        self.length_penalty_enabled = bool(length_penalty_cfg.get("enabled", True))
+        self.length_penalty_p_max = float(length_penalty_cfg.get("p_max", 0.1))
+        self.length_penalty_k = float(length_penalty_cfg.get("k", 15.0))
+        self.length_penalty_t0 = float(length_penalty_cfg.get("t0", 0.7))
+        self._node_counters: Dict[int, int] = {}
+        self._metrics = StepTreeRLMetrics()
+        self._timing: Dict[str, float] = {}
 
         self.process_reward_cfg = process_reward_cfg
         self.process_reward_runtime = build_process_reward_runtime(process_reward_cfg)
@@ -87,6 +127,11 @@ class StepTreeRLStrategy(SamplingStrategy):
         # Step boundary delimiter
         self.step_end_marker = "</step>"
 
+    def _next_node_idx(self, tree_idx: int) -> int:
+        idx = self._node_counters.get(tree_idx, 0) + 1
+        self._node_counters[tree_idx] = idx
+        return idx
+
     def _prepare_sample_ids(self, gen_batch: DataProto) -> None:
         self._sample_ids_by_tree = {}
         for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
@@ -104,15 +149,51 @@ class StepTreeRLStrategy(SamplingStrategy):
         return self._sample_ids_by_tree[tree_idx]
 
     def _score_step_reward(self, step_text: str, tree_idx: int) -> float:
+        scores = self._score_process_rewards(
+            [
+                StepRewardRequest(
+                    step_text=step_text,
+                    tree_idx=tree_idx,
+                    sample_id=self._sample_ids_by_tree.get(tree_idx),
+                )
+            ]
+        )
+        return scores[0]
+
+    def _score_process_rewards(self, requests: List[StepRewardRequest]) -> List[float]:
+        if not requests:
+            return []
+        if hasattr(self.process_reward_runtime, "score_steps"):
+            return self.process_reward_runtime.score_steps(requests)
         if self.process_reward_type == "format":
-            return self.step_prm_fn(step_text)
+            return [float(self.step_prm_fn(req.step_text)) for req in requests]
         if self.process_reward_type == "fol":
-            sample_id = self._get_sample_id(tree_idx)
-            return self.step_prm_fn(step_text, sample_id=sample_id)
+            scores = []
+            for req in requests:
+                sample_id = req.sample_id or self._get_sample_id(req.tree_idx)
+                scores.append(float(self.step_prm_fn(req.step_text, sample_id=sample_id)))
+            return scores
         raise ValueError(
             f"StepTreeRLStrategy requires trainer.process_reward.type to be 'format' or 'fol', "
             f"but got {self.process_reward_type!r}."
         )
+
+    def _assign_process_rewards(self, nodes: List[MCTSNode]) -> None:
+        requests = [
+            StepRewardRequest(
+                step_text=node.step_text,
+                accumulated_text=node.accumulated_text,
+                tree_idx=node.tree_idx,
+                node_idx=node.node_idx,
+                sample_id=self._sample_ids_by_tree.get(node.tree_idx),
+            )
+            for node in nodes
+        ]
+        scores = self._score_process_rewards(requests)
+        for node, score in zip(nodes, scores):
+            node.process_reward = float(score)
+            node.R = float(score)
+            node.value = float(score)
 
     # ------------------------------------------------------------------
     # SamplingStrategy interface
@@ -129,16 +210,22 @@ class StepTreeRLStrategy(SamplingStrategy):
         device = gen_batch.batch["input_ids"].device
 
         with _timer("step_treerl", timing_raw):
+            self._node_counters = {}
+            self._metrics = StepTreeRLMetrics()
+            self._timing = {}
             if self.process_reward_type == "fol":
                 self._prepare_sample_ids(gen_batch)
 
             batch_size = gen_batch.batch["input_ids"].size(0)
 
             # 1. Parse initial solutions into step chains
-            roots = self._init_roots(gen_batch, device)
-            initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
+            with _timer("init_parse", self._timing):
+                roots = self._init_roots(gen_batch, device)
+                initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
+            with _timer("process_reward", self._timing):
+                self._assign_process_rewards(initial_nodes)
             candidate_pool = self._build_candidate_pool(roots, initial_nodes)
-            self._score_new_candidates(initial_nodes, compute_log_prob_fn, device)
+            self._score_new_candidates(initial_nodes, compute_log_prob_fn, device, timing_name="initial_entropy_logprob")
 
             # 2. Multi-round per-tree Top-K selection + branching
             self._branch_by_entropy(
@@ -150,11 +237,14 @@ class StepTreeRLStrategy(SamplingStrategy):
             )
 
             # 3. Backpropagate
-            self._backpropagate_all(roots, gen_batch)
+            with _timer("backprop", self._timing):
+                self._backpropagate_all(roots, gen_batch)
 
             # 4. Build output with padding
             ground_truths = self._get_ground_truths(gen_batch, batch_size)
-            result = self._build_output(gen_batch, roots, device, ground_truths)
+            with _timer("build_output", self._timing):
+                result = self._build_output(gen_batch, roots, device, ground_truths)
+            result.gen_batch_output.meta_info["step_treerl_timing"] = dict(self._timing)
 
         return result
 
@@ -238,21 +328,18 @@ class StepTreeRLStrategy(SamplingStrategy):
                     accumulated_text = current_parent.accumulated_text + block_text
                     new_state = current_parent.state + block_tokens
 
-                    r = self._score_step_reward(block_text, tree_idx)
-
                     child = MCTSNode(
                         state=new_state,
                         step_tokens=block_tokens,
                         step_text=block_text,
                         accumulated_text=accumulated_text,
+                        trajectory_text=full_text,
                         parent=current_parent,
                         depth=current_parent.depth + 1,
                         terminal=is_terminal,
                         visits=0,
-                        R=r,
-                        value=r,
                         tree_idx=tree_idx,
-                        node_idx=0,
+                        node_idx=self._next_node_idx(tree_idx),
                     )
                     current_parent.children.append(child)
                     current_parent = child
@@ -295,7 +382,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         compute_log_prob_fn: Callable[[DataProto], DataProto],
         device: torch.device,
     ) -> None:
-        """Multi-round: select per-tree Top-K high-entropy nodes and branch."""
+        """Multi-round: select Top-N nodes per initial rollout tree and branch."""
         for _round_idx in range(self.iter_rounds):
             candidate_groups = self._collect_branch_candidates(roots, candidate_pool)
             if not candidate_groups:
@@ -320,10 +407,13 @@ class StepTreeRLStrategy(SamplingStrategy):
             for step in selected:
                 step.is_branch_point = True
 
-            new_nodes = self._continue_from_steps(selected, generate_fn, device)
+            with _timer("branch_generation", self._timing):
+                new_nodes = self._continue_from_steps(selected, generate_fn, device)
             if new_nodes:
+                with _timer("process_reward", self._timing):
+                    self._assign_process_rewards(new_nodes)
                 self._add_candidates(candidate_pool, new_nodes)
-                self._score_new_candidates(new_nodes, compute_log_prob_fn, device)
+                self._score_new_candidates(new_nodes, compute_log_prob_fn, device, timing_name="branch_entropy_logprob")
 
     def _build_candidate_pool(self, roots: List[MCTSNode], initial_nodes: List[MCTSNode]) -> Dict[int, List[MCTSNode]]:
         candidate_pool: Dict[int, List[MCTSNode]] = {root.tree_idx: [] for root in roots}
@@ -343,11 +433,16 @@ class StepTreeRLStrategy(SamplingStrategy):
         nodes: List[MCTSNode],
         compute_log_prob_fn: Callable[[DataProto], DataProto],
         device: torch.device,
+        timing_name: Optional[str] = None,
     ) -> None:
         pending = [node for node in nodes if node.parent is not None and node.cached_entropy is None]
         if not pending:
             return
-        entropies = self._compute_step_entropies(pending, compute_log_prob_fn, device)
+        if timing_name is None:
+            entropies = self._compute_step_entropies(pending, compute_log_prob_fn, device)
+        else:
+            with _timer(timing_name, self._timing):
+                entropies = self._compute_step_entropies(pending, compute_log_prob_fn, device)
         for node, entropy in zip(pending, entropies):
             node.cached_entropy = entropy
 
@@ -355,18 +450,31 @@ class StepTreeRLStrategy(SamplingStrategy):
         self,
         roots: List[MCTSNode],
         candidate_pool: Dict[int, List[MCTSNode]],
-    ) -> Dict[int, List[MCTSNode]]:
-        """Collect cached non-root nodes for each tree."""
-        candidates: Dict[int, List[MCTSNode]] = {}
+    ) -> Dict[Tuple[int, int], List[MCTSNode]]:
+        """Collect cached nodes grouped by initial rollout tree."""
+        candidates: Dict[Tuple[int, int], List[MCTSNode]] = {}
         for root in roots:
-            nodes = [
-                node
-                for node in candidate_pool.get(root.tree_idx, [])
-                if node.parent is not None and node.cached_entropy is not None
-            ]
-            if nodes:
-                candidates[root.tree_idx] = nodes
+            for node in candidate_pool.get(root.tree_idx, []):
+                if node.parent is None or node.cached_entropy is None:
+                    continue
+                group_key = self._initial_tree_key(node)
+                if group_key is not None:
+                    candidates.setdefault(group_key, []).append(node)
         return candidates
+
+    def _root_of(self, node: MCTSNode) -> MCTSNode:
+        cur = node
+        while cur.parent is not None:
+            cur = cur.parent
+        return cur
+
+    def _initial_tree_key(self, node: MCTSNode) -> Optional[Tuple[int, int]]:
+        if node.parent is None:
+            return None
+        cur = node
+        while cur.parent is not None and cur.parent.parent is not None:
+            cur = cur.parent
+        return (node.tree_idx, cur.node_idx)
 
     def _continue_from_steps(
         self,
@@ -381,20 +489,56 @@ class StepTreeRLStrategy(SamplingStrategy):
         branch_plans: List[Tuple[MCTSNode, int]] = []
         skipped_steps = 0
         for step in steps:
-            remaining_budget = self.max_model_len - len(step.state)
-            branch_budget = min(self.branch_max_new_tokens, self.max_token_num, remaining_budget)
+            root = self._root_of(step)
+            response_used = max(0, len(step.state) - len(root.state))
+            remaining_response_budget = self.max_token_num - response_used
+            remaining_context_budget = self.max_model_len - len(step.state)
+            branch_budget = min(self.branch_max_new_tokens, remaining_response_budget, remaining_context_budget)
             if branch_budget <= 0:
                 skipped_steps += 1
                 continue
-            branch_plans.append((step, branch_budget))
+            for _ in range(max(self.branch_repeats, 1)):
+                branch_plans.append((step, branch_budget))
 
         if not branch_plans:
             if skipped_steps > 0:
                 print(f"[StepTreeRL] Skipped {skipped_steps} selected nodes due to exhausted context budget")
             return []
 
-        active_steps = [step for step, _ in branch_plans]
-        round_budget = min(branch_budget for _, branch_budget in branch_plans)
+        total_new_nodes = 0
+        total_duplicates = 0
+        created_nodes: List[MCTSNode] = []
+
+        plans_by_budget: Dict[int, List[MCTSNode]] = defaultdict(list)
+        for step, branch_budget in branch_plans:
+            plans_by_budget[int(branch_budget)].append(step)
+
+        for round_budget, active_steps in sorted(plans_by_budget.items()):
+            group_nodes, group_duplicates = self._generate_continuations_for_budget(
+                active_steps=active_steps,
+                max_new_tokens=round_budget,
+                generate_fn=generate_fn,
+                device=device,
+            )
+            total_new_nodes += len(group_nodes)
+            total_duplicates += group_duplicates
+            created_nodes.extend(group_nodes)
+
+        if skipped_steps > 0:
+            print(f"[StepTreeRL] Skipped {skipped_steps} selected nodes due to exhausted context budget")
+        if total_duplicates > 0:
+            print(f"[StepTreeRL] Deduplicated {total_duplicates} duplicate steps, added {total_new_nodes} new nodes")
+        return created_nodes
+
+    def _generate_continuations_for_budget(
+        self,
+        active_steps: List[MCTSNode],
+        max_new_tokens: int,
+        generate_fn: Callable[[DataProto], DataProto],
+        device: torch.device,
+    ) -> Tuple[List[MCTSNode], int]:
+        if not active_steps:
+            return [], 0
 
         seqs = [torch.tensor(s.state, dtype=torch.long, device=device) for s in active_steps]
         input_ids, attention_mask, position_ids = _pad_sequences(seqs, self.pad_token_id, device)
@@ -417,14 +561,28 @@ class StepTreeRLStrategy(SamplingStrategy):
                 "prompts": input_ids.clone(),
             },
             non_tensors={},
-            meta_info={"max_new_tokens": round_budget},
+            meta_info={
+                "rollout_sampling_kwargs": {
+                    "max_new_tokens": max_new_tokens,
+                    "max_tokens": max_new_tokens,
+                    "n": 1,
+                },
+            },
         )
 
         output = generate_fn(data)
         responses = output.batch["responses"]
+        if responses.size(0) < padded_size:
+            raise RuntimeError(
+                f"StepTreeRL branch generation returned {responses.size(0)} responses for {padded_size} padded prompts."
+            )
+        if responses.size(0) > padded_size:
+            print(
+                f"[StepTreeRL] Branch generation returned {responses.size(0)} responses for {padded_size} padded prompts; "
+                "truncating to the first sample per prompt. Check rollout_sampling_kwargs['n']."
+            )
         responses = responses[:batch_size]  # slice back
 
-        total_new_nodes = 0
         total_duplicates = 0
         created_nodes: List[MCTSNode] = []
 
@@ -443,6 +601,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 step_tokens_content = step_tokens_raw
 
             full_text = self.tokenizer.decode(step_tokens_content, skip_special_tokens=True)
+            full_trajectory_text = step.accumulated_text + full_text
             step_blocks = self._split_by_step_end(full_text, step_tokens_content)
 
             current_parent = step
@@ -457,32 +616,24 @@ class StepTreeRLStrategy(SamplingStrategy):
                     total_duplicates += 1
                     continue
 
-                r = self._score_step_reward(block_text, step.tree_idx)
-
                 child = MCTSNode(
                     state=new_state,
                     step_tokens=block_tokens,
                     step_text=block_text,
                     accumulated_text=accumulated_text,
+                    trajectory_text=full_trajectory_text,
                     parent=current_parent,
                     depth=current_parent.depth + 1,
                     terminal=is_terminal,
                     visits=0,
-                    R=r,
-                    value=r,
                     tree_idx=step.tree_idx,
-                    node_idx=0,
+                    node_idx=self._next_node_idx(step.tree_idx),
                 )
                 current_parent.children.append(child)
                 current_parent = child
-                total_new_nodes += 1
                 created_nodes.append(child)
 
-        if skipped_steps > 0:
-            print(f"[StepTreeRL] Skipped {skipped_steps} selected nodes due to exhausted context budget")
-        if total_duplicates > 0:
-            print(f"[StepTreeRL] Deduplicated {total_duplicates} duplicate steps, added {total_new_nodes} new nodes")
-        return created_nodes
+        return created_nodes, total_duplicates
 
     def _is_duplicate_step(self, block_tokens: List[int], parent_node: MCTSNode) -> bool:
         """Check whether the parent already has a child with identical step tokens."""
@@ -500,10 +651,11 @@ class StepTreeRLStrategy(SamplingStrategy):
         roots: List[MCTSNode],
         gen_batch: DataProto,
     ) -> None:
-        """Backpropagate correctness through all leaf nodes."""
+        """Compute TreeRL-style RLOO leaf values and backpropagate them."""
         for root in roots:
             tree_idx = root.tree_idx
             gt = self._get_ground_truths(gen_batch, len(roots))[tree_idx]
+            self._reset_tree_statistics(root)
 
             # Collect all leaves
             leaves = [n for n in collect_all_nodes(root) if not n.children]
@@ -524,21 +676,138 @@ class StepTreeRLStrategy(SamplingStrategy):
                 else:
                     leaf.is_correct = False
 
+                leaf.leaf_outcome = 1.0 if leaf.is_correct else 0.0
                 if leaf.is_correct:
                     leaf.main_chain = True
 
-            # Backpropagate for each leaf
+            self._apply_rloo_to_leaves(leaves)
             for leaf in leaves:
-                self._leaf_backpropagate_correct(leaf)
+                self._leaf_backpropagate_value(leaf)
+            self._normalize_all_steps(root)
 
-    def _leaf_backpropagate_correct(self, leaf: MCTSNode) -> None:
-        """Backward propagate: update correct/total counts in ancestors."""
+    def _reset_tree_statistics(self, root: MCTSNode) -> None:
+        for node in collect_all_nodes(root):
+            node.accumulated_value = 0.0
+            node.terminal_in_subtree = 0
+            node.correct_terminal_in_subtree = 0
+            node.selected_terminal_in_subtree = 0
+            node.state_value = 0.0
+            node.segment_reward = 0.0
+            node.leaf_outcome = 0.0
+            node.is_correct = None
+            node.main_chain = False
+
+    def _apply_rloo_to_leaves(self, leaves: List[MCTSNode]) -> None:
+        outcomes = [float(leaf.leaf_outcome) for leaf in leaves]
+        if len(leaves) <= 1:
+            for leaf, outcome in zip(leaves, outcomes):
+                leaf.R = outcome
+                leaf.accumulated_value = leaf.R
+            return
+
+        total = sum(outcomes)
+        denom = len(outcomes) - 1
+        for leaf, outcome in zip(leaves, outcomes):
+            mean_others = (total - outcome) / denom
+            leaf.R = outcome - mean_others
+            leaf.accumulated_value = leaf.R
+
+    def _leaf_backpropagate_value(self, leaf: MCTSNode) -> None:
+        """Backpropagate a RLOO leaf value to all ancestors."""
+        leaf.terminal_in_subtree += 1
+        if leaf.is_correct:
+            leaf.correct_terminal_in_subtree += 1
         node = leaf
         while node.parent is not None:
             node.parent.terminal_in_subtree += 1
             if leaf.is_correct:
                 node.parent.correct_terminal_in_subtree += 1
+            node.parent.accumulated_value += leaf.accumulated_value
             node = node.parent
+
+    def _normalize_all_steps(self, root: MCTSNode) -> None:
+        """TreeRL-style optional normalization over all nodes covered by candidate leaves."""
+        style = self.overall_norm_style
+        if style in {"", "none", "null"}:
+            return
+
+        all_steps = [
+            node
+            for node in collect_all_nodes(root)
+            if node.terminal_in_subtree != 0 or node.terminal
+        ]
+        if not all_steps:
+            return
+
+        if style == "step":
+            step_sum = sum(node.accumulated_value for node in all_steps)
+            step_num = sum(node.terminal_in_subtree for node in all_steps)
+            mean = step_sum / step_num if step_num > 0 else 0.0
+            for node in all_steps:
+                node.accumulated_value -= mean * node.terminal_in_subtree
+            return
+
+        if style == "token":
+            step_sum = 0.0
+            step_num = 0
+            for node in all_steps:
+                token_len = len(node.step_tokens)
+                step_sum += node.accumulated_value * token_len
+                step_num += node.terminal_in_subtree * token_len
+            mean = step_sum / step_num if step_num > 0 else 0.0
+            for node in all_steps:
+                node.accumulated_value -= mean * node.terminal_in_subtree
+            return
+
+        raise ValueError(
+            f"Unsupported trainer.step_treerl_config.overall_norm_style={self.overall_norm_style!r}. "
+            "Expected 'none', 'step', or 'token'."
+        )
+
+    def _selected_backpropagate(self, leaf: MCTSNode) -> None:
+        leaf.selected_terminal_in_subtree += 1
+        node = leaf
+        while node.parent is not None:
+            node.parent.selected_terminal_in_subtree += 1
+            node = node.parent
+
+    def _compute_weighted_update(self, node: MCTSNode) -> None:
+        if node.selected_terminal_in_subtree > 0:
+            if self.weighted_value_style == "sqrt":
+                node.accumulated_value = node.accumulated_value / math.sqrt(node.selected_terminal_in_subtree)
+            elif self.weighted_value_style == "uniform":
+                node.accumulated_value = node.accumulated_value / node.selected_terminal_in_subtree
+            elif self.weighted_value_style == "original":
+                node.accumulated_value = node.accumulated_value
+            else:
+                raise ValueError(
+                    f"Unsupported trainer.step_treerl_config.weighted_value_style={self.weighted_value_style!r}. "
+                    "Expected 'sqrt', 'uniform', or 'original'."
+                )
+        for child in node.children:
+            self._compute_weighted_update(child)
+
+    def _assign_segment_rewards(self, root: MCTSNode) -> None:
+        nodes = [node for node in collect_all_nodes(root) if node.parent is not None]
+        if not nodes:
+            return
+        max_depth = max(1, max(node.depth for node in nodes))
+        for node in nodes:
+            if node.terminal_in_subtree <= 0 or node.parent is None or node.parent.terminal_in_subtree <= 0:
+                node.state_value = 0.0
+                node.segment_reward = self._length_penalty(node.depth, max_depth)
+                continue
+            parent_value = node.parent.accumulated_value / node.parent.terminal_in_subtree
+            child_value = node.accumulated_value / node.terminal_in_subtree
+            node.state_value = child_value
+            tree_advantage = child_value - parent_value
+            node.segment_reward = tree_advantage * float(node.process_reward) + self._length_penalty(node.depth, max_depth)
+
+    def _length_penalty(self, step_index: int, max_step: int) -> float:
+        if not self.length_penalty_enabled:
+            return 0.0
+        t = float(step_index) / max(float(max_step), 1.0)
+        return -self.length_penalty_p_max * (1.0 / (1.0 + math.exp(-self.length_penalty_k * (t - self.length_penalty_t0))))
 
     # ------------------------------------------------------------------
     # Output construction with GPU padding
@@ -551,21 +820,45 @@ class StepTreeRLStrategy(SamplingStrategy):
         device: torch.device,
         ground_truths: List[Optional[str]],
     ) -> SamplingResult:
-        """Output all leaf nodes with GPU padding."""
+        """Output selected terminal paths with GPU padding."""
         all_paths: List[List[MCTSNode]] = []
         all_gt: List[Optional[str]] = []
+        self._metrics = self._collect_metrics(roots)
 
         for i, root in enumerate(roots):
             gt = ground_truths[i] if i < len(ground_truths) else None
 
             # Collect all leaves (initial + branched)
-            leaves = [n for n in collect_all_nodes(root) if not n.children]
+            candidate_leaves = [n for n in collect_all_nodes(root) if not n.children]
 
-            if not leaves:
+            if not candidate_leaves:
                 # Fallback: deepest non-root node
                 all_nodes = collect_all_nodes(root)
                 non_root = [n for n in all_nodes if n.parent is not None]
-                leaves = [max(non_root, key=lambda n: n.depth)] if non_root else [root]
+                candidate_leaves = [max(non_root, key=lambda n: n.depth)] if non_root else [root]
+
+            if self.path_selection == "selected_terminals":
+                num_traces = int(self.selected_num_traces or self.rollout_n or len(candidate_leaves))
+                leaves, terminal_padding = self._select_terminals(candidate_leaves, num_traces)
+            elif self.path_selection != "all_leaves":
+                raise ValueError(
+                    f"Unsupported trainer.step_treerl_config.path_selection={self.path_selection!r}. "
+                    "Expected 'all_leaves' or 'selected_terminals'."
+                )
+            else:
+                leaves = list(candidate_leaves)
+                terminal_padding = 0
+
+            self._metrics.candidate_leaves += len(candidate_leaves)
+            self._metrics.selected_traces += len(leaves)
+            self._metrics.terminal_padding += terminal_padding
+            for leaf in leaves:
+                self._record_trace_format_metrics(leaf)
+            for leaf in leaves:
+                self._selected_backpropagate(leaf)
+            if self.use_weighted_value:
+                self._compute_weighted_update(root)
+            self._assign_segment_rewards(root)
 
             for leaf in leaves:
                 all_paths.append(gather_path(leaf))
@@ -581,7 +874,67 @@ class StepTreeRLStrategy(SamplingStrategy):
                 all_gt.append(all_gt[-1])
             print(f"[StepTreeRL] Padded {padding_needed} samples to make {total + padding_needed} divisible by {self._n_gpus}")
 
-        return _build_sampling_result(all_paths, all_gt, self.pad_token_id, device, len(roots))
+        return _build_sampling_result(
+            all_paths,
+            all_gt,
+            self.pad_token_id,
+            device,
+            len(roots),
+            metrics=self._metrics,
+        )
+
+    def _select_terminals(self, leaves: List[MCTSNode], num_traces: int) -> Tuple[List[MCTSNode], int]:
+        if num_traces <= 0:
+            return [], 0
+        if not leaves:
+            return [], 0
+
+        shuffled = list(leaves)
+        random.shuffle(shuffled)
+        selected: List[MCTSNode] = []
+        remaining: List[MCTSNode] = []
+
+        for leaf in shuffled:
+            if leaf.main_chain and not selected:
+                selected.append(leaf)
+            else:
+                remaining.append(leaf)
+
+        needed = num_traces - len(selected)
+        if needed > 0 and remaining:
+            sampled = random.sample(remaining, min(needed, len(remaining)))
+            selected.extend(sampled)
+            needed = num_traces - len(selected)
+
+        padding = 0
+        fill_source = selected or remaining or shuffled
+        while needed > 0 and fill_source:
+            selected.append(random.choice(fill_source))
+            padding += 1
+            needed -= 1
+
+        random.shuffle(selected)
+        return selected[:num_traces], padding
+
+    def _record_trace_format_metrics(self, leaf: MCTSNode) -> None:
+        response_text = leaf.trajectory_text or leaf.accumulated_text
+        classes = classify_trajectory_format(response_text)
+        self._metrics.trace_total += 1
+        self._metrics.full_format_correct_count += int(classes["format_full"])
+        self._metrics.answer_format_only_count += int(classes["format_answer_only"])
+        self._metrics.step_format_only_count += int(classes["format_step_only"])
+
+    def _collect_metrics(self, roots: List[MCTSNode]) -> StepTreeRLMetrics:
+        metrics = StepTreeRLMetrics()
+        metrics.problem_count = len(roots)
+        for root in roots:
+            nodes = [node for node in collect_all_nodes(root) if node.parent is not None]
+            metrics.total_steps += len(nodes)
+            metrics.format_steps += sum(1 for node in nodes if format_step_reward(node.step_text) > 0.0)
+            leaves = [node for node in nodes if not node.children]
+            metrics.leaf_total += len(leaves)
+            metrics.leaf_correct += sum(1 for leaf in leaves if bool(leaf.is_correct))
+        return metrics
 
     # ------------------------------------------------------------------
     # Helper methods (kept for compatibility)
@@ -654,6 +1007,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 "max_token_len": total_len,
                 "use_dynamic_bsz": False,
                 "temperature": 1.0,
+                "calculate_entropy": False,
             },
         )
 
@@ -685,6 +1039,7 @@ def _build_sampling_result(
     pad_token_id: int,
     device: torch.device,
     batch_size: int,
+    metrics: Optional[StepTreeRLMetrics] = None,
 ) -> SamplingResult:
     """Build padded tensors and SamplingResult from selected paths."""
     prompt_ids_list: List[torch.Tensor] = []
@@ -694,9 +1049,11 @@ def _build_sampling_result(
     step_rewards_list: List[List[float]] = []
     step_correctness_scores_list: List[List[float]] = []
     response_lens: List[int] = []
-    verifiable_rewards_list: List[float] = []
+    leaf_accuracy_list: List[float] = []
 
     for path, gt in zip(all_paths, all_gt):
+        if not path:
+            continue
         root_node = path[0].parent
         prompt_tokens = torch.tensor(root_node.state, dtype=torch.long, device=device)
 
@@ -711,11 +1068,8 @@ def _build_sampling_result(
                 continue
             start, end = offset, offset + len(tokens)
             spans.append((start, end))
-            rewards.append(node.R)
-            if node.terminal_in_subtree > 0:
-                v_score = node.correct_terminal_in_subtree / node.terminal_in_subtree
-            else:
-                v_score = 0.0
+            rewards.append(float(node.segment_reward))
+            v_score = float(node.state_value)
             correctness_scores.append(v_score)
             response_tokens.extend(tokens)
             offset = end
@@ -730,7 +1084,10 @@ def _build_sampling_result(
         step_rewards_list.append(rewards)
         step_correctness_scores_list.append(correctness_scores)
         response_lens.append(len(response_tokens))
-        verifiable_rewards_list.append(1.0 if path[-1].is_correct else 0.0)
+        leaf_accuracy_list.append(1.0 if path[-1].is_correct else 0.0)
+
+    if not prompt_ids_list:
+        raise ValueError("StepTreeRL produced no non-empty training paths.")
 
     # Pad and stack
     input_ids, attention_mask, position_ids = _pad_sequences(full_seq_list, pad_token_id, device)
@@ -746,7 +1103,7 @@ def _build_sampling_result(
     )
 
     # score_ids and reward_mask
-    n_paths = len(all_paths)
+    n_paths = len(prompt_ids_list)
     max_steps = max((len(s) for s in step_spans_list), default=1)
     score_ids = torch.full((n_paths, max_steps), -1, device=device, dtype=torch.long)
     reward_mask = torch.zeros(n_paths, max_steps, device=device, dtype=torch.float32)
@@ -756,12 +1113,12 @@ def _build_sampling_result(
             score_ids[i, j] = end_pos
             reward_mask[i, j] = 1.0
 
-    # ORM verifiable rewards
+    # ORM leaf accuracy for logging/debugging. This is not used as a reward.
     max_resp_len = responses_padded.size(1)
-    verifiable_rewards = torch.zeros(n_paths, max_resp_len, dtype=torch.float32, device=device)
+    leaf_accuracy = torch.zeros(n_paths, max_resp_len, dtype=torch.float32, device=device)
     for i, rlen in enumerate(response_lens):
         if rlen > 0:
-            verifiable_rewards[i, rlen - 1] = verifiable_rewards_list[i]
+            leaf_accuracy[i, rlen - 1] = leaf_accuracy_list[i]
 
     # step_correctness_scores
     step_correctness_padded = torch.full((n_paths, max_steps), 0.0, device=device, dtype=torch.float32)
@@ -779,11 +1136,46 @@ def _build_sampling_result(
             "reward_fn_scores": reward_fn_scores,
             "score_ids": score_ids,
             "reward_mask": reward_mask,
-            "verifiable_rewards": verifiable_rewards,
+            "leaf_accuracy": leaf_accuracy,
             "step_correctness_scores": step_correctness_padded,
         },
         non_tensors={},
-        meta_info={},
+        meta_info={
+            "step_treerl_metrics": {
+                "format_steps": metrics.format_steps if metrics is not None else 0,
+                "total_steps": metrics.total_steps if metrics is not None else 0,
+                "problem_count": metrics.problem_count if metrics is not None else 0,
+                "steps_per_problem": (
+                    metrics.total_steps / metrics.problem_count
+                    if metrics is not None and metrics.problem_count > 0
+                    else 0.0
+                ),
+                "format_ratio": (metrics.format_steps / metrics.total_steps) if metrics is not None and metrics.total_steps > 0 else 0.0,
+                "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
+                "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
+                "selected_traces": metrics.selected_traces if metrics is not None else 0,
+                "terminal_padding": metrics.terminal_padding if metrics is not None else 0,
+                "trace_total": metrics.trace_total if metrics is not None else 0,
+                "full_format_correct_count": metrics.full_format_correct_count if metrics is not None else 0,
+                "answer_format_only_count": metrics.answer_format_only_count if metrics is not None else 0,
+                "step_format_only_count": metrics.step_format_only_count if metrics is not None else 0,
+                "full_format_correct_ratio": (
+                    metrics.full_format_correct_count / metrics.trace_total
+                    if metrics is not None and metrics.trace_total > 0
+                    else 0.0
+                ),
+                "answer_format_only_ratio": (
+                    metrics.answer_format_only_count / metrics.trace_total
+                    if metrics is not None and metrics.trace_total > 0
+                    else 0.0
+                ),
+                "step_format_only_ratio": (
+                    metrics.step_format_only_count / metrics.trace_total
+                    if metrics is not None and metrics.trace_total > 0
+                    else 0.0
+                ),
+            }
+        },
     )
 
     repeat_times = n_paths // batch_size if batch_size > 0 else 1

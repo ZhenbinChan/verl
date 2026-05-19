@@ -9,8 +9,9 @@ Two reward signals are produced:
    - Fallback (validation / non-step-tree batches): each ``<step>`` block is
      scored via the format/FOL PRM function, written at the step's last token.
 
-2. **ORM verifiable reward** (logging / tracking):
+2. **Outcome accuracy** (logging / tracking):
    - ``compute_score(response_str, ground_truth)`` → 0/1 binary.
+   - Stored as ``acc`` so validation logs it under ``val-core/<dataset>/acc``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Callable, Dict, Optional
 import torch
 
 from verl import DataProto
+from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format
 from verl.utils.reward_score import _default_compute_score
 from verl.utils.process_reward import (
     build_process_reward_runtime,
@@ -160,10 +162,13 @@ class StepTreeRewardManager:
                     orm_score = 0.0
 
             orm_scores.append(orm_score)
-            reward_extra_info["verifiable_reward"].append(orm_score)
-            # Add "acc" as alias for verifiable_reward so it becomes val-core in wandb
             reward_extra_info["acc"].append(orm_score)
             reward_extra_info["prm_score"].append(float(reward_tensor[i].sum()))
+            format_classes = classify_trajectory_format(response_str)
+            reward_extra_info["format_full"].append(format_classes["format_full"])
+            reward_extra_info["format_answer_only"].append(format_classes["format_answer_only"])
+            reward_extra_info["format_step_only"].append(format_classes["format_step_only"])
+            reward_extra_info["format_trace_total"].append(format_classes["format_trace_total"])
 
             prompts_list.append(prompt_str)
             responses_list.append(response_str)

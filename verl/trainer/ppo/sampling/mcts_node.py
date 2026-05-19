@@ -19,12 +19,14 @@ class MCTSNode:
     step_tokens: token ids generated at this specific step only.
     step_text: decoded text of this step (expected: one <step>…</step> block).
     accumulated_text: full response from root to this node.
+    trajectory_text: full decoded trajectory text for metrics, including trailing answer text.
     """
 
     state: List[int]
     step_tokens: List[int] = field(default_factory=list)
     step_text: str = ""
     accumulated_text: str = ""
+    trajectory_text: str = ""
     parent: Optional["MCTSNode"] = None
     children: List["MCTSNode"] = field(default_factory=list)
     depth: int = 0
@@ -34,6 +36,10 @@ class MCTSNode:
     value: float = 0.0  # backed-up value used in UCT
     tree_idx: int = 0   # index into the prompt batch
     node_idx: int = 0   # unique id within this tree
+    process_reward: float = 0.0
+    segment_reward: float = 0.0
+    state_value: float = 0.0
+    leaf_outcome: float = 0.0
 
     # --- ORM / correctness (set after tree is built) ---
     is_correct: Optional[bool] = None   # ORM: leaf only, None until computed

@@ -41,12 +41,34 @@ SUPPORTED_PROCESS_REWARD_TYPES = {"none", "format", "fol"}
 
 
 @dataclass
+class StepRewardRequest:
+    step_text: str
+    sample_id: Optional[str] = None
+    question_text: Optional[str] = None
+    accumulated_text: str = ""
+    tree_idx: int = 0
+    node_idx: int = 0
+
+
+@dataclass
 class ProcessRewardRuntime:
     reward_type: str
     step_prm_fn: Optional[Callable] = None
     llm_client: Optional[LLMClient] = None
     fol_verifier: Optional[FOLVerifier] = None
     fol_metadata_map: Dict[str, Any] = field(default_factory=dict)
+
+    def score_steps(self, requests: list[StepRewardRequest]) -> list[float]:
+        if self.reward_type == "format":
+            return [float(self.step_prm_fn(req.step_text)) for req in requests]
+        if self.reward_type == "fol":
+            scores = []
+            for req in requests:
+                if req.sample_id is None:
+                    raise ValueError("FOL process reward requires sample_id for batch step scoring.")
+                scores.append(float(self.step_prm_fn(req.step_text, sample_id=req.sample_id)))
+            return scores
+        raise ValueError(f"Process reward type {self.reward_type!r} does not support step scoring.")
 
 
 def _normalize_reward_type(value: Any) -> str:
@@ -74,6 +96,8 @@ def resolve_process_reward_config(config):
     strategy_name = str(config.trainer.get("sampling_strategy", "") or "").lower().strip()
     canonical = config.trainer.process_reward
     canonical.type = _normalize_reward_type(canonical.get("type", "none"))
+    if strategy_name == "step_treerl" and canonical.type == "none":
+        canonical.type = "format"
 
     reward_manager_name = str(config.reward_model.get("reward_manager", "auto") or "auto").lower().strip()
     if reward_manager_name == "auto":

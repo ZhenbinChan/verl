@@ -96,6 +96,7 @@ class AdvantageEstimator(str, Enum):
     ENTROPY_REINFORCE = "entropy_reinforce"
     MCTS_GRPO = "mcts_grpo"
     STEP_TREERL_GRPO = "step_treerl_grpo"
+    STEP_TREERL_REINFORCE = "step_treerl_reinforce"
     IG_GRPO = "ig_grpo"
     # New algorithms from latest verl
     CISPO = "cispo"
@@ -345,6 +346,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.STEP_TREERL_REINFORCE:
+        advantages, returns = core_algos.compute_entropy_reinforce_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.IG_GRPO:
         step_correctness = data.batch.get(
             "step_correctness_scores", data.batch["reward_fn_scores"]
@@ -531,6 +539,7 @@ class RayPPOTrainer:
             AdvantageEstimator.ENTROPY_REINFORCE,
             AdvantageEstimator.MCTS_GRPO,
             AdvantageEstimator.STEP_TREERL_GRPO,
+            AdvantageEstimator.STEP_TREERL_REINFORCE,
             AdvantageEstimator.IG_GRPO,
         ]:
             self.use_critic = False
@@ -712,8 +721,12 @@ class RayPPOTrainer:
                 f"but got '{reward_manager_name}'. "
                 f"Use StepTreeRewardManager for step-level PRM-based dense rewards."
             )
-            assert config.algorithm.adv_estimator in [AdvantageEstimator.STEP_TREERL_GRPO], (
-                f"sampling_strategy='step_treerl' requires algorithm.adv_estimator='step_treerl_grpo', "
+            assert config.algorithm.adv_estimator in [
+                AdvantageEstimator.STEP_TREERL_GRPO,
+                AdvantageEstimator.STEP_TREERL_REINFORCE,
+            ], (
+                "sampling_strategy='step_treerl' requires algorithm.adv_estimator to be "
+                "'step_treerl_grpo' or 'step_treerl_reinforce', "
                 f"but got '{config.algorithm.adv_estimator}'."
             )
             assert process_reward_type in {"format", "fol"}, (
@@ -1221,6 +1234,7 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 reward_extra_infos_dict = {}
+                sampling_metrics = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # capture ordering before popping fields for generation
 
@@ -1268,6 +1282,30 @@ class RayPPOTrainer:
                                 timing_raw=timing_raw,
                             )
                             gen_batch_output = sampling_result.gen_batch_output
+                            step_treerl_metrics = gen_batch_output.meta_info.get("step_treerl_metrics", {})
+                            if step_treerl_metrics:
+                                sampling_metrics.update(
+                                    {
+                                        "training/step_treerl_format_steps": step_treerl_metrics.get("format_steps", 0),
+                                        "training/step_treerl_total_steps": step_treerl_metrics.get("total_steps", 0),
+                                        "training/step_treerl_steps_per_problem": step_treerl_metrics.get("steps_per_problem", 0.0),
+                                        "training/step_treerl_format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
+                                        "training/step_treerl_leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
+                                        "training/step_treerl_candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
+                                        "training/step_treerl_selected_traces": step_treerl_metrics.get("selected_traces", 0),
+                                        "training/step_treerl_terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
+                                        "training/step_treerl_trace_total": step_treerl_metrics.get("trace_total", 0),
+                                        "training/step_treerl_full_format_correct_count": step_treerl_metrics.get("full_format_correct_count", 0),
+                                        "training/step_treerl_answer_format_only_count": step_treerl_metrics.get("answer_format_only_count", 0),
+                                        "training/step_treerl_step_format_only_count": step_treerl_metrics.get("step_format_only_count", 0),
+                                        "training/step_treerl_full_format_correct_ratio": step_treerl_metrics.get("full_format_correct_ratio", 0.0),
+                                        "training/step_treerl_answer_format_only_ratio": step_treerl_metrics.get("answer_format_only_ratio", 0.0),
+                                        "training/step_treerl_step_format_only_ratio": step_treerl_metrics.get("step_format_only_ratio", 0.0),
+                                    }
+                                )
+                            step_treerl_timing = gen_batch_output.meta_info.get("step_treerl_timing", {})
+                            for timing_name, timing_value in step_treerl_timing.items():
+                                sampling_metrics[f"training/step_treerl_time_{timing_name}"] = timing_value
                         finally:
                             if self.async_rollout_mode:
                                 self.async_rollout_manager.sleep()
@@ -1322,10 +1360,6 @@ class RayPPOTrainer:
                             reward_fn_tensor = batch.batch.get("reward_fn_scores")
                             if reward_fn_tensor is None:
                                 raise ValueError("Tree rewards expected but reward_fn_scores missing")
-                            # ensure verifiable_rewards exists
-                            if "verifiable_rewards" not in batch.batch:
-                                verifiable_rewards = reward_fn_tensor.sum(-1)
-                                batch.union(DataProto.from_dict({"verifiable_rewards": verifiable_rewards}))
                             reward_tensor = reward_fn_tensor
                             reward_dict = self.reward_fn(batch, return_dict=True)
                             if "outcome_reward" in reward_dict.keys():
@@ -1514,6 +1548,7 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                metrics.update(sampling_metrics)
 
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))

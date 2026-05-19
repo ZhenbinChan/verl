@@ -30,7 +30,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.py_functional import append_to_dict
@@ -334,9 +334,6 @@ class DataParallelPPOActor(BasePPOActor):
                     advantages = data["advantages"]
 
                     clip_ratio = self.config.clip_ratio
-                    clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
-                    clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
-                    clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
@@ -359,13 +356,31 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_agg_mode=loss_agg_mode,
                     )
                     """
-                    pg_loss, pg_clipfrac, ppo_kl, avg_ratio = core_algos.compute_policy_loss(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        eos_mask=response_mask,
-                        cliprange=clip_ratio,
-                    )
+                    policy_loss_name = self.config.get("policy_loss", None)
+                    if policy_loss_name:
+                        loss_fn = core_algos.get_policy_loss_fn(policy_loss_name)
+                        pg_loss, pg_metrics = loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=None,
+                        )
+                    else:
+                        pg_loss, pg_clipfrac, ppo_kl, avg_ratio = core_algos.compute_policy_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            eos_mask=response_mask,
+                            cliprange=clip_ratio,
+                        )
+                        pg_metrics = {
+                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),
+                            "actor/avg_ratio": avg_ratio.detach().item(),
+                        }
 
                     if entropy_coeff != 0:
                         # entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
@@ -396,12 +411,9 @@ class DataParallelPPOActor(BasePPOActor):
                         
                     data = {
                         "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        #"actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                        "actor/avg_ratio": avg_ratio.detach().item(),
                         "actor/final_loss": loss.detach().item(),
                     }
+                    data.update(pg_metrics)
 
                     if entropy_coeff != 0:
                         data["actor/entropy_loss"] = entropy_loss.detach().item()

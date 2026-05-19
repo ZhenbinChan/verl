@@ -1047,6 +1047,42 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("tree_loss")
+def compute_policy_loss_tree(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """TreeRL-style clipped policy loss.
+
+    This mirrors TreeRL's actor-only REINFORCE objective with PPO-style ratio
+    clipping, using dense tree rewards directly as advantages.
+    """
+    clip_ratio = config.clip_ratio if config is not None and hasattr(config, "clip_ratio") else 0.2
+    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio * 1.3)
+
+    surr1 = ratio * advantages
+    surr2 = clipped_ratio * advantages
+    pg_losses = -torch.minimum(surr1, surr2)
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    clipped = (ratio != clipped_ratio).float()
+    return pg_loss, {
+        "actor/pg_clipfrac": verl_F.masked_mean(clipped, response_mask).detach().item(),
+        "actor/ppo_kl": verl_F.masked_mean(-negative_approx_kl, response_mask).detach().item(),
+        "actor/pg_clipfrac_lower": verl_F.masked_mean((clipped * (advantages < 0).float()), response_mask).detach().item(),
+        "actor/avg_ratio": verl_F.masked_mean(ratio, response_mask).detach().item(),
+    }
+
+
 @register_policy_loss("cispo")
 def compute_policy_loss_cispo(
     old_log_prob: torch.Tensor,

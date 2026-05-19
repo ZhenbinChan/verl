@@ -142,6 +142,7 @@ output_models/
 results/
 homogeneous_data/
 record/
+TreeRL/
 
 slurm/
 debug/
