@@ -270,21 +270,18 @@ class vLLMRollout(BaseRollout):
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
 
             if self.sampling_params.n > 1 and do_sample:
+                original_batch_size = batch_size
                 idx = _repeat_interleave(idx, self.sampling_params.n)
                 attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
                 position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
                 batch_size = batch_size * self.sampling_params.n
-                if "multi_modal_inputs" in non_tensor_batch.keys():
-                    non_tensor_batch["multi_modal_inputs"] = _repeat_interleave(non_tensor_batch["multi_modal_inputs"], self.sampling_params.n)
-                # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
-                if "tools_kwargs" in non_tensor_batch.keys():
-                    non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
-                # [BUG:https://github.com/volcengine/verl/issues/2155] Solution:
-                if "raw_prompt" in non_tensor_batch.keys():
-                    non_tensor_batch["raw_prompt"] = _repeat_interleave(non_tensor_batch["raw_prompt"], self.sampling_params.n)
-                # TreeRL 改动
-                if "answer" in non_tensor_batch.keys():
-                    non_tensor_batch["answer"] = _repeat_interleave(non_tensor_batch["answer"], self.sampling_params.n)
+                # 原先这里只手动复制 raw_prompt、answer、tools_kwargs 等少数 key。
+                # 现在改为复制所有第 0 维等于原始 batch size 的样本级 non-tensor metadata，
+                # 这样 FOL/StepTreeRL 需要的 sample_id、question_text、data_source 等字段
+                # 在 rollout.n > 1 时也能和 bs * n 条 response 正确对齐。
+                for key, value in list(non_tensor_batch.items()):
+                    if hasattr(value, "shape") and value.shape[0] == original_batch_size:
+                        non_tensor_batch[key] = _repeat_interleave(value, self.sampling_params.n)
 
             seq = torch.cat([idx, response], dim=-1)
 

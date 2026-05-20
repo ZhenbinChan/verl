@@ -18,15 +18,14 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
+from verl.trainer.ppo.sampling.mcts_prm import strict_step_xml_correct
 from verl.utils.reward_score import _default_compute_score
 
 
 class NaiveFormatRewardManager:
     """Reward manager with dual rewards:
     1. Format reward: placed at the last token of each correctly formatted <step>...</step> block.
-       Normalized as: num_valid_steps / max(total_step_blocks, target_format_steps).
-       This incentivizes multi-step reasoning (at least target_format_steps steps)
-       while penalizing the 1-step shortcut.
+       Each valid step receives 1 / total_step_blocks in this trajectory.
     2. Answer reward: +1 at the last valid token if the final answer (extracted from \\boxed{})
        matches the ground truth.
     
@@ -46,19 +45,12 @@ class NaiveFormatRewardManager:
     # ------------------------------------------------------------------
 
     def _is_valid_step_content(self, step_content: str) -> bool:
-        """Check that the content inside a <step>...</step> block has:
-        - At least one <premise>...</premise> pair
-        - At least one <conclusion>...</conclusion> pair
-        """
-        has_premise = bool(re.search(r'<premise>.*?</premise>', step_content, re.DOTALL))
-        has_conclusion = bool(re.search(r'<conclusion>.*?</conclusion>', step_content, re.DOTALL))
-        return has_premise and has_conclusion
+        """Check that a full <step> block only has premises and one conclusion."""
+        return strict_step_xml_correct(step_content)
 
     def _parse_step_end_positions(self, response_str: str):
         """Find the character positions of the closing '>' of each </step> tag
         that belongs to a correctly formatted <step>...</step> block.
-
-        Uses a stack to handle nesting correctly.
 
         Returns:
             tuple: (valid_end_positions, total_steps)
@@ -66,36 +58,15 @@ class NaiveFormatRewardManager:
                 - total_steps: int, total number of matched <step>...</step> pairs
                   (regardless of content validity). Used as normalization denominator.
         """
-        # Collect all <step> and </step> occurrences with their positions
-        events = []
-        for m in re.finditer(r'<step>', response_str):
-            events.append((m.start(), 'open', m.end()))  # open_pos, type, close_tag_start_pos
-        for m in re.finditer(r'</step>', response_str):
-            events.append((m.start(), 'close', m.end()))  # start of </step>, type, position after >
-
-        events.sort(key=lambda x: x[0])
-
         valid_end_positions = []
-        total_steps = 0
-        stack = []  # stack of (open_char_pos)
+        matches = list(re.finditer(r'<step>.*?</step>', response_str, re.DOTALL))
+        for match in matches:
+            step_text = match.group(0)
+            if self._is_valid_step_content(step_text):
+                # The '>' of '</step>' is at match.end() - 1.
+                valid_end_positions.append(match.end() - 1)
 
-        for pos, etype, end_pos in events:
-            if etype == 'open':
-                stack.append(pos)
-            elif etype == 'close':
-                if stack:
-                    open_pos = stack.pop()
-                    total_steps += 1
-                    # Extract the content between <step> and </step>
-                    # end_pos is the character position right after '>', so
-                    # the content goes from open_pos to (pos) (start of '</step>')
-                    step_content = response_str[open_pos:pos]
-                    if self._is_valid_step_content(step_content):
-                        # The '>' of '</step>' is at end_pos - 1
-                        valid_end_positions.append(end_pos - 1)
-                # else: unmatched </step>, ignore
-
-        return valid_end_positions, total_steps
+        return valid_end_positions, len(matches)
 
     def _find_token_idx_for_char(self, char_pos: int,
                                   offsets) -> int:
@@ -184,18 +155,18 @@ class NaiveFormatRewardManager:
             offsets = encoded["offset_mapping"]  # list of (start_char, end_char)
 
             step_format_rewards = 0
-            norm_factor = 1.0 / max(total_step_blocks, self.target_format_steps) if total_step_blocks > 0 else 0.0
+            norm_factor = 1.0 / total_step_blocks if total_step_blocks > 0 else 0.0
             for char_pos in step_end_char_positions:
                 token_idx = self._find_token_idx_for_char(char_pos, offsets)
                 # Safety: clamp to valid response length
                 if 0 <= token_idx < valid_response_length:
-                    reward_tensor[i, token_idx] = norm_factor
+                    reward_tensor[i, token_idx] += norm_factor
                     step_format_rewards += norm_factor
 
             # ----------------------------------------------------------
             # 3. Place answer reward at the last valid response token
             # ----------------------------------------------------------
-            reward_tensor[i, valid_response_length - 1] = answer_reward
+            reward_tensor[i, valid_response_length - 1] += answer_reward
 
             # ----------------------------------------------------------
             # 4. Bookkeeping

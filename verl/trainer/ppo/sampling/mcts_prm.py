@@ -9,10 +9,8 @@ if TYPE_CHECKING:
 
 
 def format_step_reward(step_text: str) -> float:
-    """Returns 1.0 if step_text contains ≥1 <premise> and exactly 1 <conclusion>."""
-    premises = re.findall(r"<premise>.*?</premise>", step_text, re.DOTALL)
-    conclusions = re.findall(r"<conclusion>.*?</conclusion>", step_text, re.DOTALL)
-    return 1.0 if (len(premises) >= 1 and len(conclusions) == 1) else 0.0
+    """Returns 1.0 if step_text is one strictly formatted step."""
+    return 1.0 if strict_step_xml_correct(step_text) else 0.0
 
 
 def strict_step_xml_correct(step_text: str) -> bool:

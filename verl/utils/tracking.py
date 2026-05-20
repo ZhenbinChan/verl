@@ -129,10 +129,12 @@ class Tracking:
     #         self.wandb_run.log({f"{table_name}": table})
     def wandb_log(self, data, step, commit=False):
         """Log data to wandb"""
-        self.logger["wandb"].log(data=data ,step=step, commit=commit)
+        if "wandb" in self.logger:
+            self.logger["wandb"].log(data=data ,step=step, commit=commit)
     def wandb_finish(self, exit_code=0):
         """Finish wandb run"""
-        self.logger["wandb"].finish(exit_code=exit_code)
+        if "wandb" in self.logger:
+            self.logger["wandb"].finish(exit_code=exit_code)
 
     def __del__(self):
         if "wandb" in self.logger:

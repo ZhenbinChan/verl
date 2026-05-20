@@ -36,6 +36,7 @@ from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format, forma
 from verl.utils.process_reward import (
     StepRewardRequest,
     build_process_reward_runtime,
+    get_batch_question_text,
     require_batch_sample_id,
     resolve_process_reward_config,
 )
@@ -113,6 +114,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
         self.step_prm_fn = self.process_reward_runtime.step_prm_fn
         self._sample_ids_by_tree: Dict[int, str] = {}
+        self._question_texts_by_tree: Dict[int, str] = {}
 
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
@@ -132,14 +134,22 @@ class StepTreeRLStrategy(SamplingStrategy):
         self._node_counters[tree_idx] = idx
         return idx
 
-    def _prepare_sample_ids(self, gen_batch: DataProto) -> None:
+    def _prepare_fol_context(self, gen_batch: DataProto) -> None:
         self._sample_ids_by_tree = {}
+        self._question_texts_by_tree = {}
         for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
             self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
                 gen_batch.non_tensor_batch,
                 tree_idx,
                 context="FOL process reward",
             )
+            question_text = get_batch_question_text(gen_batch.non_tensor_batch, tree_idx)
+            if question_text is None:
+                root_ids = gen_batch.batch["input_ids"][tree_idx]
+                attention = gen_batch.batch["attention_mask"][tree_idx]
+                real_ids = root_ids[attention.bool()].tolist()
+                question_text = self.tokenizer.decode(real_ids, skip_special_tokens=True)
+            self._question_texts_by_tree[tree_idx] = question_text
 
     def _get_sample_id(self, tree_idx: int) -> str:
         if tree_idx not in self._sample_ids_by_tree:
@@ -155,6 +165,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                     step_text=step_text,
                     tree_idx=tree_idx,
                     sample_id=self._sample_ids_by_tree.get(tree_idx),
+                    question_text=self._question_texts_by_tree.get(tree_idx),
                 )
             ]
         )
@@ -186,6 +197,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 tree_idx=node.tree_idx,
                 node_idx=node.node_idx,
                 sample_id=self._sample_ids_by_tree.get(node.tree_idx),
+                question_text=self._question_texts_by_tree.get(node.tree_idx),
             )
             for node in nodes
         ]
@@ -214,7 +226,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             self._metrics = StepTreeRLMetrics()
             self._timing = {}
             if self.process_reward_type == "fol":
-                self._prepare_sample_ids(gen_batch)
+                self._prepare_fol_context(gen_batch)
 
             batch_size = gen_batch.batch["input_ids"].size(0)
 

@@ -34,6 +34,7 @@ import string
 import subprocess
 import sys
 import time
+import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
@@ -77,6 +78,8 @@ class FOLMetadata:
     """预计算的 FOL 元数据"""
     sample_id: str
     rephrased_context: str
+    question_text: str = ""
+    prm_mode: str = ""
     entities: Dict[str, List[str]] = field(default_factory=dict)
     predicates: Dict[str, List[str]] = field(default_factory=dict)
     z3_declaration_code: str = ""
@@ -105,6 +108,8 @@ class FOLMetadata:
         return {
             "sample_id": self.sample_id,
             "rephrased_context": self.rephrased_context,
+            "question_text": self.question_text,
+            "prm_mode": self.prm_mode,
             "entities": self._normalize_json_value(self.entities),
             "predicates": self._normalize_json_value(self.predicates),
             "z3_declaration_code": self.z3_declaration_code,
@@ -117,6 +122,8 @@ class FOLMetadata:
         return cls(
             sample_id=d.get("sample_id", ""),
             rephrased_context=d.get("rephrased_context", ""),
+            question_text=d.get("question_text", d.get("raw_prompt", "")),
+            prm_mode=d.get("prm_mode", d.get("pipeline", "")),
             entities=cls._normalize_json_value(d.get("entities", {})),
             predicates=cls._normalize_json_value(d.get("predicates", {})),
             z3_declaration_code=d.get("z3_declaration_code", ""),
@@ -138,10 +145,22 @@ class LLMClient:
         api_key: str = "EMPTY",
         model: str = "qwen2.5-3b",
         default_args: Optional[Dict] = None,
+        provider: str = "openai_compatible",
+        azure_endpoint: Optional[str] = None,
+        api_version: Optional[str] = None,
+        deployment_name: Optional[str] = None,
+        request_timeout: Optional[float] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ):
+        self.provider = str(provider or "openai_compatible").lower()
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.azure_endpoint = azure_endpoint
+        self.api_version = api_version
+        self.deployment_name = deployment_name
+        self.request_timeout = request_timeout
+        self.extra_body = extra_body or {}
         self.default_args = default_args or {
             "max_tokens": 4096,
             "temperature": 0.1,
@@ -153,35 +172,63 @@ class LLMClient:
     def client(self):
         if self._client is None:
             import httpx
-            from openai import OpenAI
-            client_kwargs = {
-                "base_url": self.base_url,
-                "api_key": self.api_key,
-            }
-            if self._should_bypass_env_proxy():
-                client_kwargs["http_client"] = httpx.Client(trust_env=False)
-            self._client = OpenAI(**client_kwargs)
+            if self.provider == "azure_openai":
+                from openai import AzureOpenAI
+
+                client_kwargs = {
+                    "azure_endpoint": self.azure_endpoint,
+                    "api_key": self.api_key,
+                    "api_version": self.api_version,
+                }
+                if self.request_timeout is not None:
+                    client_kwargs["timeout"] = self.request_timeout
+                self._client = AzureOpenAI(**client_kwargs)
+            else:
+                from openai import OpenAI
+
+                client_kwargs = {
+                    "base_url": self.base_url,
+                    "api_key": self.api_key,
+                }
+                if self.request_timeout is not None:
+                    client_kwargs["timeout"] = self.request_timeout
+                if self._should_bypass_env_proxy():
+                    client_kwargs["http_client"] = httpx.Client(trust_env=False)
+                self._client = OpenAI(**client_kwargs)
         return self._client
 
     def _should_bypass_env_proxy(self) -> bool:
         hostname = urlparse(self.base_url).hostname
         return hostname in {"localhost", "127.0.0.1", "::1"}
 
+    def _resolve_model(self, model: Optional[str] = None) -> str:
+        if self.provider == "azure_openai":
+            return model or self.deployment_name or self.model
+        return model or self.model
+
     def generate(
         self,
         prompt: str,
         model: Optional[str] = None,
         args: Optional[Dict] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         """生成文本"""
-        model = model or self.model
+        model = self._resolve_model(model)
         merged_args = {**self.default_args, **(args or {})}
-
-        chat_response = self.client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        create_kwargs = {
+            "model": model,
+            "messages": messages,
             **merged_args,
-        )
+        }
+        if self.extra_body:
+            create_kwargs["extra_body"] = self.extra_body
+
+        chat_response = self.client.chat.completions.create(**create_kwargs)
         return chat_response.choices[0].message.content
 
     def constrain_generate(
@@ -192,7 +239,7 @@ class LLMClient:
         args: Optional[Dict] = None,
     ) -> BaseModel:
         """约束生成，返回结构化输出"""
-        model = model or self.model
+        model = self._resolve_model(model)
         merged_args = {**self.default_args, **(args or {})}
 
         chat_response = self.client.beta.chat.completions.parse(
@@ -245,6 +292,8 @@ class FOLVerifier:
             "predicate_extract_strict": "predicate_extraction_structured.txt",
             "translate_step": "translate_step.txt",
             "correct_code": "correct_code.txt",
+            "z3_declaration_global": "Z3DeclarationsGeneration1.txt",
+            "z3_implication_global": "Z3ImplicationConversion1.txt",
         }
 
         for name, filename in prompt_files.items():
@@ -770,6 +819,201 @@ class FOLVerifier:
         py_pattern = r"```python\s+(.*?)```"
         matches = re.findall(py_pattern, code, re.DOTALL)
         return matches[-1].strip() if matches else code.strip()
+
+    def generate_global_declaration(
+        self,
+        question_text: str,
+        args: Optional[Dict] = None,
+        debug_record: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Generate a global FOL PRM Z3 declaration from the full question text."""
+        if self.llm_client is None:
+            raise RuntimeError("LLM client required for global FOL declaration generation")
+        system_prompt = self._get_prompt("z3_declaration_global")
+        result = self.llm_client.generate(question_text, system_prompt=system_prompt, args=args)
+        extracted = self._extract_python_block(result)
+        self.validate_z3_declaration_code(extracted)
+        if debug_record is not None:
+            debug_record["declaration_prompt"] = question_text
+            debug_record["declaration_raw_response"] = result
+            debug_record["z3_declaration_code"] = extracted
+        return extracted
+
+    @staticmethod
+    def validate_z3_declaration_code(code: str) -> None:
+        """Validate that declaration code is executable and contains no solver calls."""
+        forbidden_patterns = [
+            r"\bsolver\s*\.add\s*\(",
+            r"\bs\s*\.add\s*\(",
+            r"\.check\s*\(",
+            r"\bSolver\s*\(",
+        ]
+        for pattern in forbidden_patterns:
+            if re.search(pattern, code):
+                raise ValueError(f"Declaration code contains forbidden solver logic: {pattern}")
+        namespace: Dict[str, Any] = {}
+        exec("from z3 import *\n" + code, namespace, namespace)
+
+    def _translate_global_reasoning_to_z3(
+        self,
+        question_text: str,
+        declaration_code: str,
+        reasoning_steps: str,
+        args: Optional[Dict] = None,
+        debug_record: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if self.llm_client is None:
+            raise RuntimeError("LLM client required for global FOL implication conversion")
+        system_prompt = self._get_prompt("z3_implication_global")
+        full_input = (
+            f"Question:\n{question_text}\n\n"
+            f"Z3 Declaration:\n{declaration_code}\n\n"
+            f"Reasoning steps:\n{reasoning_steps}"
+        )
+        result = self.llm_client.generate(full_input, system_prompt=system_prompt, args=args)
+        extracted = self._extract_python_block(result)
+        if debug_record is not None:
+            debug_record["implication_prompt"] = full_input
+            debug_record["implication_raw_response"] = result
+            debug_record["implication_code"] = extracted
+        return extracted
+
+    @staticmethod
+    def parse_global_logic_steps(code_str: str) -> List[Dict[str, Any]]:
+        """Parse premises_i/conclusion_i assignments from generated Python code."""
+        tree = ast.parse(code_str)
+        raw_data: Dict[int, Dict[str, List[str]]] = {}
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                name = target.id
+                if not name.startswith(("premises_", "conclusion_")):
+                    continue
+                try:
+                    ptype, idx_text = name.rsplit("_", 1)
+                    idx = int(idx_text)
+                except ValueError:
+                    continue
+                raw_data.setdefault(idx, {"premises": [], "conclusion": []})
+                if ptype == "premises" and isinstance(node.value, ast.List):
+                    raw_data[idx]["premises"] = [ast.unparse(e) for e in node.value.elts]
+                else:
+                    key = "premises" if ptype == "premises" else "conclusion"
+                    raw_data[idx][key] = [ast.unparse(node.value)]
+
+        for idx in sorted(raw_data.keys()):
+            new_premises = []
+            for premise in raw_data[idx]["premises"]:
+                p_strip = premise.strip()
+                if p_strip.startswith("conclusion_"):
+                    try:
+                        ref_idx = int(p_strip.rsplit("_", 1)[-1])
+                        new_premises.append(raw_data[ref_idx]["conclusion"][0])
+                        continue
+                    except Exception:
+                        pass
+                new_premises.append(premise)
+            raw_data[idx]["premises"] = new_premises
+
+        return [
+            {
+                "step_index": idx,
+                "premises": raw_data[idx]["premises"],
+                "conclusion": raw_data[idx]["conclusion"],
+            }
+            for idx in sorted(raw_data.keys())
+            if raw_data[idx]["conclusion"]
+        ]
+
+    def run_global_logic_step(
+        self,
+        declaration_code: str,
+        parsed_step: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        premises = parsed_step.get("premises") or []
+        conclusion = (parsed_step.get("conclusion") or [""])[0]
+        premises_str = ", ".join(premises) if premises else "True"
+        z3_code = f"""
+from z3 import *
+{declaration_code}
+solver = Solver()
+solver.add(And({premises_str}))
+solver.add(Not({conclusion}))
+
+check_res = solver.check()
+if check_res == unsat:
+    print("SUCCESS_ENTAILED")
+elif check_res == sat:
+    print("FAILED_CONTRADICT")
+else:
+    print("UNKNOWN")
+""".strip()
+        result = self.run_code(z3_code, timeout=timeout)
+        result["code"] = z3_code
+        return result
+
+    def verify_global_step(
+        self,
+        metadata: FOLMetadata,
+        reasoning_steps: str,
+        question_text: Optional[str] = None,
+        args: Optional[Dict] = None,
+        debug_dump: bool = False,
+    ) -> float:
+        """Verify the final step in a full reasoning prefix for global_fol_prm."""
+        if not reasoning_steps or "<step" not in reasoning_steps:
+            return 0.0
+        declaration_code = metadata.z3_declaration_code
+        question = question_text or metadata.question_text
+        if not declaration_code:
+            if not question:
+                return 0.0
+            declaration_code = self.generate_global_declaration(question, args=args)
+            metadata.z3_declaration_code = declaration_code
+        if not question:
+            question = metadata.rephrased_context
+        if not question:
+            return 0.0
+
+        debug_record: Dict[str, Any] = {
+            "prm_mode": "global_fol_prm",
+            "reasoning_steps": reasoning_steps,
+            "question_text": question,
+            "llm_args": dict(args or {}),
+        }
+        try:
+            implication_code = self._translate_global_reasoning_to_z3(
+                question_text=question,
+                declaration_code=declaration_code,
+                reasoning_steps=reasoning_steps,
+                args=args,
+                debug_record=debug_record,
+            )
+            parsed_steps = self.parse_global_logic_steps(implication_code)
+            debug_record["parsed_steps"] = parsed_steps
+            if not parsed_steps:
+                debug_record["final_score"] = 0.0
+                if debug_dump:
+                    self._dump_debug_artifacts(metadata=metadata, step_text=reasoning_steps, payload=debug_record)
+                return 0.0
+            result = self.run_global_logic_step(declaration_code, parsed_steps[-1])
+            debug_record["run_result"] = result
+            output = result.get("output") or ""
+            final_score = 1.0 if result.get("success") and "SUCCESS_ENTAILED" in output else 0.0
+            debug_record["final_score"] = final_score
+            if debug_dump:
+                self._dump_debug_artifacts(metadata=metadata, step_text=reasoning_steps, payload=debug_record)
+            return final_score
+        except Exception:
+            if debug_dump:
+                debug_record["exception"] = repr(sys.exc_info()[1])
+                self._dump_debug_artifacts(metadata=metadata, step_text=reasoning_steps, payload=debug_record)
+            raise
 
     # =========================================================================
     # 纯计算函数

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from omegaconf import OmegaConf, open_dict
@@ -14,17 +15,27 @@ from verl.utils.fol_verifier import FOLVerifier, LLMClient, load_fol_metadata
 PROCESS_REWARD_DEFAULTS: Dict[str, Any] = {
     "type": "none",
     "fol": {
+        "prm_mode": "global_fol_prm",
         "metadata_path": None,
+        "online_declaration_fallback": True,
+        "fail_on_missing_metadata": False,
         "verify_timeout": 10.0,
         "max_retries": 3,
         "debug_dir": None,
         "llm": {
+            "provider": "openai_compatible",
             "api_base_url": "http://localhost:4869/v1",
             "api_key": "EMPTY",
             "model_name": None,
+            "azure_endpoint": None,
+            "api_version": None,
+            "deployment_name": None,
             "max_tokens": 4096,
             "temperature": 0.1,
             "top_p": 0.8,
+            "max_concurrency": 8,
+            "request_timeout": 60,
+            "extra_body": {},
         },
     },
 }
@@ -57,18 +68,139 @@ class ProcessRewardRuntime:
     llm_client: Optional[LLMClient] = None
     fol_verifier: Optional[FOLVerifier] = None
     fol_metadata_map: Dict[str, Any] = field(default_factory=dict)
+    fol_prm_mode: str = "format"
+    fol_online_declaration_fallback: bool = True
+    fol_fail_on_missing_metadata: bool = False
+    llm_default_args: Dict[str, Any] = field(default_factory=dict)
+    max_concurrency: int = 8
+    _score_cache: Dict[tuple, float] = field(default_factory=dict)
+    _metadata_cache: Dict[str, Any] = field(default_factory=dict)
 
     def score_steps(self, requests: list[StepRewardRequest]) -> list[float]:
         if self.reward_type == "format":
             return [float(self.step_prm_fn(req.step_text)) for req in requests]
         if self.reward_type == "fol":
-            scores = []
-            for req in requests:
-                if req.sample_id is None:
-                    raise ValueError("FOL process reward requires sample_id for batch step scoring.")
-                scores.append(float(self.step_prm_fn(req.step_text, sample_id=req.sample_id)))
-            return scores
+            return self._score_fol_steps(requests)
         raise ValueError(f"Process reward type {self.reward_type!r} does not support step scoring.")
+
+    def _get_or_create_metadata(self, req: StepRewardRequest):
+        if req.sample_id is None:
+            raise ValueError("FOL process reward requires sample_id for batch step scoring.")
+        sample_id = str(req.sample_id)
+        metadata = self.fol_metadata_map.get(sample_id) or self._metadata_cache.get(sample_id)
+        if metadata is not None:
+            if req.question_text and not getattr(metadata, "question_text", ""):
+                metadata.question_text = req.question_text
+            return metadata
+
+        if not self.fol_online_declaration_fallback:
+            if self.fol_fail_on_missing_metadata:
+                raise KeyError(f"Missing FOL metadata for sample_id={sample_id!r}.")
+            return None
+        if not req.question_text:
+            if self.fol_fail_on_missing_metadata:
+                raise KeyError(
+                    f"Missing FOL metadata and question_text for sample_id={sample_id!r}."
+                )
+            return None
+
+        from verl.utils.fol_verifier import FOLMetadata
+
+        metadata = FOLMetadata(
+            sample_id=sample_id,
+            rephrased_context="",
+            question_text=req.question_text,
+            prm_mode=self.fol_prm_mode,
+            z3_declaration_code="",
+        )
+        self._metadata_cache[sample_id] = metadata
+        return metadata
+
+    def _score_one_fol(self, req: StepRewardRequest) -> float:
+        metadata = self._get_or_create_metadata(req)
+        if metadata is None:
+            return 0.0
+        if self.fol_prm_mode == "global_fol_prm":
+            text = req.accumulated_text or req.step_text
+            cache_key = (self.fol_prm_mode, req.sample_id, text)
+            if cache_key in self._score_cache:
+                return self._score_cache[cache_key]
+            score = float(
+                self.fol_verifier.verify_global_step(
+                    metadata,
+                    text,
+                    question_text=req.question_text,
+                    args=self.llm_default_args,
+                )
+            )
+            self._score_cache[cache_key] = score
+            return score
+        if self.fol_prm_mode == "local_fol_prm":
+            cache_key = (self.fol_prm_mode, req.sample_id, req.step_text)
+            if cache_key in self._score_cache:
+                return self._score_cache[cache_key]
+            if not getattr(metadata, "z3_declaration_code", "") and req.question_text:
+                metadata.z3_declaration_code = self.fol_verifier.generate_global_declaration(
+                    req.question_text,
+                    args=self.llm_default_args,
+                )
+            score = float(
+                self.fol_verifier.verify_step(
+                    metadata,
+                    req.step_text,
+                    use_llm=True,
+                    args=self.llm_default_args,
+                )
+            )
+            self._score_cache[cache_key] = score
+            return score
+        raise ValueError(
+            "trainer.process_reward.fol.prm_mode must be "
+            "'global_fol_prm' or 'local_fol_prm', "
+            f"but got {self.fol_prm_mode!r}."
+        )
+
+    def _score_fol_steps(self, requests: list[StepRewardRequest]) -> list[float]:
+        if not requests:
+            return []
+        key_to_req: Dict[tuple, StepRewardRequest] = {}
+        request_keys = []
+        for req in requests:
+            if req.sample_id is None:
+                raise ValueError("FOL process reward requires sample_id for batch step scoring.")
+            text_key = req.accumulated_text if self.fol_prm_mode == "global_fol_prm" else req.step_text
+            key = (self.fol_prm_mode, str(req.sample_id), text_key)
+            request_keys.append(key)
+            if key not in key_to_req:
+                key_to_req[key] = req
+
+        scores_by_key: Dict[tuple, float] = {}
+        pending = []
+        for key, req in key_to_req.items():
+            if key in self._score_cache:
+                scores_by_key[key] = self._score_cache[key]
+            else:
+                pending.append((key, req))
+
+        if pending:
+            workers = max(1, min(int(self.max_concurrency or 1), len(pending)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_key = {
+                    executor.submit(self._score_one_fol, req): key
+                    for key, req in pending
+                }
+                for future in as_completed(future_to_key):
+                    key = future_to_key[future]
+                    try:
+                        score = float(future.result())
+                    except Exception:
+                        if self.fol_fail_on_missing_metadata:
+                            raise
+                        score = 0.0
+                    self._score_cache[key] = score
+                    scores_by_key[key] = score
+
+        return [float(scores_by_key.get(key, 0.0)) for key in request_keys]
 
 
 def _normalize_reward_type(value: Any) -> str:
@@ -123,26 +255,38 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
         return ProcessRewardRuntime(reward_type=reward_type, step_prm_fn=format_step_reward)
 
     fol_cfg = process_reward_cfg.get("fol", {}) or {}
-    metadata_path = fol_cfg.get("metadata_path", None)
-    if not metadata_path:
+    prm_mode = str(fol_cfg.get("prm_mode", "global_fol_prm") or "global_fol_prm").lower()
+    if prm_mode not in {"global_fol_prm", "local_fol_prm"}:
         raise ValueError(
-            "trainer.process_reward.type='fol' requires trainer.process_reward.fol.metadata_path."
+            "trainer.process_reward.fol.prm_mode must be "
+            "'global_fol_prm' or 'local_fol_prm'."
         )
-    if not os.path.exists(metadata_path):
-        raise FileNotFoundError(
-            f"FOL metadata path not found: {metadata_path}"
-        )
+    online_declaration_fallback = bool(fol_cfg.get("online_declaration_fallback", True))
+    fail_on_missing_metadata = bool(fol_cfg.get("fail_on_missing_metadata", False))
+
+    metadata_path = fol_cfg.get("metadata_path", None)
+    if metadata_path and not os.path.exists(metadata_path):
+        if not online_declaration_fallback or fail_on_missing_metadata:
+            raise FileNotFoundError(
+                f"FOL metadata path not found: {metadata_path}"
+            )
 
     llm_cfg = fol_cfg.get("llm", {}) or {}
-    api_base_url = llm_cfg.get("api_base_url", None)
-    model_name = llm_cfg.get("model_name", None)
-    if not api_base_url:
+    provider = str(llm_cfg.get("provider", "openai_compatible") or "openai_compatible").lower()
+    api_base_url = llm_cfg.get("api_base_url", llm_cfg.get("base_url", None))
+    model_name = llm_cfg.get("model_name", llm_cfg.get("model", None))
+    deployment_name = llm_cfg.get("deployment_name", None)
+    if provider != "azure_openai" and not api_base_url:
         raise ValueError(
             "trainer.process_reward.type='fol' requires trainer.process_reward.fol.llm.api_base_url."
         )
-    if not model_name:
+    if provider == "azure_openai" and not llm_cfg.get("azure_endpoint", None):
         raise ValueError(
-            "trainer.process_reward.type='fol' requires trainer.process_reward.fol.llm.model_name."
+            "trainer.process_reward.type='fol' with Azure requires trainer.process_reward.fol.llm.azure_endpoint."
+        )
+    if not model_name and not deployment_name:
+        raise ValueError(
+            "trainer.process_reward.type='fol' requires trainer.process_reward.fol.llm.model_name or deployment_name."
         )
 
     default_args = {
@@ -153,8 +297,14 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
     llm_client = LLMClient(
         base_url=api_base_url,
         api_key=llm_cfg.get("api_key") or "EMPTY",
-        model=model_name,
+        model=model_name or deployment_name,
         default_args=default_args,
+        provider=provider,
+        azure_endpoint=llm_cfg.get("azure_endpoint", None),
+        api_version=llm_cfg.get("api_version", None),
+        deployment_name=deployment_name,
+        request_timeout=llm_cfg.get("request_timeout", None),
+        extra_body=llm_cfg.get("extra_body", None),
     )
     fol_verifier = FOLVerifier(
         llm_client=llm_client,
@@ -162,8 +312,8 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
         max_retries=int(fol_cfg.get("max_retries", 3)),
         debug_dir=fol_cfg.get("debug_dir", None),
     )
-    fol_metadata_map = load_fol_metadata(metadata_path)
-    if not fol_metadata_map:
+    fol_metadata_map = load_fol_metadata(metadata_path) if metadata_path else {}
+    if not fol_metadata_map and not online_declaration_fallback:
         raise ValueError(
             f"No FOL metadata entries loaded from {metadata_path}."
         )
@@ -179,6 +329,11 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
         llm_client=llm_client,
         fol_verifier=fol_verifier,
         fol_metadata_map=fol_metadata_map,
+        fol_prm_mode=prm_mode,
+        fol_online_declaration_fallback=online_declaration_fallback,
+        fol_fail_on_missing_metadata=fail_on_missing_metadata,
+        llm_default_args=default_args,
+        max_concurrency=int(llm_cfg.get("max_concurrency", 8)),
     )
 
 
@@ -215,16 +370,121 @@ def get_batch_sample_id(non_tensor_batch: Optional[Mapping[str, Any]], index: in
             if index < len(extra_info):
                 info = extra_info[index]
                 if isinstance(info, Mapping):
-                    for key in ("sample_id", "index", "id"):
+                    for key in ("sample_id", "id"):
                         value = info.get(key, None)
                         if value is not None:
                             return str(value)
+                    value = info.get("index", None)
+                    if value is not None:
+                        data_source = _get_indexed_value(non_tensor_batch.get("data_source", None), index)
+                        if data_source is not None:
+                            return f"{data_source}_{value}"
+                        return str(value)
         except TypeError:
             if isinstance(extra_info, Mapping):
-                for key in ("sample_id", "index", "id"):
+                for key in ("sample_id", "id"):
                     value = extra_info.get(key, None)
                     if value is not None:
                         return str(value)
+                value = extra_info.get("index", None)
+                if value is not None:
+                    data_source = _get_indexed_value(non_tensor_batch.get("data_source", None), index)
+                    if data_source is not None:
+                        return f"{data_source}_{value}"
+                    return str(value)
+
+    index_values = non_tensor_batch.get("index", None)
+    sample_index = _get_indexed_value(index_values, index)
+    if sample_index is not None:
+        data_source = _get_indexed_value(non_tensor_batch.get("data_source", None), index)
+        if data_source is not None:
+            return f"{data_source}_{sample_index}"
+        return str(sample_index)
+
+    return None
+
+
+def _get_indexed_value(container: Any, index: int) -> Any:
+    if container is None:
+        return None
+    try:
+        if isinstance(container, (list, tuple)) and index < len(container):
+            return container[index]
+        if hasattr(container, "__len__") and not isinstance(container, (str, bytes, Mapping)):
+            if index < len(container):
+                return container[index]
+    except TypeError:
+        pass
+    if index == 0:
+        return container
+    return None
+
+
+def _extract_prompt_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if isinstance(value, Mapping):
+        content = value.get("content", None)
+        return str(content) if content is not None and str(content).strip() else None
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            text = _extract_prompt_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts) if parts else None
+    try:
+        if hasattr(value, "tolist"):
+            return _extract_prompt_text(value.tolist())
+    except Exception:
+        pass
+    text = str(value)
+    return text if text.strip() else None
+
+
+def _build_question_from_extra_info(info: Mapping[str, Any]) -> Optional[str]:
+    for key in ("question", "raw_prompt", "prompt"):
+        text = _extract_prompt_text(info.get(key, None))
+        if text and "<Context>" in text:
+            return text
+    context = info.get("context", "")
+    query = info.get("query", "")
+    options = info.get("options", "")
+    if context or query or options:
+        return f"<Context>{context}</Context><Question>{query}</Question><Options>{options}</Options>"
+    for key in ("question", "raw_prompt", "prompt"):
+        text = _extract_prompt_text(info.get(key, None))
+        if text:
+            return text
+    return None
+
+
+def get_batch_question_text(non_tensor_batch: Optional[Mapping[str, Any]], index: int) -> Optional[str]:
+    if not non_tensor_batch:
+        return None
+
+    for key in ("raw_prompt", "question_text"):
+        text = _extract_prompt_text(_get_indexed_value(non_tensor_batch.get(key, None), index))
+        if text:
+            return text
+
+    prompt_value = _get_indexed_value(non_tensor_batch.get("prompt", None), index)
+    text = _extract_prompt_text(prompt_value)
+    if text:
+        return text
+
+    extra_info = non_tensor_batch.get("extra_info", None)
+    info = _get_indexed_value(extra_info, index)
+    if isinstance(info, Mapping):
+        text = _build_question_from_extra_info(info)
+        if text:
+            return text
+    elif isinstance(extra_info, Mapping):
+        text = _build_question_from_extra_info(extra_info)
+        if text:
+            return text
 
     return None
 

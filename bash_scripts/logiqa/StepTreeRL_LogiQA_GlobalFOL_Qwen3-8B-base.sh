@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT=${PROJECT_ROOT:-/home/chenzhb/Workspaces/verl}
+MODEL_PATH=${MODEL_PATH:-/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base}
+DATA_DIR=${DATA_DIR:-${PROJECT_ROOT}/data/logiqa_global_fol_prm}
+TRAIN_FILE=${TRAIN_FILE:-${DATA_DIR}/train.parquet}
+VAL_FILE=${VAL_FILE:-${PROJECT_ROOT}/data/logiqa/test.parquet}
+FOL_METADATA_PATH=${FOL_METADATA_PATH:-${DATA_DIR}/fol_metadata.json}
+
+N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-2}
+M=${M:-6}
+N=${N:-2}
+L=${L:-1}
+T=${T:-2}
+NUM_TRACES=${NUM_TRACES:-16}
+TRAIN_BSZ=${TRAIN_BSZ:-2}
+MINI_BSZ=${MINI_BSZ:-1}
+LR=${LR:-1e-6}
+SAVE_FREQ=${SAVE_FREQ:-20}
+TEST_FREQ=${TEST_FREQ:--1}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+LOGGER=${LOGGER:-"['console','wandb']"}
+
+FOL_PROVIDER=${FOL_PROVIDER:-minimax}
+FOL_BASE_URL=${FOL_BASE_URL:-https://api.minimaxi.com/v1}
+FOL_API_KEY_CONF=${FOL_API_KEY_CONF:-'${oc.env:MINIMAX_API_KEY}'}
+FOL_MODEL=${FOL_MODEL:-MiniMax-M2.7}
+FOL_AZURE_ENDPOINT=${FOL_AZURE_ENDPOINT:-null}
+FOL_API_VERSION=${FOL_API_VERSION:-null}
+FOL_DEPLOYMENT_NAME=${FOL_DEPLOYMENT_NAME:-null}
+FOL_MAX_CONCURRENCY=${FOL_MAX_CONCURRENCY:-8}
+
+cd "${PROJECT_ROOT}"
+
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=step_treerl_reinforce \
+  algorithm.use_kl_in_reward=False \
+  data.train_files="${TRAIN_FILE}" \
+  data.val_files="${VAL_FILE}" \
+  data.train_batch_size="${TRAIN_BSZ}" \
+  data.max_prompt_length=1024 \
+  data.max_response_length=4096 \
+  data.filter_overlong_prompts=True \
+  data.truncation=error \
+  data.prompt_path="${PROJECT_ROOT}/prompts/premise_conclusion.txt" \
+  actor_rollout_ref.model.path="${MODEL_PATH}" \
+  actor_rollout_ref.actor.optim.lr="${LR}" \
+  actor_rollout_ref.actor.policy_loss=tree_loss \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size="${TRAIN_BSZ}" \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MINI_BSZ}" \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff=0 \
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${MINI_BSZ}" \
+  actor_rollout_ref.rollout.tensor_model_parallel_size="${N_GPUS_PER_NODE}" \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+  actor_rollout_ref.rollout.max_model_len=8192 \
+  actor_rollout_ref.rollout.n="${M}" \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MINI_BSZ}" \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  reward_model.enable=false \
+  reward_model.reward_manager=auto \
+  trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
+  trainer.sampling_strategy=step_treerl \
+  trainer.process_reward.type=fol \
+  trainer.process_reward.fol.prm_mode=global_fol_prm \
+  trainer.process_reward.fol.metadata_path="${FOL_METADATA_PATH}" \
+  trainer.process_reward.fol.online_declaration_fallback=true \
+  trainer.process_reward.fol.fail_on_missing_metadata=false \
+  trainer.process_reward.fol.llm.provider="${FOL_PROVIDER}" \
+  trainer.process_reward.fol.llm.api_base_url="${FOL_BASE_URL}" \
+  trainer.process_reward.fol.llm.api_key="${FOL_API_KEY_CONF}" \
+  trainer.process_reward.fol.llm.model_name="${FOL_MODEL}" \
+  trainer.process_reward.fol.llm.azure_endpoint="${FOL_AZURE_ENDPOINT}" \
+  trainer.process_reward.fol.llm.api_version="${FOL_API_VERSION}" \
+  trainer.process_reward.fol.llm.deployment_name="${FOL_DEPLOYMENT_NAME}" \
+  trainer.process_reward.fol.llm.max_concurrency="${FOL_MAX_CONCURRENCY}" \
+  trainer.step_treerl_config.max_depth=20 \
+  trainer.step_treerl_config.max_token_num=4096 \
+  trainer.step_treerl_config.m="${M}" \
+  trainer.step_treerl_config.n="${N}" \
+  trainer.step_treerl_config.l="${L}" \
+  trainer.step_treerl_config.t="${T}" \
+  trainer.step_treerl_config.selected_num_traces="${NUM_TRACES}" \
+  trainer.step_treerl_config.path_selection=selected_terminals \
+  trainer.step_treerl_config.use_weighted_value=true \
+  trainer.step_treerl_config.weighted_value_style=sqrt \
+  trainer.step_treerl_config.overall_norm_style=none \
+  trainer.critic_warmup=0 \
+  trainer.logger="${LOGGER}" \
+  trainer.project_name=verl \
+  trainer.experiment_name=StepTreeRL_LogiQA_GlobalFOL_Qwen3-8B-base \
+  trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
+  trainer.nnodes=1 \
+  trainer.save_freq="${SAVE_FREQ}" \
+  trainer.test_freq="${TEST_FREQ}" \
+  trainer.total_epochs="${TOTAL_EPOCHS}" "$@"

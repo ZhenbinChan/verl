@@ -29,6 +29,7 @@ from verl.trainer.ppo.sampling.mcts_node import MCTSNode
 from verl.trainer.ppo.sampling.mcts_prm import (
     boxed_answer_format_correct,
     classify_trajectory_format,
+    format_step_reward,
     strict_step_xml_correct,
 )
 from verl.trainer.ppo.sampling.step_treerl import StepTreeRLStrategy
@@ -466,6 +467,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertFalse(strict_step_xml_correct("<step><premise>a</premise><conclusion>b</conclusion><conclusion>c</conclusion></step>"))
         self.assertFalse(strict_step_xml_correct("<step>extra<premise>a</premise><conclusion>b</conclusion></step>"))
         self.assertFalse(strict_step_xml_correct("<step><premise>a</premise><foo>b</foo><conclusion>c</conclusion></step>"))
+        self.assertEqual(format_step_reward(good_step), 1.0)
+        self.assertEqual(format_step_reward("<step><premise>a</premise><conclusion>b</conclusion><conclusion>c</conclusion></step>"), 0.0)
+        self.assertEqual(format_step_reward("<step>extra<premise>a</premise><conclusion>b</conclusion></step>"), 0.0)
+        self.assertEqual(format_step_reward("<step><premise>a</premise><foo>b</foo><conclusion>c</conclusion></step>"), 0.0)
 
         self.assertTrue(boxed_answer_format_correct(r"\boxed{A}"))
         self.assertTrue(boxed_answer_format_correct(r"final \boxed{{B}}"))

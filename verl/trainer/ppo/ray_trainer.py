@@ -1251,6 +1251,10 @@ class RayPPOTrainer:
                 # For Tree Construction
                 if "answer" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("answer")
+                if self.config.trainer.get("process_reward", {}).get("type", "none") == "fol":
+                    for key in ("sample_id", "question_text", "extra_info", "data_source", "index"):
+                        if key in batch.non_tensor_batch and key not in non_tensor_batch_keys_to_pop:
+                            non_tensor_batch_keys_to_pop.append(key)
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,

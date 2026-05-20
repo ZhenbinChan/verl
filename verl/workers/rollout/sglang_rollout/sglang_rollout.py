@@ -321,14 +321,18 @@ class SGLangRollout(BaseRollout):
 
             # utilize current sampling params
             if self.sampling_params.get("n", 1) > 1 and do_sample:
+                original_batch_size = batch_size
                 idx = idx.repeat_interleave(self.sampling_params["n"], dim=0)
                 attention_mask = attention_mask.repeat_interleave(self.sampling_params["n"], dim=0)
                 position_ids = position_ids.repeat_interleave(self.sampling_params["n"], dim=0)
                 batch_size = batch_size * self.sampling_params["n"]
-                if "multi_modal_inputs" in non_tensor_batch.keys():
-                    non_tensor_batch["multi_modal_inputs"] = np.repeat(non_tensor_batch["multi_modal_inputs"], self.sampling_params["n"], axis=0)
-                if "tools_kwargs" in non_tensor_batch.keys():
-                    non_tensor_batch["tools_kwargs"] = np.repeat(non_tensor_batch["tools_kwargs"], self.sampling_params["n"], axis=0)
+                # 原先这里只手动复制 multi_modal_inputs、tools_kwargs 等少数 key。
+                # 现在改为复制所有第 0 维等于原始 batch size 的样本级 non-tensor metadata，
+                # 这样 FOL/StepTreeRL 需要的 sample_id、question_text、data_source 等字段
+                # 在 rollout.n > 1 时也能和 bs * n 条 response 正确对齐。
+                for key, value in list(non_tensor_batch.items()):
+                    if hasattr(value, "shape") and value.shape[0] == original_batch_size:
+                        non_tensor_batch[key] = np.repeat(value, self.sampling_params["n"], axis=0)
             seq = torch.cat([idx, response], dim=-1)
 
         response_length = response.size(1)

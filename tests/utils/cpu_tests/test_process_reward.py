@@ -30,7 +30,11 @@ from verl.utils.fol_verifier import (
     load_fol_metadata,
 )
 from verl.utils.process_reward import (
+    ProcessRewardRuntime,
+    StepRewardRequest,
     build_process_reward_runtime,
+    get_batch_sample_id,
+    get_batch_question_text,
     resolve_process_reward_config,
 )
 from verl.workers.reward_manager.step_tree import StepTreeRewardManager
@@ -83,7 +87,7 @@ class TestProcessRewardConfig(unittest.TestCase):
         self.assertEqual(process_reward_cfg.type, "format")
         self.assertEqual(config.reward_model.reward_manager, "step_tree")
 
-    def test_resolve_process_reward_config_rejects_none_for_prm_strategy(self):
+    def test_resolve_process_reward_config_defaults_step_treerl_none_to_format(self):
         config = OmegaConf.create(
             {
                 "trainer": {
@@ -96,8 +100,9 @@ class TestProcessRewardConfig(unittest.TestCase):
             }
         )
 
-        with self.assertRaises(ValueError):
-            resolve_process_reward_config(config)
+        process_reward_cfg = resolve_process_reward_config(config)
+
+        self.assertEqual(process_reward_cfg.type, "format")
 
     def test_build_process_reward_runtime_fol_requires_model_name(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -142,6 +147,32 @@ class TestFOLVerifierStrictMode(unittest.TestCase):
         verifier = FOLVerifier(llm_client=object())
         wrapped = verifier.wrap_z3_code("x = Bool('x')", "premise_fol = x\nconclusion_fol = x")
         self.assertIn("s.add(Not(conclusion_fol))", wrapped)
+
+    def test_global_logic_step_verifies_last_step_entailment(self):
+        verifier = FOLVerifier(llm_client=object())
+        code = """
+premises_1 = [x]
+conclusion_1 = x
+premises_2 = [conclusion_1]
+conclusion_2 = x
+"""
+        parsed = verifier.parse_global_logic_steps(code)
+        self.assertEqual(len(parsed), 2)
+        result = verifier.run_global_logic_step("x = Bool('x')", parsed[-1])
+        self.assertTrue(result["success"])
+        self.assertIn("SUCCESS_ENTAILED", result["output"])
+
+    def test_fol_metadata_preserves_global_prm_fields(self):
+        metadata = FOLMetadata(
+            sample_id="sample-0",
+            rephrased_context="",
+            question_text="<Context>ctx</Context>",
+            prm_mode="global_fol_prm",
+            z3_declaration_code="x = Bool('x')",
+        )
+        restored = FOLMetadata.from_dict(metadata.to_dict())
+        self.assertEqual(restored.question_text, "<Context>ctx</Context>")
+        self.assertEqual(restored.prm_mode, "global_fol_prm")
 
     def test_debug_dump_writes_json_and_python_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -441,6 +472,59 @@ class TestRewardManagerFallback(unittest.TestCase):
         )
 
         self.assertEqual(scores, [1.0])
+
+
+class TestProcessRewardBatchScoring(unittest.TestCase):
+    def test_global_fol_batch_scoring_deduplicates_and_preserves_order(self):
+        class FakeVerifier:
+            def __init__(self):
+                self.calls = []
+
+            def verify_global_step(self, metadata, reasoning_steps, question_text=None, args=None):
+                self.calls.append((metadata.sample_id, reasoning_steps, question_text))
+                return 1.0 if "good" in reasoning_steps else 0.0
+
+        verifier = FakeVerifier()
+        runtime = ProcessRewardRuntime(
+            reward_type="fol",
+            fol_verifier=verifier,
+            fol_metadata_map={
+                "s0": FOLMetadata(sample_id="s0", rephrased_context="", question_text="q0", z3_declaration_code="x = Bool('x')"),
+                "s1": FOLMetadata(sample_id="s1", rephrased_context="", question_text="q1", z3_declaration_code="x = Bool('x')"),
+            },
+            fol_prm_mode="global_fol_prm",
+            max_concurrency=2,
+        )
+        requests = [
+            StepRewardRequest(step_text="a", accumulated_text="good", sample_id="s0", question_text="q0"),
+            StepRewardRequest(step_text="b", accumulated_text="bad", sample_id="s1", question_text="q1"),
+            StepRewardRequest(step_text="a", accumulated_text="good", sample_id="s0", question_text="q0"),
+        ]
+
+        self.assertEqual(runtime.score_steps(requests), [1.0, 0.0, 1.0])
+        self.assertEqual(len(verifier.calls), 2)
+
+    def test_get_batch_question_text_from_extra_info(self):
+        batch = {
+            "extra_info": [
+                {
+                    "context": "ctx",
+                    "query": "q",
+                    "options": "(A) a",
+                }
+            ]
+        }
+        self.assertEqual(
+            get_batch_question_text(batch, 0),
+            "<Context>ctx</Context><Question>q</Question><Options>(A) a</Options>",
+        )
+
+    def test_get_batch_sample_id_prefixes_extra_info_index_with_data_source(self):
+        batch = {
+            "data_source": ["reclor"],
+            "extra_info": [{"index": 3}],
+        }
+        self.assertEqual(get_batch_sample_id(batch, 0), "reclor_3")
 
 
 if __name__ == "__main__":
