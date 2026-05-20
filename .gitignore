@@ -144,7 +144,6 @@ homogeneous_data/
 record/
 TreeRL/
 
-slurm/
 debug/
 *.pid
 *.log
