@@ -1,220 +1,212 @@
 # verl + Tree Search
-- 2025.06: 新增对于 batch 的可视化 (输入、输出、Reward Score)
-- 2025.08: 新增对于数据集 LogiQA 等的支持
-- 2025.08: 新增 Evaluation 方法
-- 2025.09: 新增对于 PRM 的支持
-- 2025.10: 新增 LLM-as-Judege 作为 Process Reward Model
-- 2024.02: 新增对于 Tree Search 的支持（复现 TreeRL，但是是 step-level）
-- 2024.04: 将 TreeRL 的官方代码整合到训练阶段；整合 FOL 翻译和验证的代码；
 
-## Table of Contents
+This repository is a verl fork focused on RL training for reasoning tasks, with extra support for tree-style rollout expansion, step-level process reward, FOL/Z3 verification, and logic QA datasets such as LogiQA and ReClor.
 
-- [Installation](#installation)
-- [Dataset Preparation](#dataset-preparation)
-- [Evaluation](#evaluation)
-- [LLM-as-Judge & PRM](#LLM-as-Judge-&-PRM)
-- [Tree Sampling for RL Training](#Tree-Sampling-for-RL-Training)
+## What Is Added
 
-# Installation
+- Pluggable rollout expansion strategies under `trainer.sampling_strategy`: plain rollout, legacy tree search, entropy-chain TreeRL, parallel MCTS, Step-TreeRL, and information-gain expansion.
+- Step-level process reward through `trainer.process_reward.type=format|fol`, shared by Step-TreeRL, parallel MCTS, and information-gain sampling.
+- FOL-as-PRM utilities for translating/verifying logic reasoning steps with an OpenAI-compatible, MiniMax, or Azure OpenAI LLM backend plus Z3.
+- Dataset preprocessors and launch scripts for GSM8K, LogiQA, ReClor, MCQ-style data, FOL metadata, GRPO, and Step-TreeRL experiments.
+- Extra training metrics for tree rollouts, especially Step-TreeRL trace counts, leaf accuracy, format ratio, and timing.
 
-## Prerequisites
-- Python >= 3.11.0 （3.10 may raise some bug in deepseed)
-- PyTorch >= 2.0.0 (2.6.0 is Recommended)
+## Repository Map
+
+- `verl/trainer/config/ppo_trainer.yaml`: main PPO/GRPO configuration entry.
+- `verl/trainer/ppo/sampling/`: rollout expansion strategy implementations.
+- `verl/workers/reward_manager/`: reward managers for plain, tree, entropy, MCTS, Step-TreeRL, and information-gain workflows.
+- `verl/utils/process_reward.py`: canonical process-reward config and runtime builder.
+- `examples/data_preprocess/`: dataset and FOL metadata preprocessing scripts.
+- `bash_scripts/logiqa/`, `bash_scripts/reclor/`, `bash_scripts/TreeSearch/`: runnable experiment scripts.
+- `CONFIG.md`: detailed configuration guide.
+
+## Installation
+
+### Prerequisites
+
+- Python >= 3.11
 - CUDA >= 12.4
-- ray==2.48.0
-- vllm==0.8.5.post1
+- PyTorch 2.6.0 recommended
+- Ray 2.48.0
+- vLLM 0.8.5.post1 recommended
 
-## Environment Setup
+### Setup
 
-For conda users:
 ```bash
 conda create -n verl_plus python=3.11
 conda activate verl_plus
-```
 
-## Install from source
-
-```bash
 git clone https://github.com/BiNLP/verl
 cd verl
 pip install -e .
-```
-
-## Install dependencies
-
-```bash
-pip install vllm==0.8.5
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
-pip install flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
-
 pip install -r requirements.txt
 ```
 
+Recommended CUDA 12.4 stack:
 
-# Dataset Preparation
+```bash
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip install vllm==0.8.5.post1
+wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+pip install flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+```
+
+## Dataset Preparation
 
 ### GSM8K
-```
+
+```bash
 python3 examples/data_preprocess/gsm8k.py --local_dir data/gsm8k
 ```
 
-### LogiQA
-```
+### LogiQA / ReClor
+
+```bash
 python3 examples/data_preprocess/logiqa.py --local_dir data/logiqa
-```
-### LogiQA for Tree Sampling
-```
-python3 examples/data_preprocess/logiqa_tree.py --local_dir data/logiqa_tree
-```
-### LogiQA for TreeRL
-```
-python3 examples/data_preprocess/logiqa_action.py --local_dir data/logiqa_action
+python3 examples/data_preprocess/reclor.py --local_dir data/reclor
 ```
 
-### Generic MCQ Dataset Preprocessor (`mcq_preprocess.py`)
+### MCQ Preprocessor
 
-A unified preprocessor for any multiple-choice question dataset. Supports optional FOL metadata extraction for use with step-level TreeRL (FOL as PRM).
-
-#### Quick Start
+Use `mcq_preprocess.py` when converting existing multiple-choice parquet files or preparing FOL metadata.
 
 ```bash
-# ReClor — convert from existing parquet (no FOL extraction)
 python examples/data_preprocess/mcq_preprocess.py \
-    --input_parquet data/reclor/train.parquet \
-    --output_dir data/reclor \
-    --skip_fol_extraction
-
-# LogiQA — convert from existing parquet
-python examples/data_preprocess/mcq_preprocess.py \
-    --input_parquet data/logiqa/train.parquet \
-    --output_dir data/logiqa \
-    --preset logiqa \
-    --skip_fol_extraction
+  --input_parquet data/reclor/train.parquet \
+  --output_dir data/reclor \
+  --preset reclor \
+  --skip_fol_extraction
 ```
 
-#### With FOL Metadata Extraction (for FOL-as-PRM)
+For FOL-as-PRM metadata:
 
 ```bash
-# Extract FOL metadata using LLM API (requires running LLM service)
 python examples/data_preprocess/mcq_preprocess.py \
-    --input_parquet data/reclor/train.parquet \
-    --output_dir data/reclor_fol \
-    --preset reclor \
-    --api_key "your-api-key"
-
-#后台运行大批量提取
-nohup python examples/data_preprocess/mcq_preprocess.py \
-    --input_parquet data/reclor/train.parquet \
-    --output_dir data/reclor_fol \
-    --base_url "http://localhost:4869/v1" \
-    --model "qwen2.5-7b-coder" \
-    --max_retries -1 \
-    --verbose \
-    > reclor_fol.log 2>&1 &
+  --input_parquet data/reclor/train.parquet \
+  --output_dir data/reclor_fol \
+  --preset reclor \
+  --base_url "http://localhost:4869/v1" \
+  --model "qwen2.5-7b-coder" \
+  --max_retries -1 \
+  --verbose
 ```
 
-Output files:
-- `train.parquet` / `test.parquet` — dataset files for training
-- `fol_metadata.json` — FOL metadata (required by `trainer.process_reward.type=fol`)
-  The metadata file must contain every sample that will be scored during training or validation.
+Expected outputs:
 
-#### Key Parameters
+- `train.parquet` and `test.parquet`: training/validation data.
+- `fol_metadata.json`: required when `trainer.process_reward.type=fol` and offline metadata is used.
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--input_parquet` | Path to existing train.parquet | — |
-| `--output_dir` | Output directory | `./data/mcq` |
-| `--preset` | Dataset preset (`reclor`, `logiqa`) | — |
-| `--context_field` | Field name for context | `context` |
-| `--question_field` | Field name for question | `question` |
-| `--answers_field` | Field name for answer choices | `answers` |
-| `--label_field` | Field name for ground-truth label | `label` |
-| `--raw_prompt_template` | Prompt template with `{context}`, `{question}`, `{answers}` | See below |
-| `--skip_fol_extraction` | Skip FOL metadata extraction | `False` |
-| `--api_key` | API key for LLM (or set `DASHSCOPE_API_KEY` env var) | — |
-| `--base_url` | Base URL for LLM service | `http://localhost:4869/v1` |
-| `--model` | Model name served by vLLM | — |
-| `--max_retries` | Max retry attempts per sample (-1 = retry forever) | `3` |
-| `--verbose` | Print first 100 chars of each extracted FOL field | `False` |
-| `--num_samples` | Limit number of samples (for testing) | All |
+## Training Modes
 
-Default `raw_prompt_template`:
-```
-<Context>{context}</Context><Question>{question}</Question><Options>{answers}</Options>
+The default entrypoint is:
+
+```bash
+python3 -m verl.trainer.main_ppo key=value ...
 ```
 
+### Plain GRPO
 
-# Evaluation
-### Method 1:
-[LogiEval](https://github.com/BiNLP/LogiEval) is our developed evaluation framework that makes customization more convenient.
-### Method 2 (Recommended):
-使用 lighteval：
-```
-sh bash_scripts/eval.sh
-```
+Use this for normal response-level reward training without tree expansion.
 
-
-# LLM-as-Judge & PRM
-If you need to use LLM-as-Judge as a Process Reward Model (Generative PRM), you need to start an LLM service first and then call it via the vllm API.
-
-### Vllm online inference sevice
-```
-sh bash_scripts/VllmBackend/start_vllm_server.sh
-```
-
-
-# Reward Manager
-Reward Manager is an interface that uses a reward function. It is recommended to specify a reward function regardless of whether a reward model is used, because when too much validation is performed, the reward model is not supported, and the reward function will still be called for evaluation.
-### Process Reward Model
-```
-PRM_PATH="/path/to/prm/model"
-reward_model.worker_type = 'prm'
-```
-### PRM + LLM-as-a-Judge
-```
-reward_model.worker_type = 'judge'
-```
-### PRM + Async LLM-as-a-Judge
-```
-reward_model.worker_type = 'async_judge'
-```
-
-
-# Tree Sampling for RL Training
-
-## TreeRL for Training
-
-```sh bash_scripts/EntropyChain_LogiQA_smoke.sh```
-
-
-
-## Step-level TreeRL
-
-We use LogiQA as the training set, please pre-processing the dataset before start training.
-The startup script is located at ```bash_script/Step_TreeRL_LogiQA_GAE```, and the key parameters are as following:
-```
+```bash
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=tree_gae \ # TreeRL 的 Value 并不使用 Critic Model，而是直接用 Backpropagation 之后的结点的 Value 作为 Value
-    ...
-    trainer.tree_sampling=True \
-    reward_model.reward_manager='tree' \ # 这个 RewardManager 虽然调用了 Reward Function，但是只是为了记录，我们直接使用 TreeRL 的 Reward
-    trainer.branch_level='step' \ # 'token' 的话就会每个 token 作为一个结点，对于长的推理序列，树会非常大！！！！
-    trainer.step_reward_type='treerl' \ # 根据论文里面的公式，使用当前结点和 root 结点及其双亲的 Value 来计算 Reward；如果是 'fol'，则会将每一步翻译成 FOL 并使用 Z3 返回结果（Fragile）！！！！
-    trainer.tree_rounds=1 \ # 分支轮数
-    trainer.tree_top_k=1 \ # 每次分支出多少条，目前是只在最高熵的 step 进行分支
-
+  algorithm.adv_estimator=grpo \
+  actor_rollout_ref.rollout.n=4 \
+  reward_model.reward_manager=auto \
+  trainer.sampling_strategy=null
 ```
-## FOL as Process Reward
 
+Example scripts:
+
+- `bash_scripts/logiqa/Qwen3-8B-base_GRPO_base.sh`
+- `bash_scripts/reclor/Qwen3-8B-base_GRPO_base.sh`
+- `examples/grpo_trainer/run_qwen2-7b.sh`
+
+### Step-TreeRL
+
+Use this for step-level tree expansion: generate complete initial rollouts, split them by `<step>...</step>`, select high-entropy step nodes, branch from selected nodes, backpropagate leaf correctness/value, then train on selected terminal traces.
+
+```bash
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=step_treerl_grpo \
+  actor_rollout_ref.actor.policy_loss=tree_loss \
+  actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+  actor_rollout_ref.rollout.n=6 \
+  reward_model.reward_manager=auto \
+  trainer.sampling_strategy=step_treerl \
+  trainer.process_reward.type=format \
+  trainer.step_treerl_config.m=6 \
+  trainer.step_treerl_config.n=2 \
+  trainer.step_treerl_config.l=1 \
+  trainer.step_treerl_config.t=2 \
+  trainer.step_treerl_config.selected_num_traces=16
 ```
-trainer.step_reward_type='treerl' 
+
+Example scripts:
+
+- `bash_scripts/logiqa/Qwen3-8B-base_StepTreeRL_format_reward.sh`
+- `bash_scripts/logiqa/Qwen3-8B-base_StepTreeRL_fol_reward.sh`
+- `bash_scripts/reclor/Qwen3-8B-base_StepTreeRL_format_reward.sh`
+- `bash_scripts/reclor/Qwen3-8B-base_StepTreeRL_fol_reward.sh`
+
+### Other Tree Strategies
+
+| Strategy | `trainer.sampling_strategy` | Reward manager | Advantage estimator | Main config |
+| --- | --- | --- | --- | --- |
+| Legacy tree search | `tree_search` | `tree` | `tree_grpo` or `tree_gae` | `trainer.tree_rounds`, `tree_top_k`, `branch_level` |
+| Entropy-chain TreeRL | `treerl` | `entropy` | `entropy_reinforce` | `trainer.entropy_chain_config` |
+| Parallel MCTS | `parallel_mcts` | `mcts` | `mcts_grpo` | `trainer.parallel_mcts_config` |
+| Step-TreeRL | `step_treerl` | `step_tree` | `step_treerl_grpo` or `step_treerl_reinforce` | `trainer.step_treerl_config` |
+| Information gain | `information_gain` | `ig` | `ig_grpo` | `trainer.ig_config` |
+
+`reward_model.reward_manager=auto` resolves the manager from `trainer.sampling_strategy` for the tree strategies above.
+
+## Process Reward
+
+Process reward lives under `trainer.process_reward`, not `reward_model.reward_kwargs`.
+
+### Format PRM
+
+```bash
+trainer.process_reward.type=format
 ```
-- ver/utils/nl2fol.py: Translating natural langugage to First-order-logic formulation。
-- verl/tuils/fol_to_python_converter.py: Translating the FOL formulation into python code with Z3 verifier, and return the result (satify/unsatify).
 
+This checks whether reasoning steps follow the expected step format. It is the simplest process reward and is usually enough for smoke tests.
 
+### FOL PRM
 
+```bash
+trainer.process_reward.type=fol \
+trainer.process_reward.fol.prm_mode=global_fol_prm \
+trainer.process_reward.fol.metadata_path=/path/to/fol_metadata.json \
+trainer.process_reward.fol.llm.provider=openai_compatible \
+trainer.process_reward.fol.llm.api_base_url=http://localhost:4869/v1 \
+trainer.process_reward.fol.llm.api_key=EMPTY \
+trainer.process_reward.fol.llm.model_name=qwen2.5-7b-coder
+```
 
-# TODO
-1. 将 MCTS sampling 和 FOL as PRM 整合到训练流程
+FOL scoring needs `sample_id` metadata in the batch. If metadata is missing and `online_declaration_fallback=true`, the runtime can generate declarations online through the configured LLM backend.
+
+## Evaluation
+
+Use the bundled evaluation scripts:
+
+```bash
+sh bash_scripts/eval/eval_lighteval.sh
+sh bash_scripts/eval/eval_QA_lighteval.sh
+```
+
+Dataset-specific helpers:
+
+- `bash_scripts/eval/Qwen2.5-1.5B_LogiQA_eval.sh`
+- `bash_scripts/eval/Qwen2.5-1.5B_ReClor_eval.sh`
+- `bash_scripts/eval/Qwen2.5-7B_LogiQA_eval.sh`
+- `bash_scripts/eval/Qwen2.5-7B_ReClor_eval.sh`
+
+## Practical Notes
+
+- For Step-TreeRL, prefer prompts that force explicit `<step>...</step>` segmentation; otherwise branch extraction and format PRM become noisy.
+- For GRPO and Step-TreeRL, `actor_rollout_ref.rollout.n` controls initial samples per prompt. Step-TreeRL also has `m`; keep `m` aligned with `rollout.n` unless you intentionally override it.
+- For long or variable traces, prefer dynamic batch: `actor_rollout_ref.actor.use_dynamic_bsz=True` and tune `ppo_max_token_len_per_gpu`.
+- For Step-TreeRL, set `actor_rollout_ref.rollout.max_model_len >= data.max_prompt_length + trainer.step_treerl_config.max_token_num`.
+- Do not commit real API keys. Use environment interpolation such as `${oc.env:MINIMAX_API_KEY}` in launch scripts.
