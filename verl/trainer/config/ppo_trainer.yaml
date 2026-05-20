@@ -347,6 +347,13 @@ trainer:
         max_concurrency: 8
         request_timeout: 60
         extra_body: {}
+    self_eval:
+      prompt_path: null
+      max_new_tokens: 32
+      temperature: 0.0
+      top_p: 1.0
+      max_batch_size: null
+      fail_on_parse_error: false
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

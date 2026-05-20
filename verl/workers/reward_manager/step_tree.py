@@ -8,6 +8,8 @@ Two reward signals are produced:
      those scores are used directly as the token-level reward.
    - Fallback (validation / non-step-tree batches): each ``<step>`` block is
      scored via the format/FOL PRM function, written at the step's last token.
+   - ``self_eval`` requires precomputed scores from StepTreeRL because actor
+     generation is not available inside the reward manager.
 
 2. **Outcome accuracy** (logging / tracking):
    - ``compute_score(response_str, ground_truth)`` → 0/1 binary.
@@ -37,6 +39,7 @@ class StepTreeRewardManager:
     Supports two reward styles:
     - 'format': checks <step>/<premise>/<conclusion> tag structure
     - 'fol': FOL/Z3 verification (requires trainer.process_reward.fol.*)
+    - 'self_eval': actor-generated step correctness (precomputed by StepTreeRL)
     """
 
     def __init__(
@@ -59,7 +62,7 @@ class StepTreeRewardManager:
         self.process_reward_type = self.process_reward_runtime.reward_type
         if self.process_reward_type == "none":
             raise ValueError(
-                "StepTreeRewardManager requires trainer.process_reward.type to be 'format' or 'fol'."
+                "StepTreeRewardManager requires trainer.process_reward.type to be 'format', 'fol', or 'self_eval'."
             )
         self._step_prm_fn = self.process_reward_runtime.step_prm_fn
         self.fol_verifier = self.process_reward_runtime.fol_verifier
@@ -89,6 +92,8 @@ class StepTreeRewardManager:
         steps = re.findall(r"<step>(.*?)</step>", response_str, re.DOTALL)
         if not steps:
             return []
+        if self.process_reward_type == "self_eval":
+            raise ValueError("self_eval process reward requires precomputed reward_fn_scores from StepTreeRLStrategy.")
         scores = []
         for s in steps:
             if self.process_reward_type == "fol":

@@ -388,6 +388,73 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0].R, 0.8)
 
+    def test_self_eval_assign_process_rewards_uses_actor_generation(self):
+        tokenizer = TextTokenizer()
+        strategy = make_strategy(process_reward_type="self_eval")
+        strategy.tokenizer = tokenizer
+        strategy.max_model_len = 4096
+        strategy._question_texts_by_tree = {0: "Question text"}
+        device = torch.device("cpu")
+
+        root = MCTSNode(state=tokenizer.encode("prompt"), tree_idx=0)
+        node = MCTSNode(
+            state=tokenizer.encode("prompt<step>1</step>"),
+            step_tokens=tokenizer.encode("<step>1</step>"),
+            step_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
+            accumulated_text="<step><premise>previous</premise><conclusion>a</conclusion></step><step><premise>a</premise><conclusion>b</conclusion></step>",
+            parent=root,
+            tree_idx=0,
+            node_idx=1,
+        )
+        captured = {}
+
+        def generate_fn(data):
+            captured["sampling_kwargs"] = data.meta_info["rollout_sampling_kwargs"]
+            prompt_ids = data.batch["input_ids"][0][data.batch["attention_mask"][0].bool()].tolist()
+            captured["prompt"] = tokenizer.decode(prompt_ids)
+            return SimpleNamespace(
+                batch={"responses": torch.tensor([tokenizer.encode(r"\boxed{1}")], dtype=torch.long)}
+            )
+
+        strategy._assign_process_rewards([node], generate_fn=generate_fn, device=device)
+
+        self.assertEqual(node.process_reward, 1.0)
+        self.assertEqual(node.R, 1.0)
+        self.assertEqual(captured["sampling_kwargs"]["n"], 1)
+        self.assertEqual(captured["sampling_kwargs"]["max_new_tokens"], 32)
+        self.assertIn("Question text", captured["prompt"])
+        self.assertIn(node.accumulated_text, captured["prompt"])
+
+    def test_self_eval_scores_boxed_zero_and_unparseable_outputs(self):
+        tokenizer = TextTokenizer()
+        strategy = make_strategy(process_reward_type="self_eval")
+        strategy.tokenizer = tokenizer
+        strategy.max_model_len = 4096
+        device = torch.device("cpu")
+
+        requests = [
+            SimpleNamespace(response=r"\boxed{0}", expected=0.0),
+            SimpleNamespace(response="not boxed", expected=0.0),
+        ]
+        for case in requests:
+            node = MCTSNode(
+                state=tokenizer.encode("prompt"),
+                step_tokens=tokenizer.encode("<step>1</step>"),
+                step_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
+                accumulated_text=f"<step><premise>a</premise><conclusion>{case.response}</conclusion></step>",
+                parent=MCTSNode(state=tokenizer.encode("prompt"), tree_idx=0),
+                tree_idx=0,
+                node_idx=1,
+            )
+
+            def generate_fn(_data, response=case.response):
+                return SimpleNamespace(
+                    batch={"responses": torch.tensor([tokenizer.encode(response)], dtype=torch.long)}
+                )
+
+            strategy._assign_process_rewards([node], generate_fn=generate_fn, device=device)
+            self.assertEqual(node.process_reward, case.expected)
+
     def test_rloo_backprop_and_segment_reward(self):
         strategy = make_strategy()
         strategy.length_penalty_enabled = False
@@ -501,6 +568,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
             trajectory_text="<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}",
             parent=root,
+            process_reward=1.0,
             tree_idx=0,
             node_idx=1,
             terminal_in_subtree=1,
@@ -512,6 +580,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text="plain",
             trajectory_text="plain \\boxed{B}",
             parent=root,
+            process_reward=0.0,
             tree_idx=0,
             node_idx=2,
             terminal_in_subtree=1,
@@ -523,6 +592,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
             trajectory_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
             parent=root,
+            process_reward=1.0,
             tree_idx=0,
             node_idx=3,
             terminal_in_subtree=1,
@@ -545,6 +615,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(metrics["answer_format_only_count"], 1)
         self.assertEqual(metrics["step_format_only_count"], 1)
         self.assertAlmostEqual(metrics["full_format_correct_ratio"], 1 / 3)
+        self.assertAlmostEqual(metrics["process_reward_mean"], 2 / 3)
         self.assertEqual(result.gen_batch_output.batch["responses"].shape[0], 4)
 
     def test_step_tree_reward_manager_returns_validation_format_metrics(self):
@@ -579,6 +650,37 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(extra["format_answer_only"], [0.0])
         self.assertEqual(extra["format_step_only"], [0.0])
         self.assertEqual(extra["format_trace_total"], [1.0])
+
+    def test_step_tree_reward_manager_accepts_precomputed_self_eval_scores(self):
+        tokenizer = TextTokenizer()
+        prompt_ids = tokenizer.encode("prompt")
+        response_ids = tokenizer.encode("<step><premise>a</premise><conclusion>b</conclusion></step>")
+        attention_mask = torch.ones((1, len(prompt_ids) + len(response_ids)), dtype=torch.long)
+        reward_fn_scores = torch.zeros((1, len(response_ids)), dtype=torch.float32)
+        reward_fn_scores[0, -1] = 1.0
+        data = DataProto.from_dict(
+            tensors={
+                "prompts": torch.tensor([prompt_ids], dtype=torch.long),
+                "responses": torch.tensor([response_ids], dtype=torch.long),
+                "attention_mask": attention_mask,
+                "reward_fn_scores": reward_fn_scores,
+            },
+            non_tensors={
+                "answer": np.array(["A"], dtype=object),
+                "data_source": np.array(["reclor"], dtype=object),
+            },
+        )
+        manager = StepTreeRewardManager(
+            tokenizer=tokenizer,
+            num_examine=0,
+            compute_score=lambda **_: 0.0,
+            process_reward_cfg={"type": "self_eval"},
+        )
+
+        result = manager(data, return_dict=True)
+
+        self.assertTrue(torch.equal(result["reward_tensor"], reward_fn_scores))
+        self.assertEqual(result["reward_extra_info"]["prm_score"], [1.0])
 
 
 if __name__ == "__main__":

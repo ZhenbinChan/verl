@@ -4,6 +4,7 @@ import copy
 import os
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from omegaconf import OmegaConf, open_dict
@@ -11,6 +12,8 @@ from omegaconf import OmegaConf, open_dict
 from verl.trainer.ppo.sampling.mcts_prm import format_step_reward, get_prm_fn
 from verl.utils.fol_verifier import FOLVerifier, LLMClient, load_fol_metadata
 
+
+DEFAULT_SELF_EVAL_PROMPT_PATH = str(Path(__file__).resolve().parents[1] / "prompts" / "self_eval_reward.txt")
 
 PROCESS_REWARD_DEFAULTS: Dict[str, Any] = {
     "type": "none",
@@ -38,6 +41,14 @@ PROCESS_REWARD_DEFAULTS: Dict[str, Any] = {
             "extra_body": {},
         },
     },
+    "self_eval": {
+        "prompt_path": DEFAULT_SELF_EVAL_PROMPT_PATH,
+        "max_new_tokens": 32,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_batch_size": None,
+        "fail_on_parse_error": False,
+    },
 }
 
 AUTO_REWARD_MANAGER_BY_STRATEGY = {
@@ -48,7 +59,7 @@ AUTO_REWARD_MANAGER_BY_STRATEGY = {
     "information_gain": "ig",
 }
 
-SUPPORTED_PROCESS_REWARD_TYPES = {"none", "format", "fol"}
+SUPPORTED_PROCESS_REWARD_TYPES = {"none", "format", "fol", "self_eval"}
 
 
 @dataclass
@@ -73,6 +84,12 @@ class ProcessRewardRuntime:
     fol_fail_on_missing_metadata: bool = False
     llm_default_args: Dict[str, Any] = field(default_factory=dict)
     max_concurrency: int = 8
+    self_eval_prompt_template: str = ""
+    self_eval_max_new_tokens: int = 32
+    self_eval_temperature: float = 0.0
+    self_eval_top_p: float = 1.0
+    self_eval_max_batch_size: Optional[int] = None
+    self_eval_fail_on_parse_error: bool = False
     _score_cache: Dict[tuple, float] = field(default_factory=dict)
     _metadata_cache: Dict[str, Any] = field(default_factory=dict)
 
@@ -240,10 +257,27 @@ def resolve_process_reward_config(config):
     if strategy_name in {"step_treerl", "parallel_mcts", "information_gain"} and canonical.type == "none":
         raise ValueError(
             f"sampling_strategy={strategy_name!r} requires trainer.process_reward.type to be "
-            "'format' or 'fol'; got 'none'."
+            "'format', 'fol', or 'self_eval'; got 'none'."
         )
 
     return config.trainer.process_reward
+
+
+def _load_self_eval_prompt_template(prompt_path: Any) -> str:
+    if not prompt_path:
+        raise ValueError("trainer.process_reward.self_eval.prompt_path is required.")
+    path = Path(str(prompt_path)).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Self-eval reward prompt path not found: {path}")
+    template = path.read_text(encoding="utf-8")
+    required_placeholders = ("{question_text}", "{reasoning_steps}")
+    missing = [placeholder for placeholder in required_placeholders if placeholder not in template]
+    if missing:
+        raise ValueError(
+            "Self-eval reward prompt must contain placeholders: "
+            f"{', '.join(required_placeholders)}. Missing: {', '.join(missing)}."
+        )
+    return template
 
 
 def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> ProcessRewardRuntime:
@@ -253,6 +287,24 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
 
     if reward_type == "format":
         return ProcessRewardRuntime(reward_type=reward_type, step_prm_fn=format_step_reward)
+
+    if reward_type == "self_eval":
+        self_eval_cfg = process_reward_cfg.get("self_eval", {}) or {}
+        max_batch_size = self_eval_cfg.get("max_batch_size", None)
+        if max_batch_size is not None:
+            max_batch_size = int(max_batch_size)
+            if max_batch_size <= 0:
+                raise ValueError("trainer.process_reward.self_eval.max_batch_size must be positive when set.")
+        return ProcessRewardRuntime(
+            reward_type=reward_type,
+            step_prm_fn=None,
+            self_eval_prompt_template=_load_self_eval_prompt_template(self_eval_cfg.get("prompt_path") or DEFAULT_SELF_EVAL_PROMPT_PATH),
+            self_eval_max_new_tokens=int(self_eval_cfg.get("max_new_tokens", 32)),
+            self_eval_temperature=float(self_eval_cfg.get("temperature", 0.0)),
+            self_eval_top_p=float(self_eval_cfg.get("top_p", 1.0)),
+            self_eval_max_batch_size=max_batch_size,
+            self_eval_fail_on_parse_error=bool(self_eval_cfg.get("fail_on_parse_error", False)),
+        )
 
     fol_cfg = process_reward_cfg.get("fol", {}) or {}
     prm_mode = str(fol_cfg.get("prm_mode", "global_fol_prm") or "global_fol_prm").lower()
@@ -347,6 +399,34 @@ def normalize_process_reward_cfg(process_reward_cfg: Mapping[str, Any]) -> Dict[
     )
     base["type"] = _normalize_reward_type(base.get("type", "none"))
     return base
+
+
+def build_generation_non_tensor_keys_to_pop(
+    non_tensor_batch: Mapping[str, Any],
+    process_reward_type: str,
+) -> list[str]:
+    """Return non-tensor fields that should move from training batch to generation batch."""
+
+    keys_to_pop = ["raw_prompt_ids"]
+    for key in ("multi_modal_data", "multi_modal_inputs"):
+        if key in non_tensor_batch:
+            keys_to_pop.append(key)
+    for key in ("raw_prompt", "tools_kwargs", "answer"):
+        if key in non_tensor_batch:
+            keys_to_pop.append(key)
+
+    reward_type = str(process_reward_type or "none").lower().strip()
+    if reward_type == "fol":
+        process_reward_keys = ("sample_id", "question_text", "extra_info", "data_source", "index")
+    elif reward_type == "self_eval":
+        process_reward_keys = ("question_text", "extra_info", "index")
+    else:
+        process_reward_keys = ()
+
+    for key in process_reward_keys:
+        if key in non_tensor_batch and key not in keys_to_pop:
+            keys_to_pop.append(key)
+    return keys_to_pop
 
 
 def get_batch_sample_id(non_tensor_batch: Optional[Mapping[str, Any]], index: int) -> Optional[str]:

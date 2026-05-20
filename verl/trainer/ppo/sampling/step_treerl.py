@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ from verl.utils.process_reward import (
 class StepTreeRLMetrics:
     format_steps: int = 0
     total_steps: int = 0
+    process_reward_sum: float = 0.0
+    process_reward_count: int = 0
     problem_count: int = 0
     leaf_correct: int = 0
     leaf_total: int = 0
@@ -113,6 +116,12 @@ class StepTreeRLStrategy(SamplingStrategy):
         self.fol_verifier = self.process_reward_runtime.fol_verifier
         self.fol_metadata_map = self.process_reward_runtime.fol_metadata_map
         self.step_prm_fn = self.process_reward_runtime.step_prm_fn
+        self.self_eval_prompt_template = self.process_reward_runtime.self_eval_prompt_template
+        self.self_eval_max_new_tokens = self.process_reward_runtime.self_eval_max_new_tokens
+        self.self_eval_temperature = self.process_reward_runtime.self_eval_temperature
+        self.self_eval_top_p = self.process_reward_runtime.self_eval_top_p
+        self.self_eval_max_batch_size = self.process_reward_runtime.self_eval_max_batch_size
+        self.self_eval_fail_on_parse_error = self.process_reward_runtime.self_eval_fail_on_parse_error
         self._sample_ids_by_tree: Dict[int, str] = {}
         self._question_texts_by_tree: Dict[int, str] = {}
 
@@ -134,15 +143,16 @@ class StepTreeRLStrategy(SamplingStrategy):
         self._node_counters[tree_idx] = idx
         return idx
 
-    def _prepare_fol_context(self, gen_batch: DataProto) -> None:
+    def _prepare_process_reward_context(self, gen_batch: DataProto, *, require_sample_id: bool) -> None:
         self._sample_ids_by_tree = {}
         self._question_texts_by_tree = {}
         for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
-            self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
-                gen_batch.non_tensor_batch,
-                tree_idx,
-                context="FOL process reward",
-            )
+            if require_sample_id:
+                self._sample_ids_by_tree[tree_idx] = require_batch_sample_id(
+                    gen_batch.non_tensor_batch,
+                    tree_idx,
+                    context="FOL process reward",
+                )
             question_text = get_batch_question_text(gen_batch.non_tensor_batch, tree_idx)
             if question_text is None:
                 root_ids = gen_batch.batch["input_ids"][tree_idx]
@@ -150,6 +160,9 @@ class StepTreeRLStrategy(SamplingStrategy):
                 real_ids = root_ids[attention.bool()].tolist()
                 question_text = self.tokenizer.decode(real_ids, skip_special_tokens=True)
             self._question_texts_by_tree[tree_idx] = question_text
+
+    def _prepare_fol_context(self, gen_batch: DataProto) -> None:
+        self._prepare_process_reward_context(gen_batch, require_sample_id=True)
 
     def _get_sample_id(self, tree_idx: int) -> str:
         if tree_idx not in self._sample_ids_by_tree:
@@ -159,6 +172,8 @@ class StepTreeRLStrategy(SamplingStrategy):
         return self._sample_ids_by_tree[tree_idx]
 
     def _score_step_reward(self, step_text: str, tree_idx: int) -> float:
+        if self.process_reward_type == "self_eval":
+            raise ValueError("self_eval process reward requires actor generation and cannot be scored synchronously.")
         scores = self._score_process_rewards(
             [
                 StepRewardRequest(
@@ -171,9 +186,18 @@ class StepTreeRLStrategy(SamplingStrategy):
         )
         return scores[0]
 
-    def _score_process_rewards(self, requests: List[StepRewardRequest]) -> List[float]:
+    def _score_process_rewards(
+        self,
+        requests: List[StepRewardRequest],
+        generate_fn: Optional[Callable[[DataProto], DataProto]] = None,
+        device: Optional[torch.device] = None,
+    ) -> List[float]:
         if not requests:
             return []
+        if self.process_reward_type == "self_eval":
+            if generate_fn is None or device is None:
+                raise ValueError("self_eval process reward requires generate_fn and device.")
+            return self._score_self_eval_rewards(requests, generate_fn, device)
         if hasattr(self.process_reward_runtime, "score_steps"):
             return self.process_reward_runtime.score_steps(requests)
         if self.process_reward_type == "format":
@@ -185,11 +209,16 @@ class StepTreeRLStrategy(SamplingStrategy):
                 scores.append(float(self.step_prm_fn(req.step_text, sample_id=sample_id)))
             return scores
         raise ValueError(
-            f"StepTreeRLStrategy requires trainer.process_reward.type to be 'format' or 'fol', "
+            f"StepTreeRLStrategy requires trainer.process_reward.type to be 'format', 'fol', or 'self_eval', "
             f"but got {self.process_reward_type!r}."
         )
 
-    def _assign_process_rewards(self, nodes: List[MCTSNode]) -> None:
+    def _assign_process_rewards(
+        self,
+        nodes: List[MCTSNode],
+        generate_fn: Optional[Callable[[DataProto], DataProto]] = None,
+        device: Optional[torch.device] = None,
+    ) -> None:
         requests = [
             StepRewardRequest(
                 step_text=node.step_text,
@@ -201,11 +230,128 @@ class StepTreeRLStrategy(SamplingStrategy):
             )
             for node in nodes
         ]
-        scores = self._score_process_rewards(requests)
+        scores = self._score_process_rewards(requests, generate_fn=generate_fn, device=device)
         for node, score in zip(nodes, scores):
             node.process_reward = float(score)
             node.R = float(score)
             node.value = float(score)
+
+    def _format_self_eval_prompt(self, req: StepRewardRequest) -> str:
+        question_text = req.question_text or ""
+        reasoning_steps = req.accumulated_text or req.step_text
+        return self.self_eval_prompt_template.format(
+            question_text=question_text,
+            reasoning_steps=reasoning_steps,
+        )
+
+    @staticmethod
+    def _parse_self_eval_score(text: str) -> Optional[float]:
+        matches = list(re.finditer(r"\\boxed\{\{?\s*([01])\s*\}?\}", text or "", re.DOTALL))
+        if not matches:
+            return None
+        return float(matches[-1].group(1))
+
+    def _score_self_eval_rewards(
+        self,
+        requests: List[StepRewardRequest],
+        generate_fn: Callable[[DataProto], DataProto],
+        device: torch.device,
+    ) -> List[float]:
+        if not requests:
+            return []
+
+        scores: List[Optional[float]] = [None] * len(requests)
+        key_to_prompt: Dict[Tuple[str, str], str] = {}
+        request_keys: List[Tuple[str, str]] = []
+        for req in requests:
+            question_text = req.question_text or ""
+            reasoning_steps = req.accumulated_text or req.step_text
+            key = (question_text, reasoning_steps)
+            request_keys.append(key)
+            if key in self.process_reward_runtime._score_cache:
+                continue
+            if key not in key_to_prompt:
+                key_to_prompt[key] = self._format_self_eval_prompt(req)
+
+        pending_items = list(key_to_prompt.items())
+        if pending_items:
+            max_batch_size = self.self_eval_max_batch_size or len(pending_items)
+            for start in range(0, len(pending_items), max_batch_size):
+                chunk = pending_items[start:start + max_batch_size]
+                chunk_scores = self._generate_self_eval_scores(
+                    prompts=[prompt for _, prompt in chunk],
+                    generate_fn=generate_fn,
+                    device=device,
+                )
+                for (key, _), score in zip(chunk, chunk_scores):
+                    self.process_reward_runtime._score_cache[key] = float(score)
+
+        for i, key in enumerate(request_keys):
+            scores[i] = float(self.process_reward_runtime._score_cache.get(key, 0.0))
+        return [float(score or 0.0) for score in scores]
+
+    def _generate_self_eval_scores(
+        self,
+        prompts: List[str],
+        generate_fn: Callable[[DataProto], DataProto],
+        device: torch.device,
+    ) -> List[float]:
+        if not prompts:
+            return []
+
+        encoded_prompts = [self.tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts]
+        context_budget = max(1, int(self.max_model_len) - int(self.self_eval_max_new_tokens))
+        encoded_prompts = [ids[-context_budget:] if len(ids) > context_budget else ids for ids in encoded_prompts]
+        prompt_tensors = [torch.tensor(ids, dtype=torch.long, device=device) for ids in encoded_prompts]
+        input_ids, attention_mask, position_ids = _pad_sequences(prompt_tensors, self.pad_token_id, device)
+
+        batch_size = len(prompts)
+        ws = max(self._n_gpus, 1)
+        padded_size = ((batch_size + ws - 1) // ws) * ws
+        pad_slots = padded_size - batch_size
+        if pad_slots > 0:
+            input_ids = torch.cat([input_ids, input_ids[:pad_slots].clone()], dim=0)
+            attention_mask = torch.cat([attention_mask, attention_mask[:pad_slots].clone()], dim=0)
+            position_ids = torch.cat([position_ids, position_ids[:pad_slots].clone()], dim=0)
+
+        data = DataProto.from_dict(
+            tensors={
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "prompts": input_ids.clone(),
+            },
+            non_tensors={},
+            meta_info={
+                "rollout_sampling_kwargs": {
+                    "max_new_tokens": int(self.self_eval_max_new_tokens),
+                    "max_tokens": int(self.self_eval_max_new_tokens),
+                    "n": 1,
+                    "temperature": float(self.self_eval_temperature),
+                    "top_p": float(self.self_eval_top_p),
+                },
+            },
+        )
+
+        output = generate_fn(data)
+        responses = output.batch["responses"]
+        if responses.size(0) < padded_size:
+            raise RuntimeError(
+                f"self_eval generation returned {responses.size(0)} responses for {padded_size} padded prompts."
+            )
+        responses = responses[:batch_size]
+
+        parsed_scores: List[float] = []
+        for response in responses:
+            real_mask = response != self.pad_token_id
+            response_text = self.tokenizer.decode(response[real_mask].tolist(), skip_special_tokens=True)
+            parsed = self._parse_self_eval_score(response_text)
+            if parsed is None:
+                if self.self_eval_fail_on_parse_error:
+                    raise ValueError(f"Failed to parse self_eval boxed score from response: {response_text!r}")
+                parsed = 0.0
+            parsed_scores.append(float(parsed))
+        return parsed_scores
 
     # ------------------------------------------------------------------
     # SamplingStrategy interface
@@ -225,8 +371,11 @@ class StepTreeRLStrategy(SamplingStrategy):
             self._node_counters = {}
             self._metrics = StepTreeRLMetrics()
             self._timing = {}
-            if self.process_reward_type == "fol":
-                self._prepare_fol_context(gen_batch)
+            if self.process_reward_type in {"fol", "self_eval"}:
+                self._prepare_process_reward_context(
+                    gen_batch,
+                    require_sample_id=self.process_reward_type == "fol",
+                )
 
             batch_size = gen_batch.batch["input_ids"].size(0)
 
@@ -235,7 +384,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 roots = self._init_roots(gen_batch, device)
                 initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
             with _timer("process_reward", self._timing):
-                self._assign_process_rewards(initial_nodes)
+                self._assign_process_rewards(initial_nodes, generate_fn=generate_fn, device=device)
             candidate_pool = self._build_candidate_pool(roots, initial_nodes)
             self._score_new_candidates(initial_nodes, compute_log_prob_fn, device, timing_name="initial_entropy_logprob")
 
@@ -423,7 +572,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 new_nodes = self._continue_from_steps(selected, generate_fn, device)
             if new_nodes:
                 with _timer("process_reward", self._timing):
-                    self._assign_process_rewards(new_nodes)
+                    self._assign_process_rewards(new_nodes, generate_fn=generate_fn, device=device)
                 self._add_candidates(candidate_pool, new_nodes)
                 self._score_new_candidates(new_nodes, compute_log_prob_fn, device, timing_name="branch_entropy_logprob")
 
@@ -943,6 +1092,8 @@ class StepTreeRLStrategy(SamplingStrategy):
             nodes = [node for node in collect_all_nodes(root) if node.parent is not None]
             metrics.total_steps += len(nodes)
             metrics.format_steps += sum(1 for node in nodes if format_step_reward(node.step_text) > 0.0)
+            metrics.process_reward_sum += sum(float(node.process_reward) for node in nodes)
+            metrics.process_reward_count += len(nodes)
             leaves = [node for node in nodes if not node.children]
             metrics.leaf_total += len(leaves)
             metrics.leaf_correct += sum(1 for leaf in leaves if bool(leaf.is_correct))
@@ -1163,6 +1314,11 @@ def _build_sampling_result(
                     else 0.0
                 ),
                 "format_ratio": (metrics.format_steps / metrics.total_steps) if metrics is not None and metrics.total_steps > 0 else 0.0,
+                "process_reward_mean": (
+                    metrics.process_reward_sum / metrics.process_reward_count
+                    if metrics is not None and metrics.process_reward_count > 0
+                    else 0.0
+                ),
                 "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
                 "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
                 "selected_traces": metrics.selected_traces if metrics is not None else 0,

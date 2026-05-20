@@ -33,6 +33,7 @@ from verl.utils.process_reward import (
     ProcessRewardRuntime,
     StepRewardRequest,
     build_process_reward_runtime,
+    build_generation_non_tensor_keys_to_pop,
     get_batch_sample_id,
     get_batch_question_text,
     resolve_process_reward_config,
@@ -135,6 +136,76 @@ class TestProcessRewardConfig(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             build_process_reward_runtime(cfg)
+
+    def test_build_process_reward_runtime_self_eval_loads_prompt(self):
+        runtime = build_process_reward_runtime({"type": "self_eval"})
+
+        self.assertEqual(runtime.reward_type, "self_eval")
+        self.assertIn("{question_text}", runtime.self_eval_prompt_template)
+        self.assertIn("{reasoning_steps}", runtime.self_eval_prompt_template)
+        self.assertEqual(runtime.self_eval_max_new_tokens, 32)
+
+    def test_build_process_reward_runtime_self_eval_rejects_bad_prompt(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
+            handle.write("missing placeholders")
+            prompt_path = handle.name
+
+        with self.assertRaises(ValueError):
+            build_process_reward_runtime(
+                {
+                    "type": "self_eval",
+                    "self_eval": {
+                        "prompt_path": prompt_path,
+                    },
+                }
+            )
+
+    def test_resolve_process_reward_config_accepts_self_eval(self):
+        config = OmegaConf.create(
+            {
+                "trainer": {
+                    "sampling_strategy": "step_treerl",
+                    "process_reward": {"type": "self_eval"},
+                },
+                "reward_model": {
+                    "reward_manager": "auto",
+                },
+            }
+        )
+
+        process_reward_cfg = resolve_process_reward_config(config)
+
+        self.assertEqual(process_reward_cfg.type, "self_eval")
+        self.assertEqual(config.reward_model.reward_manager, "step_tree")
+
+    def test_self_eval_generation_pop_keys_preserve_data_source(self):
+        non_tensor_batch = {
+            "raw_prompt_ids": np.array([1], dtype=object),
+            "answer": np.array(["A"], dtype=object),
+            "question_text": np.array(["q"], dtype=object),
+            "extra_info": np.array([{"context": "ctx"}], dtype=object),
+            "index": np.array([0], dtype=object),
+            "data_source": np.array(["reclor"], dtype=object),
+        }
+
+        keys = build_generation_non_tensor_keys_to_pop(non_tensor_batch, "self_eval")
+
+        self.assertIn("question_text", keys)
+        self.assertIn("extra_info", keys)
+        self.assertIn("index", keys)
+        self.assertNotIn("data_source", keys)
+
+    def test_fol_generation_pop_keys_keep_data_source_for_sample_id_fallback(self):
+        non_tensor_batch = {
+            "raw_prompt_ids": np.array([1], dtype=object),
+            "index": np.array([0], dtype=object),
+            "data_source": np.array(["reclor"], dtype=object),
+        }
+
+        keys = build_generation_non_tensor_keys_to_pop(non_tensor_batch, "fol")
+
+        self.assertIn("data_source", keys)
+        self.assertIn("index", keys)
 
 
 class TestFOLVerifierStrictMode(unittest.TestCase):
@@ -472,6 +543,18 @@ class TestRewardManagerFallback(unittest.TestCase):
         )
 
         self.assertEqual(scores, [1.0])
+
+    def test_step_tree_fallback_rejects_self_eval_without_precomputed_scores(self):
+        manager = StepTreeRewardManager(
+            tokenizer=DummyTokenizer(),
+            num_examine=0,
+            process_reward_cfg={"type": "self_eval"},
+        )
+
+        with self.assertRaises(ValueError):
+            manager._fallback_step_scores(
+                "<step><premise>a</premise><conclusion>b</conclusion></step>"
+            )
 
 
 class TestProcessRewardBatchScoring(unittest.TestCase):

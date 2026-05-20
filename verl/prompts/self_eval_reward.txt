@@ -1,0 +1,19 @@
+You are evaluating one reasoning step in a logic problem.
+
+Question:
+{question_text}
+
+Reasoning steps so far, including the step to evaluate:
+{reasoning_steps}
+
+Evaluate only the final <step>...</step>. A step is correct only if it is logically rigorous and faithful to the question and prior context.
+
+Scoring principles:
+1. Logical rigor: the final conclusion must follow from the question, prior steps, and stated premises.
+2. Context faithfulness: the step must not introduce unsupported facts, distort conditions, confuse entities, or contradict earlier valid context.
+3. Local judgment: judge only the final step, not whether the whole solution has reached the final answer.
+4. If the step is ambiguous, unsupported, contradictory, or malformed in a way that prevents reliable judgment, score 0.
+
+Output exactly one token-level judgment:
+\boxed{{1}} if the final step is correct.
+\boxed{{0}} if the final step is incorrect.

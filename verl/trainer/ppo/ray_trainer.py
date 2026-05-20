@@ -57,6 +57,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.process_reward import build_generation_non_tensor_keys_to_pop
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -729,9 +730,9 @@ class RayPPOTrainer:
                 "'step_treerl_grpo' or 'step_treerl_reinforce', "
                 f"but got '{config.algorithm.adv_estimator}'."
             )
-            assert process_reward_type in {"format", "fol"}, (
+            assert process_reward_type in {"format", "fol", "self_eval"}, (
                 "sampling_strategy='step_treerl' requires trainer.process_reward.type to be "
-                f"'format' or 'fol', but got '{process_reward_type}'."
+                f"'format', 'fol', or 'self_eval', but got '{process_reward_type}'."
             )
 
         # information_gain strategy requires ig reward manager
@@ -1240,21 +1241,10 @@ class RayPPOTrainer:
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-                # keep dataset ordering when doing tree sampling
-                if "multi_modal_inputs" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.extend(["multi_modal_data", "multi_modal_inputs"])
-                if "raw_prompt" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("raw_prompt")
-                if "tools_kwargs" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("tools_kwargs")
-                # For Tree Construction
-                if "answer" in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append("answer")
-                if self.config.trainer.get("process_reward", {}).get("type", "none") == "fol":
-                    for key in ("sample_id", "question_text", "extra_info", "data_source", "index"):
-                        if key in batch.non_tensor_batch and key not in non_tensor_batch_keys_to_pop:
-                            non_tensor_batch_keys_to_pop.append(key)
+                non_tensor_batch_keys_to_pop = build_generation_non_tensor_keys_to_pop(
+                    batch.non_tensor_batch,
+                    self.config.trainer.get("process_reward", {}).get("type", "none"),
+                )
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -1294,6 +1284,7 @@ class RayPPOTrainer:
                                         "training/step_treerl_total_steps": step_treerl_metrics.get("total_steps", 0),
                                         "training/step_treerl_steps_per_problem": step_treerl_metrics.get("steps_per_problem", 0.0),
                                         "training/step_treerl_format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
+                                        "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("process_reward_mean", 0.0),
                                         "training/step_treerl_leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
                                         "training/step_treerl_candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
                                         "training/step_treerl_selected_traces": step_treerl_metrics.get("selected_traces", 0),
