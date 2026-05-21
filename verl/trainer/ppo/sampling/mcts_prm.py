@@ -42,8 +42,11 @@ def strict_step_xml_correct(step_text: str) -> bool:
     return premise_count >= 1 and conclusion_count == 1
 
 
+BOXED_ANSWER_RE = re.compile(r"\\boxed\{(?:\{\s*([A-Za-z])\s*\}|\s*([A-Za-z])\s*)\}\s*$", re.DOTALL)
+
+
 def _boxed_answer_match(response_text: str):
-    return re.search(r"\\boxed\{\{?\s*([A-Za-z])\s*\}?\}\s*$", response_text, re.DOTALL)
+    return BOXED_ANSWER_RE.search(response_text or "")
 
 
 def boxed_answer_format_correct(response_text: str, valid_choices: Optional[str] = None) -> bool:
@@ -51,7 +54,7 @@ def boxed_answer_format_correct(response_text: str, valid_choices: Optional[str]
     match = _boxed_answer_match(response_text)
     if not match:
         return False
-    answer = match.group(1).upper()
+    answer = (match.group(1) or match.group(2)).upper()
     if valid_choices is None:
         return True
     return answer in {choice.upper() for choice in valid_choices}
@@ -84,7 +87,7 @@ def classify_trajectory_format(response_text: str, valid_choices: Optional[str] 
     answer_ok = False
     step_region = response_text
     if answer_match is not None:
-        answer = answer_match.group(1).upper()
+        answer = (answer_match.group(1) or answer_match.group(2)).upper()
         answer_ok = valid_choices is None or answer in {choice.upper() for choice in valid_choices}
         step_region = response_text[:answer_match.start()]
 
@@ -100,6 +103,27 @@ def classify_trajectory_format(response_text: str, valid_choices: Optional[str] 
         "format_step_only": step_only,
         "format_incorrect": incorrect,
         "format_trace_total": 1.0,
+    }
+
+
+def aggregate_trajectory_format_metrics(reward_extra_info: Dict[str, list]) -> Dict[str, float]:
+    """Aggregate per-trajectory format classes into rollout-level metrics."""
+    total = float(sum(reward_extra_info.get("format_trace_total", [])))
+    if total <= 0:
+        return {}
+
+    full = float(sum(reward_extra_info.get("format_full", [])))
+    answer_only = float(sum(reward_extra_info.get("format_answer_only", [])))
+    step_only = float(sum(reward_extra_info.get("format_step_only", [])))
+    incorrect = float(sum(reward_extra_info.get("format_incorrect", [])))
+
+    return {
+        "rollout/trajectory_format_correct_ratio": full / total,
+        "rollout/trajectory_format_correct_count": full,
+        "rollout/trajectory_format_total": total,
+        "rollout/answer_format_only_ratio": answer_only / total,
+        "rollout/step_format_only_ratio": step_only / total,
+        "rollout/format_incorrect_ratio": incorrect / total,
     }
 
 

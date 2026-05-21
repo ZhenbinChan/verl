@@ -27,6 +27,7 @@ from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.sampling.mcts_node import MCTSNode
 from verl.trainer.ppo.sampling.mcts_prm import (
+    aggregate_trajectory_format_metrics,
     boxed_answer_format_correct,
     classify_trajectory_format,
     format_step_reward,
@@ -542,6 +543,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertTrue(boxed_answer_format_correct(r"\boxed{A}"))
         self.assertTrue(boxed_answer_format_correct(r"final \boxed{{B}}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{AB}"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{A}}"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{{A}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{A} trailing"))
 
         full = good_step + r"\boxed{A}"
@@ -552,6 +555,20 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(classify_trajectory_format(answer_only)["format_answer_only"], 1.0)
         self.assertEqual(classify_trajectory_format(step_only)["format_step_only"], 1.0)
         self.assertEqual(classify_trajectory_format(bad)["format_incorrect"], 1.0)
+        self.assertEqual(classify_trajectory_format(good_step + r"\boxed{A}}")["format_incorrect"], 1.0)
+
+        rollout_metrics = aggregate_trajectory_format_metrics(
+            {
+                "format_full": [1.0, 0.0],
+                "format_answer_only": [0.0, 1.0],
+                "format_step_only": [0.0, 0.0],
+                "format_incorrect": [0.0, 0.0],
+                "format_trace_total": [1.0, 1.0],
+            }
+        )
+        self.assertEqual(rollout_metrics["rollout/trajectory_format_correct_count"], 1.0)
+        self.assertEqual(rollout_metrics["rollout/trajectory_format_total"], 2.0)
+        self.assertEqual(rollout_metrics["rollout/trajectory_format_correct_ratio"], 0.5)
 
     def test_build_output_tracks_trace_format_metrics_before_gpu_padding(self):
         strategy = make_strategy()

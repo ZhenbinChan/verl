@@ -53,6 +53,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.sampling.mcts_prm import aggregate_trajectory_format_metrics
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
@@ -1357,6 +1358,8 @@ class RayPPOTrainer:
                                 raise ValueError("Tree rewards expected but reward_fn_scores missing")
                             reward_tensor = reward_fn_tensor
                             reward_dict = self.reward_fn(batch, return_dict=True)
+                            reward_extra_infos_dict = reward_dict.get("reward_extra_info", {})
+                            metrics.update(aggregate_trajectory_format_metrics(reward_extra_infos_dict))
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
                                 # Warning：可能会导致 OOM
@@ -1375,6 +1378,8 @@ class RayPPOTrainer:
                                 future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                             else:
                                 reward_dict = self.reward_fn(batch, return_dict=True)
+                            reward_extra_infos_dict = reward_dict.get("reward_extra_info", {})
+                            metrics.update(aggregate_trajectory_format_metrics(reward_extra_infos_dict))
                             # PRM: function reward
                             reward_fn_tensor = reward_dict["reward_tensor"]
                             reward_tensor = reward_fn_tensor

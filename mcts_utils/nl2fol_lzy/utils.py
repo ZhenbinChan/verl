@@ -1,9 +1,10 @@
 import re
 import os
-from openai import OpenAI
 import ast
 
 def get_response(usr_input, system_prompt):
+    from openai import OpenAI
+
     client = OpenAI()
     response = client.chat.completions.create(
         model="gpt-4o-mini-2024-07-18",
