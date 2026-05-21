@@ -96,6 +96,37 @@ Expected outputs:
 - `train.parquet` and `test.parquet`: training/validation data.
 - `fol_metadata.json`: required when `trainer.process_reward.type=fol` and offline metadata is used.
 
+### Global FOL PRM Metadata
+
+Use the split metadata preprocessor when preparing FOL PRM data for Step-TreeRL. It converts dataset splits separately and writes both split-specific metadata and one merged metadata file.
+
+```bash
+bash bash_scripts/preprocess/global_fol_prm_metadata_splits.sh \
+  --api_config llm_server/configs/deepseek.yaml
+```
+
+The script defaults to ReClor:
+
+- input: `data/reclor`
+- output: `data/reclor_global_fol_prm`
+- splits: discovered from `train.parquet`, `test.parquet`, and validation aliases if present
+- metadata: `fol_metadata_train.json`, `fol_metadata_test.json`, and merged `fol_metadata_all.json`
+
+For a small API smoke test:
+
+```bash
+bash bash_scripts/preprocess/global_fol_prm_metadata_splits.sh \
+  --api_config llm_server/configs/deepseek.yaml \
+  --output_dir /tmp/verl_fol_deepseek_reclor_smoke \
+  --splits train,test \
+  --num_samples_per_split 1 \
+  --max_workers 1 \
+  --max_retries 3 \
+  --save_every 1
+```
+
+Provider settings are loaded from YAML or JSON files under `llm_server/configs/`. For example, `llm_server/configs/deepseek.yaml` contains the OpenAI-compatible endpoint, model name, request defaults, optional `extra_body`, and the `api_key` field used by both preprocessing and online FOL verification.
+
 ## Training Modes
 
 The default entrypoint is:
@@ -179,13 +210,68 @@ This checks whether reasoning steps follow the expected step format. It is the s
 trainer.process_reward.type=fol \
 trainer.process_reward.fol.prm_mode=global_fol_prm \
 trainer.process_reward.fol.metadata_path=/path/to/fol_metadata.json \
-trainer.process_reward.fol.llm.provider=openai_compatible \
-trainer.process_reward.fol.llm.api_base_url=http://localhost:4869/v1 \
-trainer.process_reward.fol.llm.api_key=EMPTY \
-trainer.process_reward.fol.llm.model_name=qwen2.5-7b-coder
+trainer.process_reward.fol.llm.api_config=llm_server/configs/deepseek.yaml
 ```
 
-FOL scoring needs `sample_id` metadata in the batch. If metadata is missing and `online_declaration_fallback=true`, the runtime can generate declarations online through the configured LLM backend.
+FOL scoring needs `sample_id` metadata in the batch. For global FOL PRM, use the merged split metadata file such as `data/reclor_global_fol_prm/fol_metadata_all.json`, so train, test, and validation IDs are resolved consistently. If metadata is missing and `online_declaration_fallback=true`, the runtime can generate declarations online through the configured LLM backend.
+
+The FOL LLM config can still be overridden from the command line, but the recommended path is to keep provider-specific settings in `llm_server/configs/*.yaml` and pass only `trainer.process_reward.fol.llm.api_config=...` in training scripts.
+
+### ReClor Step-TreeRL FOL Script
+
+The main ReClor FOL Step-TreeRL script is:
+
+```bash
+bash_scripts/reclor/Qwen3-8B-base_StepTreeRL_fol_reward.sh
+```
+
+It uses `FOL_API_CONFIG` to select the provider config. Example:
+
+```bash
+FOL_API_CONFIG=/home/chenzhb/Workspaces/verl/llm_server/configs/deepseek.yaml \
+bash bash_scripts/reclor/Qwen3-8B-base_StepTreeRL_fol_reward.sh
+```
+
+The recent 1-step smoke test used the same script with overrides:
+
+```bash
+FOL_API_CONFIG=/home/chenzhb/Workspaces/verl/llm_server/configs/deepseek.yaml \
+bash bash_scripts/reclor/Qwen3-8B-base_StepTreeRL_fol_reward.sh \
+  actor_rollout_ref.model.path=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct \
+  data.train_files=/tmp/verl_fol_deepseek_reclor_direct_key_train2/train.parquet \
+  data.val_files=/tmp/verl_fol_deepseek_reclor_direct_key_train2/test.parquet \
+  data.train_batch_size=2 \
+  data.max_prompt_length=1024 \
+  data.max_response_length=128 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=2 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=2048 \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+  actor_rollout_ref.rollout.max_model_len=1536 \
+  actor_rollout_ref.rollout.n=1 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+  trainer.step_treerl_config.max_depth=1 \
+  trainer.step_treerl_config.max_token_num=256 \
+  trainer.step_treerl_config.branch_max_new_tokens=64 \
+  trainer.step_treerl_config.m=1 \
+  trainer.step_treerl_config.n=1 \
+  trainer.step_treerl_config.l=0 \
+  trainer.step_treerl_config.t=1 \
+  trainer.step_treerl_config.selected_num_traces=1 \
+  trainer.process_reward.fol.metadata_path=/tmp/verl_fol_deepseek_reclor_direct_key_train2/fol_metadata_all.json \
+  trainer.process_reward.fol.max_retries=1 \
+  trainer.process_reward.fol.verify_timeout=10 \
+  trainer.process_reward.fol.llm.max_concurrency=1 \
+  trainer.logger="['console']" \
+  trainer.experiment_name=StepTreeRL_Reclor_FOL_deepseek_direct_key_smoke \
+  trainer.save_freq=-1 \
+  trainer.test_freq=-1 \
+  trainer.total_training_steps=1 \
+  trainer.total_epochs=1
+```
+
+In that run, the training step completed and logged `reward/step_treerl_process_reward_mean`. The final checkpoint save failed because the workspace filesystem was full, not because of FOL metadata or provider config loading.
 
 ## Evaluation
 

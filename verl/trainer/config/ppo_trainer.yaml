@@ -334,6 +334,7 @@ trainer:
       max_retries: 3
       debug_dir: null
       llm:
+        api_config: null
         provider: openai_compatible # openai_compatible | minimax | azure_openai
         api_base_url: "http://localhost:4869/v1"
         api_key: "EMPTY"
@@ -344,9 +345,11 @@ trainer:
         max_tokens: 4096
         temperature: 0.1
         top_p: 0.8
+        default_args: {}
         max_concurrency: 8
         request_timeout: 60
         extra_body: {}
+        bypass_env_proxy: false
     self_eval:
       prompt_path: null
       max_new_tokens: 32

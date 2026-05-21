@@ -4,6 +4,7 @@ set -x
 HOME=/home/chenzhb/Workspaces/verl
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base
 N_GPUS_PER_NODE=2
+FOL_API_CONFIG=${FOL_API_CONFIG:-$HOME/llm_server/configs/minimax.yaml}
 
 M=6
 N=2
@@ -15,7 +16,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_grpo \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/reclor_global_fol_prm/train.parquet \
-    data.val_files=$HOME/data/reclor/test.parquet \
+    data.val_files=$HOME/data/reclor_global_fol_prm/test.parquet \
     data.train_batch_size=4 \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
@@ -56,13 +57,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.sampling_strategy=step_treerl \
     trainer.process_reward.type=fol \
     trainer.process_reward.fol.prm_mode=global_fol_prm \
-    trainer.process_reward.fol.metadata_path=$HOME/data/reclor_global_fol_prm/fol_metadata.json \
+    trainer.process_reward.fol.metadata_path=$HOME/data/reclor_global_fol_prm/fol_metadata_all.json \
     trainer.process_reward.fol.online_declaration_fallback=true \
     trainer.process_reward.fol.fail_on_missing_metadata=false \
-    trainer.process_reward.fol.llm.provider=minimax \
-    trainer.process_reward.fol.llm.api_base_url=https://api.minimaxi.com/v1 \
-    trainer.process_reward.fol.llm.api_key='${oc.env:MINIMAX_API_KEY}' \
-    trainer.process_reward.fol.llm.model_name=MiniMax-M2.7 \
+    trainer.process_reward.fol.llm.api_config=${FOL_API_CONFIG} \
     trainer.process_reward.fol.llm.max_concurrency=8 \
     trainer.step_treerl_config.max_depth=20 \
     trainer.step_treerl_config.max_token_num=4096 \

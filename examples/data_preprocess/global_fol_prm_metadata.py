@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -25,6 +26,28 @@ from verl.utils.fol_verifier import FOLMetadata, FOLVerifier, LLMClient, save_fo
 
 
 PROMPT_PATH = REPO_ROOT / "mcts_utils" / "prompts" / "Z3DeclarationsGeneration1.txt"
+
+
+def load_api_config(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"LLM API config not found: {path}")
+    config = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if not isinstance(config, dict):
+        raise ValueError(f"LLM API config must be a mapping: {path}")
+
+    return {
+        "provider": config.get("provider", None),
+        "base_url": config.get("base_url", config.get("api_base_url", None)),
+        "api_key": config.get("api_key", None),
+        "model": config.get("model_name", config.get("model", None)),
+        "azure_endpoint": config.get("azure_endpoint", None),
+        "api_version": config.get("api_version", None),
+        "deployment_name": config.get("deployment_name", None),
+        "request_timeout": config.get("request_timeout", None),
+        "bypass_env_proxy": config.get("bypass_env_proxy", None),
+        "default_args": config.get("default_args", {}) or {},
+        "extra_body": config.get("extra_body", {}) or {},
+    }
 
 
 def _to_python(value: Any) -> Any:
@@ -117,6 +140,12 @@ def build_llm_client(args) -> LLMClient:
         or os.getenv("OPENAI_API_KEY")
         or "EMPTY"
     )
+    default_args = {
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+    }
+    default_args.update(getattr(args, "default_args", {}) or {})
     return LLMClient(
         base_url=args.base_url,
         api_key=api_key,
@@ -126,11 +155,9 @@ def build_llm_client(args) -> LLMClient:
         api_version=args.api_version,
         deployment_name=args.deployment_name,
         request_timeout=args.request_timeout,
-        default_args={
-            "max_tokens": args.max_tokens,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-        },
+        bypass_env_proxy=bool(getattr(args, "bypass_env_proxy", False)),
+        extra_body=getattr(args, "extra_body", None),
+        default_args=default_args,
     )
 
 
@@ -142,7 +169,19 @@ def process_record(
     args,
 ) -> tuple[int, Dict[str, Any], Optional[FOLMetadata], Optional[str]]:
     sample = dict(record)
-    sample_id = str(sample.get("sample_id", f"sample_{idx}"))
+    original_sample_id = sample.get("sample_id", None)
+    if args.sample_id_prefix:
+        sample_id = f"{args.sample_id_prefix}_{idx}"
+        sample["original_sample_id"] = str(original_sample_id) if original_sample_id is not None else ""
+        sample["sample_id"] = sample_id
+        extra_info = _to_python(sample.get("extra_info"))
+        if isinstance(extra_info, dict):
+            extra_info = dict(extra_info)
+            extra_info.setdefault("original_sample_id", str(original_sample_id) if original_sample_id is not None else "")
+            extra_info["sample_id"] = sample_id
+            sample["extra_info"] = extra_info
+    else:
+        sample_id = str(sample.get("sample_id", f"sample_{idx}"))
     question_text = get_question_text(sample)
     ground_truth = get_ground_truth(sample)
     last_error = None
@@ -174,7 +213,13 @@ def process_record(
     return idx, sample, None, last_error
 
 
-def write_outputs(records: List[Dict[str, Any]], metadata: Dict[str, FOLMetadata], output_dir: Path) -> None:
+def write_outputs(
+    records: List[Dict[str, Any]],
+    metadata: Dict[str, FOLMetadata],
+    output_dir: Path,
+    output_parquet_name: str,
+    metadata_filename: str,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     parquet_records = []
     for record in records:
@@ -182,8 +227,8 @@ def write_outputs(records: List[Dict[str, Any]], metadata: Dict[str, FOLMetadata
         if isinstance(safe_record.get("fol_metadata"), dict):
             safe_record["fol_metadata"] = json.dumps(safe_record["fol_metadata"], ensure_ascii=False)
         parquet_records.append(safe_record)
-    pd.DataFrame(parquet_records).to_parquet(output_dir / "train.parquet")
-    save_fol_metadata(metadata, str(output_dir / "fol_metadata.json"))
+    pd.DataFrame(parquet_records).to_parquet(output_dir / output_parquet_name)
+    save_fol_metadata(metadata, str(output_dir / metadata_filename))
 
 
 def main() -> None:
@@ -194,6 +239,9 @@ def main() -> None:
     parser.add_argument("--base_url", default="https://api.minimaxi.com/v1")
     parser.add_argument("--api_key", default=None)
     parser.add_argument("--model", default="MiniMax-M2.7")
+    parser.add_argument("--api_config", default=None)
+    parser.add_argument("--use_api_config", default=None)
+    parser.add_argument("--use_minimax_config", default=None)
     parser.add_argument("--azure_endpoint", default=None)
     parser.add_argument("--api_version", default=None)
     parser.add_argument("--deployment_name", default=None)
@@ -203,10 +251,37 @@ def main() -> None:
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top_p", type=float, default=0.8)
+    parser.add_argument("--bypass_env_proxy", action="store_true")
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--save_raw_response", action="store_true")
     parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--output_parquet_name", default="train.parquet")
+    parser.add_argument("--metadata_filename", default="fol_metadata.json")
+    parser.add_argument("--failures_filename", default="metadata_failures.json")
+    parser.add_argument(
+        "--sample_id_prefix",
+        default=None,
+        help="Override sample_id as '<prefix>_<row_index>'. Use this for splits whose index-based IDs collide.",
+    )
     args = parser.parse_args()
+    args.default_args = {}
+    args.extra_body = None
+
+    api_config_path = args.api_config or args.use_api_config or args.use_minimax_config
+    if api_config_path:
+        api_cfg = load_api_config(Path(api_config_path))
+        args.provider = api_cfg["provider"] or args.provider
+        args.base_url = api_cfg["base_url"] or args.base_url
+        args.api_key = args.api_key or api_cfg["api_key"]
+        args.model = api_cfg["model"] or args.model
+        args.azure_endpoint = api_cfg["azure_endpoint"] or args.azure_endpoint
+        args.api_version = api_cfg["api_version"] or args.api_version
+        args.deployment_name = api_cfg["deployment_name"] or args.deployment_name
+        args.request_timeout = api_cfg["request_timeout"] or args.request_timeout
+        if api_cfg["bypass_env_proxy"] is not None:
+            args.bypass_env_proxy = bool(api_cfg["bypass_env_proxy"])
+        args.default_args = api_cfg["default_args"]
+        args.extra_body = api_cfg["extra_body"]
 
     df = pd.read_parquet(args.input_parquet)
     if args.num_samples is not None:
@@ -244,13 +319,17 @@ def main() -> None:
             )
             if args.save_every > 0 and completed % args.save_every == 0:
                 partial = [record for record in results if record is not None]
-                write_outputs(partial, metadata_map, output_dir)
+                write_outputs(partial, metadata_map, output_dir, args.output_parquet_name, args.metadata_filename)
 
     final_records = [record for record in results if record is not None]
-    write_outputs(final_records, metadata_map, output_dir)
+    write_outputs(final_records, metadata_map, output_dir, args.output_parquet_name, args.metadata_filename)
     if failures:
-        with open(output_dir / "metadata_failures.json", "w", encoding="utf-8") as f:
+        with open(output_dir / args.failures_filename, "w", encoding="utf-8") as f:
             json.dump(failures, f, ensure_ascii=False, indent=2)
+    else:
+        failures_path = output_dir / args.failures_filename
+        if failures_path.exists():
+            failures_path.unlink()
     print(
         f"[global_fol_prm_metadata] saved {len(final_records)} samples, "
         f"{len(metadata_map)} metadata entries to {output_dir}",

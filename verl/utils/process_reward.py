@@ -26,6 +26,7 @@ PROCESS_REWARD_DEFAULTS: Dict[str, Any] = {
         "max_retries": 3,
         "debug_dir": None,
         "llm": {
+            "api_config": None,
             "provider": "openai_compatible",
             "api_base_url": "http://localhost:4869/v1",
             "api_key": "EMPTY",
@@ -36,9 +37,11 @@ PROCESS_REWARD_DEFAULTS: Dict[str, Any] = {
             "max_tokens": 4096,
             "temperature": 0.1,
             "top_p": 0.8,
+            "default_args": {},
             "max_concurrency": 8,
             "request_timeout": 60,
             "extra_body": {},
+            "bypass_env_proxy": False,
         },
     },
     "self_eval": {
@@ -280,6 +283,49 @@ def _load_self_eval_prompt_template(prompt_path: Any) -> str:
     return template
 
 
+def _load_llm_api_config(config_path: Any) -> Dict[str, Any]:
+    if not config_path:
+        return {}
+    path = Path(str(config_path)).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"FOL LLM API config not found: {path}")
+    config = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if not isinstance(config, dict):
+        raise ValueError(f"FOL LLM API config must be a mapping: {path}")
+    return {
+        "provider": config.get("provider", None),
+        "api_base_url": config.get("api_base_url", config.get("base_url", None)),
+        "api_key": config.get("api_key", None),
+        "model_name": config.get("model_name", config.get("model", None)),
+        "azure_endpoint": config.get("azure_endpoint", None),
+        "api_version": config.get("api_version", None),
+        "deployment_name": config.get("deployment_name", None),
+        "request_timeout": config.get("request_timeout", None),
+        "bypass_env_proxy": config.get("bypass_env_proxy", None),
+        "default_args": config.get("default_args", {}) or {},
+        "extra_body": config.get("extra_body", {}) or {},
+    }
+
+
+def _merge_llm_cfg_with_api_config(llm_cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    llm_cfg = dict(llm_cfg or {})
+    api_config_path = llm_cfg.get("api_config", None)
+    if not api_config_path:
+        return llm_cfg
+
+    merged = _load_llm_api_config(api_config_path)
+    defaults = PROCESS_REWARD_DEFAULTS["fol"]["llm"]
+    for key, value in llm_cfg.items():
+        if key == "api_config":
+            continue
+        if value is None:
+            continue
+        if key not in defaults or value != defaults.get(key):
+            merged[key] = value
+    merged["api_config"] = api_config_path
+    return merged
+
+
 def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> ProcessRewardRuntime:
     reward_type = _normalize_reward_type(process_reward_cfg.get("type", "none"))
     if reward_type == "none":
@@ -323,7 +369,7 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
                 f"FOL metadata path not found: {metadata_path}"
             )
 
-    llm_cfg = fol_cfg.get("llm", {}) or {}
+    llm_cfg = _merge_llm_cfg_with_api_config(fol_cfg.get("llm", {}) or {})
     provider = str(llm_cfg.get("provider", "openai_compatible") or "openai_compatible").lower()
     api_base_url = llm_cfg.get("api_base_url", llm_cfg.get("base_url", None))
     model_name = llm_cfg.get("model_name", llm_cfg.get("model", None))
@@ -346,6 +392,7 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
         "temperature": llm_cfg.get("temperature", 0.1),
         "top_p": llm_cfg.get("top_p", 0.8),
     }
+    default_args.update(llm_cfg.get("default_args", {}) or {})
     llm_client = LLMClient(
         base_url=api_base_url,
         api_key=llm_cfg.get("api_key") or "EMPTY",
@@ -357,6 +404,7 @@ def build_process_reward_runtime(process_reward_cfg: Mapping[str, Any]) -> Proce
         deployment_name=deployment_name,
         request_timeout=llm_cfg.get("request_timeout", None),
         extra_body=llm_cfg.get("extra_body", None),
+        bypass_env_proxy=bool(llm_cfg.get("bypass_env_proxy", False)),
     )
     fol_verifier = FOLVerifier(
         llm_client=llm_client,

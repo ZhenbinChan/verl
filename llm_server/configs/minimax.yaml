@@ -1,0 +1,11 @@
+provider: minimax
+base_url: https://api.minimaxi.com/v1
+api_key: ${oc.env:MINIMAX_API_KEY}
+model_name: MiniMax-M2.7
+request_timeout: 120
+bypass_env_proxy: true
+
+default_args: {}
+
+extra_body:
+  reasoning_split: true

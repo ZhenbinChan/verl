@@ -1,0 +1,9 @@
+provider: openai_compatible
+base_url: http://localhost:4869/v1
+api_key: EMPTY
+model_name: qwen2.5-7b-coder
+request_timeout: 120
+bypass_env_proxy: true
+
+default_args: {}
+extra_body: {}

@@ -151,6 +151,7 @@ class LLMClient:
         deployment_name: Optional[str] = None,
         request_timeout: Optional[float] = None,
         extra_body: Optional[Dict[str, Any]] = None,
+        bypass_env_proxy: bool = False,
     ):
         self.provider = str(provider or "openai_compatible").lower()
         self.base_url = base_url
@@ -161,6 +162,7 @@ class LLMClient:
         self.deployment_name = deployment_name
         self.request_timeout = request_timeout
         self.extra_body = extra_body or {}
+        self.bypass_env_proxy = bypass_env_proxy
         self.default_args = default_args or {
             "max_tokens": 4096,
             "temperature": 0.1,
@@ -198,6 +200,8 @@ class LLMClient:
         return self._client
 
     def _should_bypass_env_proxy(self) -> bool:
+        if self.bypass_env_proxy:
+            return True
         hostname = urlparse(self.base_url).hostname
         return hostname in {"localhost", "127.0.0.1", "::1"}
 

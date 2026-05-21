@@ -11,6 +11,8 @@ FOL_MODEL=${FOL_MODEL:-MiniMax-M2.7}
 FOL_AZURE_ENDPOINT=${FOL_AZURE_ENDPOINT:-}
 FOL_API_VERSION=${FOL_API_VERSION:-}
 FOL_DEPLOYMENT_NAME=${FOL_DEPLOYMENT_NAME:-}
+API_CONFIG=${API_CONFIG:-}
+MINIMAX_CONFIG=${MINIMAX_CONFIG:-}
 
 MAX_WORKERS=${MAX_WORKERS:-4}
 MAX_RETRIES=${MAX_RETRIES:-3}
@@ -20,6 +22,7 @@ TEMPERATURE=${TEMPERATURE:-0.1}
 TOP_P=${TOP_P:-0.8}
 SAVE_EVERY=${SAVE_EVERY:-100}
 NUM_SAMPLES=${NUM_SAMPLES:-}
+BYPASS_ENV_PROXY=${BYPASS_ENV_PROXY:-1}
 
 cd "${PROJECT_ROOT}"
 
@@ -42,6 +45,12 @@ args=(
 if [[ -n "${FOL_API_KEY:-}" ]]; then
   args+=(--api_key "${FOL_API_KEY}")
 fi
+if [[ -n "${API_CONFIG}" ]]; then
+  args+=(--api_config "${API_CONFIG}")
+fi
+if [[ -n "${MINIMAX_CONFIG}" ]]; then
+  args+=(--use_minimax_config "${MINIMAX_CONFIG}")
+fi
 if [[ -n "${FOL_AZURE_ENDPOINT}" ]]; then
   args+=(--azure_endpoint "${FOL_AZURE_ENDPOINT}")
 fi
@@ -53,6 +62,9 @@ if [[ -n "${FOL_DEPLOYMENT_NAME}" ]]; then
 fi
 if [[ -n "${NUM_SAMPLES}" ]]; then
   args+=(--num_samples "${NUM_SAMPLES}")
+fi
+if [[ "${BYPASS_ENV_PROXY}" == "1" ]]; then
+  args+=(--bypass_env_proxy)
 fi
 if [[ "${SAVE_RAW_RESPONSE:-0}" == "1" ]]; then
   args+=(--save_raw_response)

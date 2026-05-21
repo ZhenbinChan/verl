@@ -1,0 +1,13 @@
+provider: openai_compatible
+base_url: https://api.deepseek.com
+api_key: sk-5ba00904307c4205aa4eae5b982c5bf7
+model_name: deepseek-v4-pro
+request_timeout: 180
+bypass_env_proxy: true
+
+default_args:
+  reasoning_effort: high
+
+extra_body:
+  thinking:
+    type: enabled
