@@ -43,6 +43,17 @@ def strict_step_xml_correct(step_text: str) -> bool:
 
 
 BOXED_ANSWER_RE = re.compile(r"\\boxed\{(?:\{\s*([A-Za-z])\s*\}|\s*([A-Za-z])\s*)\}\s*$", re.DOTALL)
+STEP_BLOCK_RE = re.compile(r"<step\b[^>]*>.*?</step>", re.DOTALL)
+STEP_TAG_RE = re.compile(r"</?step\b", re.DOTALL)
+FORMAT_PRIMARY_CATEGORIES = (
+    "full",
+    "no_step",
+    "text_outside_step",
+    "step_xml_invalid",
+    "step_schema_invalid",
+    "boxed_missing",
+    "boxed_invalid",
+)
 
 
 def _boxed_answer_match(response_text: str):
@@ -61,7 +72,7 @@ def boxed_answer_format_correct(response_text: str, valid_choices: Optional[str]
 
 
 def _step_blocks_cover_text(text: str) -> tuple[bool, list[str]]:
-    matches = list(re.finditer(r"<step>.*?</step>", text, re.DOTALL))
+    matches = list(STEP_BLOCK_RE.finditer(text or ""))
     if not matches:
         return False, []
 
@@ -106,24 +117,122 @@ def classify_trajectory_format(response_text: str, valid_choices: Optional[str] 
     }
 
 
-def aggregate_trajectory_format_metrics(reward_extra_info: Dict[str, list]) -> Dict[str, float]:
-    """Aggregate per-trajectory format classes into rollout-level metrics."""
-    total = float(sum(reward_extra_info.get("format_trace_total", [])))
+def _split_answer_region(response_text: str, valid_choices: Optional[str] = None) -> tuple[str, str, str]:
+    match = _boxed_answer_match(response_text)
+    if match:
+        answer = (match.group(1) or match.group(2)).upper()
+        if valid_choices is None or answer in {choice.upper() for choice in valid_choices}:
+            return response_text[: match.start()], "valid", answer
+        return response_text[: match.start()], "invalid", ""
+
+    boxed_start = response_text.rfind("\\boxed")
+    if boxed_start >= 0:
+        return response_text[:boxed_start], "invalid", ""
+
+    return response_text, "missing", ""
+
+
+def _step_block_status(step_text: str) -> str:
+    try:
+        root = ET.fromstring(step_text.strip())
+    except ET.ParseError:
+        return "xml_invalid"
+
+    if root.tag != "step":
+        return "schema_invalid"
+    if root.text and root.text.strip():
+        return "schema_invalid"
+
+    premise_count = 0
+    conclusion_count = 0
+    for child in list(root):
+        if child.tag == "premise":
+            premise_count += 1
+        elif child.tag == "conclusion":
+            conclusion_count += 1
+        else:
+            return "schema_invalid"
+        if list(child):
+            return "schema_invalid"
+        if child.tail and child.tail.strip():
+            return "schema_invalid"
+
+    if premise_count < 1 or conclusion_count != 1:
+        return "schema_invalid"
+    return "ok"
+
+
+def classify_rollout_format(response_text: str, valid_choices: Optional[str] = None) -> Dict[str, object]:
+    """Classify one complete rollout trajectory into exactly one primary format bucket."""
+    response_text = response_text or ""
+    step_region, boxed_status, boxed_answer = _split_answer_region(response_text, valid_choices)
+    step_matches = list(STEP_BLOCK_RE.finditer(step_region))
+    step_block_count = len(step_matches)
+
+    if not step_matches:
+        if STEP_TAG_RE.search(step_region):
+            primary = "step_xml_invalid"
+        else:
+            primary = "no_step"
+    else:
+        cursor = 0
+        text_outside_step = False
+        for match in step_matches:
+            if step_region[cursor : match.start()].strip():
+                text_outside_step = True
+                break
+            cursor = match.end()
+        if not text_outside_step and step_region[cursor:].strip():
+            text_outside_step = True
+
+        if text_outside_step:
+            primary = "text_outside_step"
+        else:
+            statuses = [_step_block_status(match.group(0)) for match in step_matches]
+            if "xml_invalid" in statuses:
+                primary = "step_xml_invalid"
+            elif "schema_invalid" in statuses:
+                primary = "step_schema_invalid"
+            elif boxed_status == "missing":
+                primary = "boxed_missing"
+            elif boxed_status == "invalid":
+                primary = "boxed_invalid"
+            else:
+                primary = "full"
+
+    return {
+        "format_primary": primary,
+        "boxed_status": boxed_status,
+        "boxed_answer": boxed_answer,
+        "step_block_count": float(step_block_count),
+    }
+
+
+def aggregate_rollout_format_metrics(format_infos: list[Dict[str, object]]) -> Dict[str, float]:
+    """Aggregate trainer-level rollout format classifications."""
+    total = float(len(format_infos))
     if total <= 0:
         return {}
 
-    full = float(sum(reward_extra_info.get("format_full", [])))
-    answer_only = float(sum(reward_extra_info.get("format_answer_only", [])))
-    step_only = float(sum(reward_extra_info.get("format_step_only", [])))
-    incorrect = float(sum(reward_extra_info.get("format_incorrect", [])))
+    counts = {category: 0.0 for category in FORMAT_PRIMARY_CATEGORIES}
+    for info in format_infos:
+        primary = info.get("format_primary")
+        if primary in counts:
+            counts[primary] += 1.0
 
+    metrics = {"rollout/format_primary/total": total}
+    for category in FORMAT_PRIMARY_CATEGORIES:
+        metrics[f"rollout/format_primary/{category}_ratio"] = counts[category] / total
+    return metrics
+
+
+def rollout_format_infos_to_columns(format_infos: list[Dict[str, object]]) -> Dict[str, list]:
+    """Convert per-rollout format info to JSONL-compatible columns."""
     return {
-        "rollout/trajectory_format_correct_ratio": full / total,
-        "rollout/trajectory_format_correct_count": full,
-        "rollout/trajectory_format_total": total,
-        "rollout/answer_format_only_ratio": answer_only / total,
-        "rollout/step_format_only_ratio": step_only / total,
-        "rollout/format_incorrect_ratio": incorrect / total,
+        "format_primary": [str(info.get("format_primary", "")) for info in format_infos],
+        "boxed_status": [str(info.get("boxed_status", "")) for info in format_infos],
+        "boxed_answer": [str(info.get("boxed_answer", "")) for info in format_infos],
+        "step_block_count": [float(info.get("step_block_count", 0.0)) for info in format_infos],
     }
 
 

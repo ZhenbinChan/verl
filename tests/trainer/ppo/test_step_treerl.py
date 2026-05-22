@@ -27,8 +27,9 @@ from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.sampling.mcts_node import MCTSNode
 from verl.trainer.ppo.sampling.mcts_prm import (
-    aggregate_trajectory_format_metrics,
+    aggregate_rollout_format_metrics,
     boxed_answer_format_correct,
+    classify_rollout_format,
     classify_trajectory_format,
     format_step_reward,
     strict_step_xml_correct,
@@ -557,18 +558,25 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(classify_trajectory_format(bad)["format_incorrect"], 1.0)
         self.assertEqual(classify_trajectory_format(good_step + r"\boxed{A}}")["format_incorrect"], 1.0)
 
-        rollout_metrics = aggregate_trajectory_format_metrics(
-            {
-                "format_full": [1.0, 0.0],
-                "format_answer_only": [0.0, 1.0],
-                "format_step_only": [0.0, 0.0],
-                "format_incorrect": [0.0, 0.0],
-                "format_trace_total": [1.0, 1.0],
-            }
+        self.assertEqual(classify_rollout_format(full)["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(answer_only)["format_primary"], "no_step")
+        self.assertEqual(classify_rollout_format("prefix\n" + full)["format_primary"], "text_outside_step")
+        self.assertEqual(classify_rollout_format("<step><premise>a</premise>")["format_primary"], "step_xml_invalid")
+        self.assertEqual(classify_rollout_format("<step><premise>a</premise></step>" + r"\boxed{A}")["format_primary"], "step_schema_invalid")
+        self.assertEqual(classify_rollout_format(good_step)["format_primary"], "boxed_missing")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{AA}")["format_primary"], "boxed_invalid")
+
+        rollout_metrics = aggregate_rollout_format_metrics(
+            [
+                classify_rollout_format(full),
+                classify_rollout_format(answer_only),
+            ]
         )
-        self.assertEqual(rollout_metrics["rollout/trajectory_format_correct_count"], 1.0)
-        self.assertEqual(rollout_metrics["rollout/trajectory_format_total"], 2.0)
-        self.assertEqual(rollout_metrics["rollout/trajectory_format_correct_ratio"], 0.5)
+        self.assertEqual(rollout_metrics["rollout/format_primary/total"], 2.0)
+        self.assertEqual(rollout_metrics["rollout/format_primary/full_ratio"], 0.5)
+        self.assertEqual(rollout_metrics["rollout/format_primary/no_step_ratio"], 0.5)
+        ratio_sum = sum(value for key, value in rollout_metrics.items() if key.endswith("_ratio"))
+        self.assertEqual(ratio_sum, 1.0)
 
     def test_build_output_tracks_trace_format_metrics_before_gpu_padding(self):
         strategy = make_strategy()

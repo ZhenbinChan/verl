@@ -17,7 +17,6 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format
 from verl.utils.reward_score import _default_compute_score
 
 
@@ -129,9 +128,6 @@ class NaivePlusRewardManager:
             prompt.append(prompt_str)# 每个sample 的prompt
             gt.append(ground_truth)# 每个sample 的gt
             response.append(response_str)# 每个sample 的response
-
-            for key, value in classify_trajectory_format(response_str).items():
-                reward_extra_info[key].append(value)
 
             reward_tensor[i, valid_response_length - 1] = reward
             # reward_tensor[i, :valid_response_length - 1] = reward

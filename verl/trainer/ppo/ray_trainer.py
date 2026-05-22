@@ -53,7 +53,11 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.sampling.mcts_prm import aggregate_trajectory_format_metrics
+from verl.trainer.ppo.sampling.mcts_prm import (
+    aggregate_rollout_format_metrics,
+    classify_rollout_format,
+    rollout_format_infos_to_columns,
+)
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
@@ -845,6 +849,21 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    def _compute_rollout_format_metrics(self, batch: DataProto):
+        outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        format_infos = [classify_rollout_format(output) for output in outputs]
+        return aggregate_rollout_format_metrics(format_infos), rollout_format_infos_to_columns(format_infos)
+
+    def _filter_training_reward_extra_infos(self, reward_extra_infos_dict):
+        legacy_format_keys = {
+            "format_full",
+            "format_answer_only",
+            "format_step_only",
+            "format_incorrect",
+            "format_trace_total",
+        }
+        return {key: value for key, value in reward_extra_infos_dict.items() if key not in legacy_format_keys}
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -1236,6 +1255,7 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 reward_extra_infos_dict = {}
+                rollout_format_extra_infos_dict = {}
                 sampling_metrics = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # capture ordering before popping fields for generation
@@ -1341,6 +1361,10 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+                    if self.config.trainer.get("log_format_metrics", False):
+                        rollout_format_metrics, rollout_format_extra_infos_dict = self._compute_rollout_format_metrics(batch)
+                        metrics.update(rollout_format_metrics)
+
                     with _timer("reward", timing_raw):
                         # If use_rm is True, It will compute reward model score using RewardModelWorker and update batch with 'rm_scores' key
                         if self.use_rm:
@@ -1359,7 +1383,6 @@ class RayPPOTrainer:
                             reward_tensor = reward_fn_tensor
                             reward_dict = self.reward_fn(batch, return_dict=True)
                             reward_extra_infos_dict = reward_dict.get("reward_extra_info", {})
-                            metrics.update(aggregate_trajectory_format_metrics(reward_extra_infos_dict))
                             if "outcome_reward" in reward_dict.keys():
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
                                 # Warning：可能会导致 OOM
@@ -1379,7 +1402,6 @@ class RayPPOTrainer:
                             else:
                                 reward_dict = self.reward_fn(batch, return_dict=True)
                             reward_extra_infos_dict = reward_dict.get("reward_extra_info", {})
-                            metrics.update(aggregate_trajectory_format_metrics(reward_extra_infos_dict))
                             # PRM: function reward
                             reward_fn_tensor = reward_dict["reward_tensor"]
                             reward_tensor = reward_fn_tensor
@@ -1526,7 +1548,10 @@ class RayPPOTrainer:
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                reward_extra_infos_dict={
+                                    **self._filter_training_reward_extra_infos(reward_extra_infos_dict),
+                                    **rollout_format_extra_infos_dict,
+                                },
                                 dump_path=dump_path,
                             )
 

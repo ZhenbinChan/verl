@@ -4,7 +4,6 @@ import numpy as np
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import aggregate_trajectory_format_metrics
 from verl.workers.reward_manager.naive_plus import NaivePlusRewardManager
 
 
@@ -47,7 +46,7 @@ def make_data(responses: list[str]) -> DataProto:
     )
 
 
-def test_naive_plus_records_trajectory_format_metrics_independent_of_answer_correctness():
+def test_naive_plus_does_not_record_trainer_level_format_metrics():
     valid_format_wrong_answer = "<step><premise>a</premise><conclusion>b</conclusion></step>\n\\boxed{A}"
     answer_only = "plain reasoning\n\\boxed{B}"
     manager = NaivePlusRewardManager(
@@ -59,12 +58,6 @@ def test_naive_plus_records_trajectory_format_metrics_independent_of_answer_corr
     result = manager(make_data([valid_format_wrong_answer, answer_only]), return_dict=True)
     reward_extra_info = result["reward_extra_info"]
 
-    assert reward_extra_info["format_full"] == [1.0, 0.0]
-    assert reward_extra_info["format_answer_only"] == [0.0, 1.0]
-    assert reward_extra_info["format_trace_total"] == [1.0, 1.0]
+    assert "format_full" not in reward_extra_info
+    assert "format_primary" not in reward_extra_info
     assert result["outcome_reward"] == [0.0, 0.0]
-
-    metrics = aggregate_trajectory_format_metrics(reward_extra_info)
-    assert metrics["rollout/trajectory_format_correct_count"] == 1.0
-    assert metrics["rollout/trajectory_format_total"] == 2.0
-    assert metrics["rollout/trajectory_format_correct_ratio"] == 0.5

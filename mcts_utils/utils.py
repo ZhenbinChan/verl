@@ -132,9 +132,23 @@ def construct_implication_prefix(parsed_implication):
     code += "```"
     return code
 
-import transformers
 import logging
-classifier = transformers.pipeline("text-classification", model="microsoft/deberta-v2-xlarge-mnli", device=0)
+
+_NLI_CLASSIFIER = None
+_NLI_MODEL_NAME = "microsoft/deberta-v2-xlarge-mnli"
+
+
+def _get_nli_classifier():
+    global _NLI_CLASSIFIER
+    if _NLI_CLASSIFIER is None:
+        import transformers
+
+        model_name = os.getenv("MCTS_NLI_MODEL", _NLI_MODEL_NAME)
+        device = int(os.getenv("MCTS_NLI_DEVICE", "0"))
+        _NLI_CLASSIFIER = transformers.pipeline("text-classification", model=model_name, device=device)
+    return _NLI_CLASSIFIER
+
+
 def verify_steps_nli(parsed_steps):
     nli_inputs = []
     for step in parsed_steps:
@@ -150,7 +164,7 @@ def verify_steps_nli(parsed_steps):
         original_levels[logger_name] = logger.level
         logger.setLevel(logging.WARNING)
         
-    results = classifier(nli_inputs)
+    results = _get_nli_classifier()(nli_inputs)
 
     for logger_name, level in original_levels.items():
         logging.getLogger(logger_name).setLevel(level)
@@ -226,5 +240,4 @@ def execute_program(python_code, timeout=1.0, filter_warnings=True):
             os.unlink(temp_filename)
         except:
             pass
-
 
