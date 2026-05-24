@@ -1,4 +1,4 @@
-# verl + Tree Search
+# verl for Tree Search RL
 
 This repository is a verl fork focused on RL training for reasoning tasks, with extra support for tree-style rollout expansion, step-level process reward, FOL/Z3 verification, and logic QA datasets such as LogiQA and ReClor.
 
@@ -203,6 +203,61 @@ trainer.process_reward.type=format
 ```
 
 This checks whether reasoning steps follow the expected step format. It is the simplest process reward and is usually enough for smoke tests.
+
+## Rollout Format Metrics
+
+Rollout format metrics are trainer-level diagnostics for prompts that ask the model to emit explicit `<step>...</step>` reasoning and a final boxed multiple-choice answer. Enable them with:
+
+```bash
+trainer.log_format_metrics=True
+```
+
+The LogiQA GRPO scripts also expose this as:
+
+```bash
+LOG_FORMAT_METRICS=True bash bash_scripts/logiqa/Qwen2.5-7B_LogiQA_GRPO_only.sh
+```
+
+These metrics are computed after rollout expansion is finished and after the final training trajectories have been assembled. This means they apply to plain GRPO rollouts and to expanded traces from `tree_search`, `treerl`, `parallel_mcts`, `step_treerl`, and `information_gain`. They are independent of the reward manager. Keep `trainer.log_format_metrics=False` for prompts such as `prompts/base.txt`, where the step/premise/conclusion format is not expected.
+
+### Training Metrics
+
+| Field | Meaning |
+| --- | --- |
+| `rollout/format_primary/total` | Number of rollout trajectories included in the format statistics for this training step. |
+| `rollout/format_primary/full_ratio` | Fraction of trajectories whose step blocks and final boxed answer are both valid. |
+| `rollout/format_primary/no_step_ratio` | Fraction of trajectories with no `<step>...</step>` block in the reasoning region. |
+| `rollout/format_primary/text_outside_step_ratio` | Fraction of trajectories that contain complete step blocks, but also contain non-whitespace text outside those step blocks before the final answer. |
+| `rollout/format_primary/step_xml_invalid_ratio` | Fraction of trajectories with malformed step XML, such as an opened `<step>` tag without a valid closing block. |
+| `rollout/format_primary/step_schema_invalid_ratio` | Fraction of trajectories whose step XML parses, but the step schema is invalid. |
+| `rollout/format_primary/boxed_missing_ratio` | Fraction of trajectories with valid step blocks but no final `\boxed{...}` answer. |
+| `rollout/format_primary/boxed_invalid_ratio` | Fraction of trajectories with valid step blocks and a `\boxed` answer region, but the answer format is invalid. |
+
+The primary categories are mutually exclusive and sum to 1 across the ratio fields for a non-empty rollout batch.
+
+### Format Rules
+
+A trajectory is counted as `full` only when all of the following hold:
+
+- The reasoning region contains one or more complete `<step>...</step>` blocks.
+- There is no non-whitespace text outside the step blocks before the final answer.
+- Each step is valid XML with root tag `step`.
+- Each step contains at least one `<premise>...</premise>` and exactly one `<conclusion>...</conclusion>`.
+- Step children are only `premise` or `conclusion`; nested tags, direct text under `<step>`, and non-whitespace child tails are invalid.
+- The final answer is a strict trailing boxed answer with exactly one alphabetic index, for example `\boxed{A}` or `\boxed{{A}}`.
+
+Examples of invalid boxed answers include `\boxed{A}}`, `\boxed{{A}`, `\boxed{AA}`, `\boxed{AB}`, `\boxed{1}`, and an empty box.
+
+### Rollout JSONL Fields
+
+When `trainer.rollout_data_dir` is set and `trainer.log_format_metrics=True`, dumped rollout JSONL rows include these per-trajectory fields:
+
+| Field | Meaning |
+| --- | --- |
+| `format_primary` | The mutually exclusive category assigned to this trajectory: `full`, `no_step`, `text_outside_step`, `step_xml_invalid`, `step_schema_invalid`, `boxed_missing`, or `boxed_invalid`. |
+| `boxed_status` | `valid`, `invalid`, or `missing`, describing only the final boxed answer region. |
+| `boxed_answer` | The extracted answer letter when `boxed_status=valid`; otherwise an empty string. |
+| `step_block_count` | Number of complete `<step>...</step>` blocks found before the final answer region. |
 
 ### FOL PRM
 
