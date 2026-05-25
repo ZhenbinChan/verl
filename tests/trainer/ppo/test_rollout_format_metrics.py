@@ -5,10 +5,12 @@ from omegaconf import OmegaConf
 from verl.trainer.ppo.sampling import _STRATEGY_REGISTRY, create_sampling_strategy
 from verl.trainer.ppo.sampling.mcts_prm import (
     FORMAT_PRIMARY_CATEGORIES,
+    aggregate_rollout_answer_acc_metrics,
     aggregate_rollout_format_metrics,
     classify_rollout_format,
     rollout_format_infos_to_columns,
 )
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
 class DummyTokenizer:
@@ -116,6 +118,35 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 self.assertEqual(metrics["rollout/format_primary/full_ratio"], 0.5)
                 self.assertEqual(metrics["rollout/format_primary/text_outside_step_ratio"], 0.5)
                 self.assertNotIn("rollout/trajectory_format_total", metrics)
+
+    def test_answer_acc_metrics_keep_only_two_ratios(self):
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        format_infos = [
+            classify_rollout_format(good_step + r"\boxed{A}"),
+            classify_rollout_format(good_step + r"\boxed{B}"),
+            classify_rollout_format("plain reasoning " + r"\boxed{A}"),
+            classify_rollout_format("plain reasoning " + r"\boxed{B}"),
+        ]
+        metrics = aggregate_rollout_answer_acc_metrics([1.0, 0.0, 1.0, 0.0], format_infos)
+
+        self.assertEqual(metrics["rollout/answer_acc/all_correct_ratio"], 0.5)
+        self.assertEqual(metrics["rollout/answer_acc/format_correct_only_ratio"], 0.5)
+        self.assertEqual(set(metrics), {"rollout/answer_acc/all_correct_ratio", "rollout/answer_acc/format_correct_only_ratio"})
+
+    def test_answer_acc_format_correct_only_ratio_is_zero_without_full_format(self):
+        format_infos = [
+            classify_rollout_format("plain reasoning " + r"\boxed{A}"),
+            classify_rollout_format("plain reasoning " + r"\boxed{B}"),
+        ]
+        metrics = aggregate_rollout_answer_acc_metrics([1.0, 0.0], format_infos)
+
+        self.assertEqual(metrics["rollout/answer_acc/all_correct_ratio"], 0.5)
+        self.assertEqual(metrics["rollout/answer_acc/format_correct_only_ratio"], 0.0)
+
+    def test_trainer_extracts_only_explicit_answer_acc(self):
+        self.assertEqual(RayPPOTrainer._extract_rollout_answer_acc(None, {"answer_acc": [1.0, 0.0]}, 2), [1.0, 0.0])
+        self.assertEqual(RayPPOTrainer._extract_rollout_answer_acc(None, {"acc": [1.0, 0.0]}, 2), [])
+        self.assertEqual(RayPPOTrainer._extract_rollout_answer_acc(None, {}, 2), [])
 
     def test_primary_categories_are_mutually_exclusive(self):
         good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"

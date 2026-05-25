@@ -46,18 +46,76 @@ def make_data(responses: list[str]) -> DataProto:
     )
 
 
-def test_naive_plus_does_not_record_trainer_level_format_metrics():
-    valid_format_wrong_answer = "<step><premise>a</premise><conclusion>b</conclusion></step>\n\\boxed{A}"
-    answer_only = "plain reasoning\n\\boxed{B}"
+def test_naive_plus_default_keeps_original_reward_for_format_errors():
+    invalid_format_correct_answer = "plain reasoning\n\\boxed{Z}"
     manager = NaivePlusRewardManager(
         tokenizer=CharOffsetTokenizer(),
         num_examine=0,
-        compute_score=lambda **_: 0.0,
+        compute_score=lambda solution_str, **_: 1.0 if "\\boxed{Z}" in solution_str else 0.0,
     )
 
-    result = manager(make_data([valid_format_wrong_answer, answer_only]), return_dict=True)
+    result = manager(make_data([invalid_format_correct_answer]), return_dict=True)
+
+    assert result["reward_extra_info"]["answer_acc"] == [1.0]
+    assert result["outcome_reward"] == [1.0]
+    assert result["reward_tensor"].sum(-1).tolist() == [1.0]
+
+
+def test_naive_plus_penalizes_format_errors_when_enabled_without_recording_trainer_level_format_metrics():
+    good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+    valid_format_correct_answer = good_step + "\n\\boxed{Z}"
+    valid_format_wrong_answer = good_step + "\n\\boxed{A}"
+    invalid_format_correct_answer = "plain reasoning\n\\boxed{Z}"
+    invalid_format_wrong_answer = "plain reasoning\n\\boxed{A}"
+    manager = NaivePlusRewardManager(
+        tokenizer=CharOffsetTokenizer(),
+        num_examine=0,
+        compute_score=lambda solution_str, **_: 1.0 if "\\boxed{Z}" in solution_str else 0.0,
+        penalize_format_error=True,
+    )
+
+    result = manager(
+        make_data(
+            [
+                valid_format_correct_answer,
+                valid_format_wrong_answer,
+                invalid_format_correct_answer,
+                invalid_format_wrong_answer,
+            ]
+        ),
+        return_dict=True,
+    )
     reward_extra_info = result["reward_extra_info"]
 
     assert "format_full" not in reward_extra_info
     assert "format_primary" not in reward_extra_info
-    assert result["outcome_reward"] == [0.0, 0.0]
+    assert reward_extra_info["answer_acc"] == [1.0, 0.0, 1.0, 0.0]
+    assert result["outcome_reward"] == [1.0, 0.0, -1.0, -1.0]
+    assert result["reward_tensor"].sum(-1).tolist() == [1.0, 0.0, -1.0, -1.0]
+
+
+def test_naive_plus_answer_acc_uses_explicit_answer_acc_before_penalty():
+    manager = NaivePlusRewardManager(
+        tokenizer=CharOffsetTokenizer(),
+        num_examine=0,
+        compute_score=lambda **_: {"score": 0.0, "answer_acc": 1.0},
+        penalize_format_error=True,
+    )
+
+    result = manager(make_data(["plain reasoning\n\\boxed{Z}"]), return_dict=True)
+
+    assert result["reward_extra_info"]["answer_acc"] == [1.0]
+    assert result["outcome_reward"] == [-1.0]
+
+
+def test_naive_plus_answer_acc_ignores_non_binary_acc_field():
+    manager = NaivePlusRewardManager(
+        tokenizer=CharOffsetTokenizer(),
+        num_examine=0,
+        compute_score=lambda **_: {"score": 0.0, "acc": 0.8},
+    )
+
+    result = manager(make_data(["plain reasoning\n\\boxed{Z}"]), return_dict=True)
+
+    assert result["reward_extra_info"]["answer_acc"] == [0.0]
+    assert result["outcome_reward"] == [0.0]

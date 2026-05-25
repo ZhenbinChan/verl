@@ -226,6 +226,28 @@ def aggregate_rollout_format_metrics(format_infos: list[Dict[str, object]]) -> D
     return metrics
 
 
+def aggregate_rollout_answer_acc_metrics(answer_acc_values: list[float], format_infos: list[Dict[str, object]]) -> Dict[str, float]:
+    """Aggregate answer accuracy overall and on format-correct trajectories only."""
+    if not answer_acc_values or len(answer_acc_values) != len(format_infos):
+        return {}
+
+    binary_acc = [1.0 if float(value) > 0.5 else 0.0 for value in answer_acc_values]
+    total = float(len(binary_acc))
+    all_correct_count = float(sum(binary_acc))
+
+    format_correct_acc = [
+        acc
+        for acc, info in zip(binary_acc, format_infos)
+        if info.get("format_primary") == "full"
+    ]
+    format_correct_total = float(len(format_correct_acc))
+
+    return {
+        "rollout/answer_acc/all_correct_ratio": all_correct_count / total,
+        "rollout/answer_acc/format_correct_only_ratio": float(sum(format_correct_acc)) / format_correct_total if format_correct_total > 0 else 0.0,
+    }
+
+
 def rollout_format_infos_to_columns(format_infos: list[Dict[str, object]]) -> Dict[str, list]:
     """Convert per-rollout format info to JSONL-compatible columns."""
     return {

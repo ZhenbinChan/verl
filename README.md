@@ -232,8 +232,16 @@ These metrics are computed after rollout expansion is finished and after the fin
 | `rollout/format_primary/step_schema_invalid_ratio` | Fraction of trajectories whose step XML parses, but the step schema is invalid. |
 | `rollout/format_primary/boxed_missing_ratio` | Fraction of trajectories with valid step blocks but no final `\boxed{...}` answer. |
 | `rollout/format_primary/boxed_invalid_ratio` | Fraction of trajectories with valid step blocks and a `\boxed` answer region, but the answer format is invalid. |
+| `rollout/answer_acc/all_correct_ratio` | Answer accuracy over all rollout trajectories whose answer correctness can be read from the reward manager. |
+| `rollout/answer_acc/format_correct_only_ratio` | Answer accuracy after removing format-incorrect trajectories; this is computed only over trajectories with `format_primary=full`. |
 
 The primary categories are mutually exclusive and sum to 1 across the ratio fields for a non-empty rollout batch.
+
+`reward/mean_fn_reward` is the mean final training reward, while `rollout/answer_acc/...` records answer correctness. For `naive_plus`, format-incorrect trajectories receive `-1` reward at the last valid response token only when `reward_model.reward_kwargs.penalize_format_error=True`, so `reward/mean_fn_reward` can differ from answer accuracy. The default is `False` to preserve `prompts/base.txt` training behavior.
+
+```bash
+reward_model.reward_kwargs.penalize_format_error=True
+```
 
 ### Format Rules
 
@@ -258,6 +266,7 @@ When `trainer.rollout_data_dir` is set and `trainer.log_format_metrics=True`, du
 | `boxed_status` | `valid`, `invalid`, or `missing`, describing only the final boxed answer region. |
 | `boxed_answer` | The extracted answer letter when `boxed_status=valid`; otherwise an empty string. |
 | `step_block_count` | Number of complete `<step>...</step>` blocks found before the final answer region. |
+| `answer_acc` | Per-trajectory answer correctness, when provided by the reward manager. |
 
 ### FOL PRM
 

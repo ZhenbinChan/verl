@@ -54,6 +54,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.sampling.mcts_prm import (
+    aggregate_rollout_answer_acc_metrics,
     aggregate_rollout_format_metrics,
     classify_rollout_format,
     rollout_format_infos_to_columns,
@@ -852,7 +853,13 @@ class RayPPOTrainer:
     def _compute_rollout_format_metrics(self, batch: DataProto):
         outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
         format_infos = [classify_rollout_format(output) for output in outputs]
-        return aggregate_rollout_format_metrics(format_infos), rollout_format_infos_to_columns(format_infos)
+        return aggregate_rollout_format_metrics(format_infos), rollout_format_infos_to_columns(format_infos), format_infos
+
+    def _extract_rollout_answer_acc(self, reward_extra_infos_dict, expected_len):
+        values = reward_extra_infos_dict.get("answer_acc")
+        if values is not None and len(values) == expected_len:
+            return [float(value) for value in values]
+        return []
 
     def _filter_training_reward_extra_infos(self, reward_extra_infos_dict):
         legacy_format_keys = {
@@ -1256,6 +1263,8 @@ class RayPPOTrainer:
                 timing_raw = {}
                 reward_extra_infos_dict = {}
                 rollout_format_extra_infos_dict = {}
+                rollout_answer_acc_extra_infos_dict = {}
+                rollout_format_infos = []
                 sampling_metrics = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # capture ordering before popping fields for generation
@@ -1362,7 +1371,7 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     if self.config.trainer.get("log_format_metrics", False):
-                        rollout_format_metrics, rollout_format_extra_infos_dict = self._compute_rollout_format_metrics(batch)
+                        rollout_format_metrics, rollout_format_extra_infos_dict, rollout_format_infos = self._compute_rollout_format_metrics(batch)
                         metrics.update(rollout_format_metrics)
 
                     with _timer("reward", timing_raw):
@@ -1440,6 +1449,14 @@ class RayPPOTrainer:
                                 metrics["rollout/total_wrong_groups"] = len(self.all_wrong_uids)
                             ##########################################################
 
+                    if self.config.trainer.get("log_format_metrics", False) and rollout_format_infos:
+                        rollout_answer_acc = self._extract_rollout_answer_acc(
+                            reward_extra_infos_dict,
+                            expected_len=len(rollout_format_infos),
+                        )
+                        if rollout_answer_acc:
+                            metrics.update(aggregate_rollout_answer_acc_metrics(rollout_answer_acc, rollout_format_infos))
+                            rollout_answer_acc_extra_infos_dict = {"answer_acc": rollout_answer_acc}
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
@@ -1551,6 +1568,7 @@ class RayPPOTrainer:
                                 reward_extra_infos_dict={
                                     **self._filter_training_reward_extra_infos(reward_extra_infos_dict),
                                     **rollout_format_extra_infos_dict,
+                                    **rollout_answer_acc_extra_infos_dict,
                                 },
                                 dump_path=dump_path,
                             )
