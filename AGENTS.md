@@ -7,7 +7,7 @@
 ## Build, Test, and Development Commands
 
 ```bash
-conda create -n verl_plus python=3.11 && conda activate verl_plus
+conda create -n verl python=3.11 && conda activate verl
 pip install -e .
 pip install -r requirements.txt
 pytest tests/test_protocol.py
@@ -19,7 +19,7 @@ Use the conda command for a README-compatible local environment. `pip install -e
 
 ## Coding Style & Naming Conventions
 
-Python 3.11 is recommended for development, while package metadata allows Python >=3.8. Formatting and linting use Ruff via `.pre-commit-config.yaml`; run pre-commit before opening a PR. Ruff uses a 300-character line length and `verl` as the first-party import package. Use `snake_case` for modules, functions, variables, and shell scripts; use `PascalCase` for classes. Name experiment scripts descriptively, following patterns such as `Qwen2.5-1.5B_LogiQA_GRPO_only.sh`.
+Python 3.11 is recommended for development, while package metadata allows Python >=3.8. Formatting and linting use Ruff via `.pre-commit-config.yaml`; run pre-commit before opening a PR. Ruff uses a 300-character line length and `verl` as the first-party import package. Use `snake_case` for modules, functions, variables, and shell scripts; use `PascalCase` for classes. Name experiment scripts descriptively, following patterns such as `qwen2.5-1.5b_logiqa_grpo_only.sh`.
 
 ## Testing Guidelines
 
@@ -32,3 +32,37 @@ Recent history uses short conventional-style prefixes such as `feat:`, `fix:`, a
 ## Security & Configuration Tips
 
 Do not commit credentials, `.netrc`, checkpoints, generated datasets, W&B runs, or local output directories. Keep environment-specific paths, model names, ports, and API endpoints configurable in scripts or YAML files, and document non-default requirements near the command that needs them.
+
+
+# Editing principles
+
+## Bash Scripts files (.sh)
+The style of bash scripts should follow the following principles:
+1. File header: ```#!/usr/bin/env bash```
+2. Environment variable setup: for example, ```unset ROCR_VISIBLE_DEVICES```, ```export VLLM_LOGGING_LEVEL=WARN```, where the settings for wandb are fixed and must be added:
+```
+export WANDB_API_KEY='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'
+export WANDB_MODE=online
+export WANDB_ENTITY='verl-fol'
+```
+3. Constant parameters. For example:
+```
+HOME=/home/chenzhb/Workspaces/verl
+MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base
+PROMPT_PATH=$HOME/prompts/base.txt
+N_GPUS_PER_NODE=4
+...
+```
+
+4. Running command. For example:
+```
+
+python3 -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=grpo \
+    algorithm.use_kl_in_reward=False \
+    data.train_files=$HOME/data/logiqa/train.parquet \
+    data.val_files=$HOME/data/logiqa/validate.parquet \
+........
+
+```
+NOTE: Do not use ```${VAR:-...}``` this kind of default override style, directly assign appropriate values to the variables.

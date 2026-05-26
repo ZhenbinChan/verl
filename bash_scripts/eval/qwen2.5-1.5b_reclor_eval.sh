@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 set -x
 
 unset ROCR_VISIBLE_DEVICES
@@ -11,11 +10,11 @@ export VLLM_LOGGING_LEVEL=WARN
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 ROOT_DIR="/home/chenzhb/Workspaces/verl"
-MODEL_PATH="/home/chenzhb/Workspaces/verl/ckpt/verl/Qwen2.5-1.5B_LogiQA_GRPO_only/global_step_579/actor"
+MODEL_PATH="/home/chenzhb/Workspaces/verl/ckpt/verl/Qwen2.5-7B_LogiQA_GRPO_only/global_step_2/actor"
 HF_MODEL_PATH="/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct"
-DATA_PATH="${ROOT_DIR}/data/logiqa/test.parquet"
-OUTPUT_DIR="${ROOT_DIR}/eval_output/main_eval/qwen2.5_1.5b_instruct_logiqa_grpo_only"
-DATASET_NAME="logiqa"
+DATA_PATH="${ROOT_DIR}/data/reclor_base/test.parquet"
+OUTPUT_DIR="${ROOT_DIR}/eval_output/main_eval/qwen2.5_1.5b_instruct_reclor"
+DATASET_NAME="reclor"
 REWARD_FN_PATH="${ROOT_DIR}/bash_scripts/eval/custom_module.py"
 # 2026-05-26: Add generation-time prompt instruction path to match training data.prompt_path behavior.
 PROMPT_PATH="${ROOT_DIR}/prompts/base.txt"
@@ -26,12 +25,12 @@ RUN_GENERATION=1
 RUN_EVAL=1
 N_GPUS=2
 TENSOR_PARALLEL_SIZE=1
-MAX_COLOCATE_COUNT=10
+MAX_COLOCATE_COUNT=1
 RAY_NUM_CPUS=8
 BATCH_SIZE=8
 N_SAMPLES=1
 SAMPLE_AGG=best
-TEMPERATURE=0.0
+TEMPERATURE=0.8
 TOP_P=1.0
 PROMPT_LENGTH=1024
 RESPONSE_LENGTH=2048
@@ -56,6 +55,22 @@ is_hf_model_dir() {
         compgen -G "${model_dir}/model-*.safetensors" > /dev/null
 }
 
+hf_config_matches_reference() {
+    local model_dir="$1"
+    python3 - "${model_dir}" "${HF_MODEL_PATH}" <<'PY'
+import sys
+from transformers import AutoConfig
+
+model_dir, reference_dir = sys.argv[1], sys.argv[2]
+model_config = AutoConfig.from_pretrained(model_dir)
+reference_config = AutoConfig.from_pretrained(reference_dir)
+keys = ("architectures", "hidden_size", "vocab_size")
+for key in keys:
+    if getattr(model_config, key, None) != getattr(reference_config, key, None):
+        raise SystemExit(1)
+PY
+}
+
 prepare_generation_model() {
     local converted_model_path="${MODEL_PATH}/huggingface"
 
@@ -66,9 +81,12 @@ prepare_generation_model() {
     fi
 
     if is_hf_model_dir "${converted_model_path}"; then
-        echo "Using existing converted HuggingFace checkpoint: ${converted_model_path}"
-        GENERATION_MODEL_PATH="${converted_model_path}"
-        return
+        if hf_config_matches_reference "${converted_model_path}"; then
+            echo "Using existing converted HuggingFace checkpoint: ${converted_model_path}"
+            GENERATION_MODEL_PATH="${converted_model_path}"
+            return
+        fi
+        echo "Existing converted checkpoint config does not match HF_MODEL_PATH; reconverting: ${converted_model_path}"
     fi
 
     if compgen -G "${MODEL_PATH}/model_world_size_*_rank_0.pt" > /dev/null; then

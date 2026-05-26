@@ -40,6 +40,31 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 
 
+def _maybe_inject_prompt_instruction(chat_lst, prompt_path):
+    if prompt_path is None or str(prompt_path).strip() == "" or str(prompt_path).strip().lower() == "null":
+        return chat_lst
+
+    prompt_path = os.path.expanduser(str(prompt_path))
+    if not os.path.isfile(prompt_path):
+        raise FileNotFoundError(f"Prompt instruction file not found: {prompt_path}")
+
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        prompt_instruction = f.read()
+
+    # 2026-05-26: Support data.prompt_path during generation by injecting the instruction
+    # into the last user message, matching RL training dataset behavior.
+    injected_chat_lst = []
+    for messages in chat_lst:
+        copied_messages = [dict(message) for message in messages]
+        for message in reversed(copied_messages):
+            if message.get("role") == "user":
+                message["content"] = prompt_instruction + "\n\n" + message["content"]
+                break
+        injected_chat_lst.append(copied_messages)
+
+    return injected_chat_lst
+
+
 @hydra.main(config_path="config", config_name="generation", version_base=None)
 def main(config):
     run_generation(config)
@@ -74,6 +99,7 @@ def main_task(config):
     chat_lst = dataset[config.data.prompt_key].tolist()
 
     chat_lst = [chat.tolist() for chat in chat_lst]
+    chat_lst = _maybe_inject_prompt_instruction(chat_lst, config.data.get("prompt_path", None))
 
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:

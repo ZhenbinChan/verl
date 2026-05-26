@@ -26,44 +26,35 @@ from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="./data/qa4mre_action/")
+    parser.add_argument("--local_dir", default="./data/medqa/")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
 
-    data_source = "community-datasets/qa4mre"
+    data_source = "awinml/medqa"
 
-    dataset = datasets.load_dataset(data_source, "2013.main.EN")
+    dataset = datasets.load_dataset(data_source, "questions")
 
     train_dataset = dataset["train"]
-    # validate_dataset = dataset["validation"]
-    # test_dataset = dataset["test"]
+    validate_dataset = dataset["validation"]
+    test_dataset = dataset["test"]
 
-    with open("./mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
-        instruction_following = f.read()
-        # print(instruction_following)
-    instruction_following = str(instruction_following)
-
-    # print(instruction_following)
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         option_mapping = ["A", "B", "C", "D","E", "F", "G", "H", "I", "J"]
         def process_fn(example, idx):
-            
             question_raw = example.pop("question")
-            answer_raw = example.pop("mc1_targets").pop("choices")
-            solution = example.pop("mc1_targets").pop("labels")
-            for i in range(len(solution)):
-                if solution[i] == 1:
-                    solution = option_mapping[i]
+            answer_raw = example.pop("options")
+            solution = example.pop("answer_idx")
+            answers = ""
+            
+            for key,value in answer_raw.items():
+                answers += ("(" + key  + "):" + value + "\n")
 
-            answers = "\n\n".join(["Option (" + option_mapping[i] +")"+ answer_raw[i] + "." for i in range(len(answer_raw))])
-            question = "## Task Instructions\n\n" + instruction_following + "\n\n" + "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
-            # solution = extract_solution(answer_raw)
+            question =  "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
 
-            # import pdb;pdb.set_trace()
-            sample_id = f"truthfulqa_{idx}"
+            sample_id = f"medqa_{idx}"
             data = {
                 "data_source": data_source,
                 "prompt": [
@@ -88,18 +79,18 @@ if __name__ == "__main__":
 
         return process_fn
 
-    # train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
-    # test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
-    val_dataset = validate_dataset.map(function=make_map_fn("test"), with_indices=True)
+    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
+    validate_dataset = validate_dataset.map(function=make_map_fn("validation"), with_indices=True)
+    test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
 
-    # train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
-    # test_dataset.to_parquet(os.path.join(local_dir, "test.parquet"))
-    val_dataset.to_parquet(os.path.join(local_dir, "val.parquet"))
+    train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
+    validate_dataset.to_parquet(os.path.join(local_dir, "val.parquet"))
+    test_dataset.to_parquet(os.path.join(local_dir, "test.parquet"))
 
+    print("Save to :", local_dir)
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
-
         copy(src=local_dir, dst=hdfs_dir)

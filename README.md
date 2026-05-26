@@ -353,6 +353,100 @@ Dataset-specific helpers:
 - `bash_scripts/eval/Qwen2.5-7B_LogiQA_eval.sh`
 - `bash_scripts/eval/Qwen2.5-7B_ReClor_eval.sh`
 
+### Cross-Domain MCQ Evaluation
+
+Cross-domain evaluation uses local parquet files plus the repository's two-stage evaluation flow:
+
+1. `verl.trainer.main_generation` generates model responses into `eval_output/main_eval/.../*_generated.parquet`.
+2. `verl.trainer.main_eval` scores the generated responses with `bash_scripts/eval/custom_module.py`, which delegates to `verl.utils.reward_score.default_compute_score`.
+
+The current Qwen3-8B-Base scripts use:
+
+```bash
+MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base
+```
+
+Prepare or refresh the cross-domain parquet files:
+
+```bash
+python3 examples/data_preprocess/pubmedqa.py \
+  --data_dir ./data/pubmedqa_origin/data \
+  --local_dir ./data/pubmedqa/
+
+python3 examples/data_preprocess/truthfulqa.py \
+  --local_dir ./data/truthfulqa/
+
+python3 examples/data_preprocess/qa4mre.py \
+  --local_dir ./data/qa4mre/
+
+python3 examples/data_preprocess/gpqa.py \
+  --local_dir ./data/gpqa/
+
+python3 examples/data_preprocess/mathqa.py \
+  --data_dir ./data/MathQA \
+  --local_dir ./data/mathqa/
+
+python3 examples/data_preprocess/openbookqa.py \
+  --local_dir ./data/openbookqa/
+
+python3 examples/data_preprocess/medqa.py \
+  --local_dir ./data/medqa/
+```
+
+Expected evaluation files:
+
+| Dataset | Parquet |
+| --- | --- |
+| PubMedQA | `data/pubmedqa/test.parquet` |
+| TruthfulQA MC1 | `data/truthfulqa/test.parquet` |
+| QA4MRE 2013 EN | `data/qa4mre/test.parquet` |
+| GPQA Diamond | `data/gpqa/gpqa_diamond/test.parquet` |
+| GPQA Main | `data/gpqa/gpqa_main/test.parquet` |
+| MathQA | `data/mathqa/test.parquet` |
+| MathQA Challenge | `data/mathqa/challenge_test.parquet` |
+| OpenBookQA | `data/openbookqa/test.parquet` |
+| MedQA | `data/medqa/test.parquet` |
+
+Run one dataset-specific Qwen3-8B-Base evaluation script:
+
+```bash
+bash bash_scripts/eval/qwen3-8b-base_pubmedqa_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_truthfulqa_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_qa4mre_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_gpqa_diamond_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_gpqa_main_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_mathqa_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_mathqa_challenge_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_openbookqa_eval.sh
+bash bash_scripts/eval/qwen3-8b-base_medqa_eval.sh
+```
+
+The shared runner can also be called directly with a dataset name:
+
+```bash
+bash bash_scripts/eval/qwen3-8b-base_eval_common.sh pubmedqa
+bash bash_scripts/eval/qwen3-8b-base_eval_common.sh mathqa_challenge
+```
+
+Running the shared runner without an argument only prints the available dataset names. Outputs are written under:
+
+```bash
+eval_output/main_eval/qwen3_8b_base_<dataset>/
+```
+
+Each output directory contains:
+
+- `<dataset>_generated.parquet`: generated responses.
+- `<dataset>_main_eval.log`: final reward/accuracy log printed by `main_eval`.
+
+For a quick smoke test, edit the target script or common runner and set:
+
+```bash
+MAX_SAMPLES=2
+```
+
+Then run the dataset script. Full evaluation uses `MAX_SAMPLES=0`.
+
 ## Practical Notes
 
 - For Step-TreeRL, prefer prompts that force explicit `<step>...</step>` segmentation; otherwise branch extraction and format PRM become noisy.

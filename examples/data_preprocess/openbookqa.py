@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Preprocess the Reclor dataset to parquet format
+Preprocess the OpenBookQA dataset to parquet format
 """
 
 import argparse
@@ -26,38 +26,30 @@ from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="./data/medqa_action/")
+    parser.add_argument("--local_dir", default="./data/openbookqa/")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
 
-    data_source = "awinml/medqa"
+    data_source = "allenai/openbookqa"
 
-    dataset = datasets.load_dataset(data_source, "questions")
+    dataset = datasets.load_dataset(data_source, "main")
 
     train_dataset = dataset["train"]
     validate_dataset = dataset["validation"]
     test_dataset = dataset["test"]
 
-    with open("./mcts_utils/prompts/Generation1.txt", "r", encoding="utf-8") as f:
-        instruction_following = f.read()
-
-
-    # add a row to each data item that represents a unique id
     def make_map_fn(split):
         option_mapping = ["A", "B", "C", "D","E", "F", "G", "H", "I", "J"]
         def process_fn(example, idx):
-            question_raw = example.pop("question")
-            answer_raw = example.pop("options")
-            solution = example.pop("answer_idx")
-            answers = ""
-            
-            for key,value in answer_raw.items():
-                answers += ("(" + key  + "):" + value + "\n")
+            question_raw = example.pop("question_stem")
+            answer_raw = example.pop("choices").pop("text")
+            solution = example.pop("answerKey")
 
-            question = "## Task Instructions\n\n" + instruction_following + "\n\n" + "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
+            answers = "\n\n".join(["(" + option_mapping[i] +")"+ answer_raw[i] + "." for i in range(len(answer_raw))])
+            question = "<Question>" + question_raw + "</Question>\n\n" + "<Options>" + answers + "</Options>"
 
-            sample_id = f"medqa_{idx}"
+            sample_id = f"openbookqa_{idx}"
             data = {
                 "data_source": data_source,
                 "prompt": [

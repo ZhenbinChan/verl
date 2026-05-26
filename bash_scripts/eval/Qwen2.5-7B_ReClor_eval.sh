@@ -11,10 +11,13 @@ VERL_LOGI_DEBUG=0 # Set to 1 to enable debug mode for LogiQA evaluation, which m
 
 ROOT_DIR=/home/chenzhb/Workspaces/verl
 MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-7B-Instruct
+HF_MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen2.5-7B-Instruct
 DATA_PATH=${DATA_PATH:-$ROOT_DIR/data/reclor_base/test.parquet}
 OUTPUT_DIR=${OUTPUT_DIR:-$ROOT_DIR/eval_output/main_eval/qwen2.5_7b_instruct_reclor}
 DATASET_NAME=reclor
 REWARD_FN_PATH=$ROOT_DIR/custom_module.py
+# 2026-05-26: Add generation-time prompt instruction path to match training data.prompt_path behavior.
+PROMPT_PATH=$ROOT_DIR/prompts/base.txt
 
 MAX_SAMPLES=${MAX_SAMPLES:-0}
 RUN_GENERATION=${RUN_GENERATION:-1}
@@ -38,6 +41,7 @@ MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
 GENERATED_PATH=$OUTPUT_DIR/${DATASET_NAME}_generated.parquet
 EVAL_LOG_PATH=$OUTPUT_DIR/${DATASET_NAME}_main_eval.log
 EVAL_DATA_PATH=$DATA_PATH
+GENERATION_MODEL_PATH=$MODEL_PATH
 
 cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
@@ -45,6 +49,45 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM=true
 
 mkdir -p "$OUTPUT_DIR"
+
+is_hf_model_dir() {
+    local model_dir="$1"
+    [ -f "${model_dir}/model.safetensors" ] || \
+        [ -f "${model_dir}/pytorch_model.bin" ] || \
+        [ -f "${model_dir}/model.safetensors.index.json" ] || \
+        compgen -G "${model_dir}/model-*.safetensors" > /dev/null
+}
+
+prepare_generation_model() {
+    local converted_model_path="${MODEL_PATH}/huggingface"
+
+    if is_hf_model_dir "${MODEL_PATH}"; then
+        echo "Using HuggingFace model directory: ${MODEL_PATH}"
+        GENERATION_MODEL_PATH="${MODEL_PATH}"
+        return
+    fi
+
+    if is_hf_model_dir "${converted_model_path}"; then
+        echo "Using existing converted HuggingFace checkpoint: ${converted_model_path}"
+        GENERATION_MODEL_PATH="${converted_model_path}"
+        return
+    fi
+
+    if compgen -G "${MODEL_PATH}/model_world_size_*_rank_0.pt" > /dev/null; then
+        # 2026-05-26: Convert verl/FSDP actor checkpoint to HuggingFace format before generation.
+        echo "Converting verl/FSDP checkpoint to HuggingFace format: ${converted_model_path}"
+        python3 scripts/model_merger.py \
+            --backend fsdp \
+            --hf_model_path "${HF_MODEL_PATH}" \
+            --local_dir "${MODEL_PATH}" \
+            --target_dir "${converted_model_path}"
+        GENERATION_MODEL_PATH="${converted_model_path}"
+        return
+    fi
+
+    echo "ERROR: MODEL_PATH is neither a HuggingFace model directory nor a verl/FSDP actor checkpoint: ${MODEL_PATH}" >&2
+    exit 1
+}
 
 if [ "$MAX_SAMPLES" != "0" ]; then
     EVAL_DATA_PATH=$OUTPUT_DIR/${DATASET_NAME}_subset_${MAX_SAMPLES}.parquet
@@ -60,16 +103,18 @@ PY
 fi
 
 if [ "$RUN_GENERATION" = "1" ]; then
+    prepare_generation_model
     python -m verl.trainer.main_generation \
         trainer.nnodes=1 \
         trainer.n_gpus_per_node=$N_GPUS \
         trainer.max_colocate_count=$MAX_COLOCATE_COUNT \
         data.path=$EVAL_DATA_PATH \
         data.prompt_key=prompt \
+        data.prompt_path=$PROMPT_PATH \
         data.batch_size=$BATCH_SIZE \
         data.n_samples=$N_SAMPLES \
         data.output_path=$GENERATED_PATH \
-        model.path=$MODEL_PATH \
+        model.path=$GENERATION_MODEL_PATH \
         rollout.temperature=$TEMPERATURE \
         rollout.top_p=$TOP_P \
         rollout.prompt_length=$PROMPT_LENGTH \
