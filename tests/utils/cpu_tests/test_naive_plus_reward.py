@@ -57,6 +57,7 @@ def test_naive_plus_default_keeps_original_reward_for_format_errors():
     result = manager(make_data([invalid_format_correct_answer]), return_dict=True)
 
     assert result["reward_extra_info"]["answer_acc"] == [1.0]
+    assert "format_full" not in result["reward_extra_info"]
     assert result["outcome_reward"] == [1.0]
     assert result["reward_tensor"].sum(-1).tolist() == [1.0]
 
@@ -92,6 +93,29 @@ def test_naive_plus_penalizes_format_errors_when_enabled_without_recording_train
     assert reward_extra_info["answer_acc"] == [1.0, 0.0, 1.0, 0.0]
     assert result["outcome_reward"] == [1.0, 0.0, -1.0, -1.0]
     assert result["reward_tensor"].sum(-1).tolist() == [1.0, 0.0, -1.0, -1.0]
+
+
+def test_naive_plus_returns_step_tree_format_fields_when_enabled():
+    good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+    full = good_step + "\n\\boxed{Z}"
+    answer_only = "plain reasoning\n\\boxed{Z}"
+    step_only = good_step
+    incorrect = "plain reasoning"
+    manager = NaivePlusRewardManager(
+        tokenizer=CharOffsetTokenizer(),
+        num_examine=0,
+        compute_score=lambda solution_str, **_: 1.0 if "\\boxed{Z}" in solution_str else 0.0,
+        log_format_metrics=True,
+    )
+
+    result = manager(make_data([full, answer_only, step_only, incorrect]), return_dict=True)
+    reward_extra_info = result["reward_extra_info"]
+
+    assert reward_extra_info["format_full"] == [1.0, 0.0, 0.0, 0.0]
+    assert reward_extra_info["format_answer_only"] == [0.0, 1.0, 0.0, 0.0]
+    assert reward_extra_info["format_step_only"] == [0.0, 0.0, 1.0, 0.0]
+    assert reward_extra_info["format_trace_total"] == [1.0, 1.0, 1.0, 1.0]
+    assert "format_primary" not in reward_extra_info
 
 
 def test_naive_plus_answer_acc_uses_explicit_answer_acc_before_penalty():

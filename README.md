@@ -220,6 +220,8 @@ LOG_FORMAT_METRICS=True bash bash_scripts/logiqa/Qwen2.5-7B_LogiQA_GRPO_only.sh
 
 These metrics are computed after rollout expansion is finished and after the final training trajectories have been assembled. This means they apply to plain GRPO rollouts and to expanded traces from `tree_search`, `treerl`, `parallel_mcts`, `step_treerl`, and `information_gain`. They are independent of the reward manager. Keep `trainer.log_format_metrics=False` for prompts such as `prompts/base.txt`, where the step/premise/conclusion format is not expected.
 
+For validation with `naive_plus`, the same switch also records the `step_tree`-style auxiliary fields `format_full`, `format_answer_only`, `format_step_only`, and `format_trace_total`, which appear as `val-aux/{data_source}/format_*/...` metrics.
+
 ### Training Metrics
 
 | Field | Meaning |

@@ -248,6 +248,8 @@ class TaskRunner:
 
         compute_score = get_custom_reward_fn(config)
         reward_manager_kwargs = dict(config.reward_model.get("reward_kwargs", {}))
+        if reward_manager_name == "naive_plus":
+            reward_manager_kwargs["log_format_metrics"] = bool(config.trainer.get("log_format_metrics", False))
         if reward_manager_name in {"step_tree", "mcts", "ig"}:
             reward_manager_kwargs["process_reward_cfg"] = OmegaConf.to_container(
                 config.trainer.process_reward, resolve=True

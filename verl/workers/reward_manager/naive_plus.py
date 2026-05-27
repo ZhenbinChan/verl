@@ -17,7 +17,7 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format
+from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format, classify_trajectory_format
 from verl.utils.reward_score import _default_compute_score
 
 
@@ -30,6 +30,7 @@ class NaivePlusRewardManager:
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
         self.penalize_format_error = str(kwargs.get("penalize_format_error", False)).lower() in {"1", "true", "yes", "on"}
+        self.log_format_metrics = str(kwargs.get("log_format_metrics", False)).lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _is_binary_value(value):
@@ -148,6 +149,12 @@ class NaivePlusRewardManager:
                 if format_primary != "full":
                     reward = -1.0
             reward_extra_info["answer_acc"].append(answer_acc)
+            if self.log_format_metrics:
+                format_classes = classify_trajectory_format(response_str)
+                reward_extra_info["format_full"].append(format_classes["format_full"])
+                reward_extra_info["format_answer_only"].append(format_classes["format_answer_only"])
+                reward_extra_info["format_step_only"].append(format_classes["format_step_only"])
+                reward_extra_info["format_trace_total"].append(format_classes["format_trace_total"])
 
             outcome_reward.append(reward)# 每个 sample的最终reward
             prompt.append(prompt_str)# 每个sample 的prompt
