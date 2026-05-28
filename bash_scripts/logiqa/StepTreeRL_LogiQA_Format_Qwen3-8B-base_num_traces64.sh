@@ -17,10 +17,10 @@ MODEL_PATH=/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 N_GPUS_PER_NODE=4
-BATCH_SIZE=1
-PPO_MINI_BATCH_SIZE=1
+BATCH_SIZE=4
 PPO_MICRO_BATCH_SIZE_PER_GPU=1
 LOGPROB_MICRO_BATCH_SIZE_PER_GPU=1
+
 
 M=8
 N=4
@@ -31,40 +31,45 @@ NUM_TRACES=64
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=4096
 MAX_MODEL_LEN=8192
-PPO_MAX_TOKEN_LEN_PER_GPU=8192
+PPO_MAX_TOKEN_LEN_PER_GPU=16384
 GPU_MEMORY_UTILIZATION=0.3
 TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
+LOG_FORMAT_METRICS=True
 
-EXPERIMENT_NAME='StepTreeRL_LogiQA_Format_Qwen3-8B-base_num_traces64_m8n4l2t2_bsz1'
+EXPERIMENT_NAME='qwen3-8b_StepTreerl_formatprm_n64_m8n4l2t2'
+
+
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_reinforce \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
-    data.val_files=$HOME/data/logiqa/validate.parquet \
+    data.val_files=$HOME/data/logiqa/test.parquet \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
-    data.truncation=error \
-    data.prompt_path=${PROMPT_PATH} \
+    data.truncation='error' \
+    data.prompt_path=$HOME/prompts/premise_conclusion.txt \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \
     actor_rollout_ref.actor.policy_loss=tree_loss \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${BATCH_SIZE} \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.kl_loss_coef=0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOGPROB_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${N_GPUS_PER_NODE} \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} \
@@ -72,22 +77,20 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.n=${M} \
     actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
     actor_rollout_ref.rollout.top_p=${TOP_P} \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOGPROB_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    reward_model.enable=False \
-    reward_model.reward_manager=auto \
-    reward_model.micro_batch_size_per_gpu=1 \
-    reward_model.model.fsdp_config.optimizer_offload=True \
-    reward_model.reward_kwargs.reward_style=null \
+    reward_model.enable=false \
+    reward_model.reward_manager='step_tree' \
     trainer.val_before_train=True \
     trainer.sampling_strategy=step_treerl \
     trainer.process_reward.type=format \
     trainer.step_treerl_config.max_depth=15 \
-    trainer.step_treerl_config.max_token_num=${MAX_RESPONSE_LENGTH} \
-    trainer.step_treerl_config.branch_max_new_tokens=4096 \
+    trainer.step_treerl_config.max_token_num=4096 \
     trainer.step_treerl_config.m=${M} \
     trainer.step_treerl_config.n=${N} \
     trainer.step_treerl_config.l=${L} \
     trainer.step_treerl_config.t=${T} \
+    trainer.log_format_metrics=${LOG_FORMAT_METRICS} \
     trainer.step_treerl_config.selected_num_traces=${NUM_TRACES} \
     trainer.step_treerl_config.path_selection=selected_terminals \
     trainer.step_treerl_config.use_weighted_value=true \
@@ -95,13 +98,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.overall_norm_style=none \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name=verl \
+    trainer.project_name='verl' \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
-    trainer.test_freq=20 \
-    trainer.max_actor_ckpt_to_keep=1 \
-    trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_epochs=1 \
-    "$@"
+    trainer.test_freq=25 \
+    trainer.total_epochs=1  $@
