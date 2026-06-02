@@ -58,6 +58,7 @@ def test_naive_plus_default_keeps_original_reward_for_format_errors():
 
     assert result["reward_extra_info"]["answer_acc"] == [1.0]
     assert "format_full" not in result["reward_extra_info"]
+    assert "format_error_advantage_mask" not in result["reward_extra_info"]
     assert result["outcome_reward"] == [1.0]
     assert result["reward_tensor"].sum(-1).tolist() == [1.0]
 
@@ -91,6 +92,7 @@ def test_naive_plus_penalizes_format_errors_when_enabled_without_recording_train
     assert "format_full" not in reward_extra_info
     assert "format_primary" not in reward_extra_info
     assert reward_extra_info["answer_acc"] == [1.0, 0.0, 1.0, 0.0]
+    assert reward_extra_info["format_error_advantage_mask"] == [0.0, 0.0, 1.0, 1.0]
     assert result["outcome_reward"] == [1.0, 0.0, -1.0, -1.0]
     assert result["reward_tensor"].sum(-1).tolist() == [1.0, 0.0, -1.0, -1.0]
 
@@ -129,6 +131,7 @@ def test_naive_plus_answer_acc_uses_explicit_answer_acc_before_penalty():
     result = manager(make_data(["plain reasoning\n\\boxed{Z}"]), return_dict=True)
 
     assert result["reward_extra_info"]["answer_acc"] == [1.0]
+    assert result["reward_extra_info"]["format_error_advantage_mask"] == [1.0]
     assert result["outcome_reward"] == [-1.0]
 
 

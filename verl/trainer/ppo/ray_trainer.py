@@ -70,6 +70,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 WorkerType = Type[Worker]
+FORMAT_ERROR_ADVANTAGE_MASK_KEY = "format_error_advantage_mask"
 
 
 class Role(Enum):
@@ -426,6 +427,34 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     else:
         raise NotImplementedError
     return data
+
+
+def apply_format_error_advantage_mask(data: DataProto, reward_extra_infos_dict: dict):
+    if FORMAT_ERROR_ADVANTAGE_MASK_KEY not in reward_extra_infos_dict:
+        raise ValueError(
+            f"algorithm.mask_format_error_advantage=True requires reward_extra_info['{FORMAT_ERROR_ADVANTAGE_MASK_KEY}']. "
+            "Use a reward manager that emits this field and enable reward_model.reward_kwargs.penalize_format_error=True."
+        )
+
+    advantages = data.batch["advantages"]
+    raw_mask = reward_extra_infos_dict[FORMAT_ERROR_ADVANTAGE_MASK_KEY]
+    mask = torch.as_tensor(raw_mask, dtype=torch.float32, device=advantages.device).view(-1)
+    if mask.numel() != advantages.shape[0]:
+        raise ValueError(
+            f"reward_extra_info['{FORMAT_ERROR_ADVANTAGE_MASK_KEY}'] length {mask.numel()} does not match "
+            f"batch size {advantages.shape[0]}."
+        )
+
+    mask = mask > 0.5
+    if torch.any(mask):
+        data.batch["advantages"] = advantages.masked_fill(mask.unsqueeze(-1), 0.0)
+
+    masked_count = mask.float().sum().detach().item()
+    return {
+        "algorithm/format_error_advantage_mask/count": masked_count,
+        "algorithm/format_error_advantage_mask/ratio": masked_count / max(mask.numel(), 1),
+    }
+
 
 def organize_values_from_q_values(batch):
     """Expand per-step Q values to token-level values, aligned with rewards.
@@ -1546,6 +1575,8 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                         )
+                        if self.config.algorithm.get("mask_format_error_advantage", False):
+                            metrics.update(apply_format_error_advantage_mask(batch, reward_extra_infos_dict))
 
                     # update critic
                     if self.use_critic:

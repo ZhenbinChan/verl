@@ -27,9 +27,11 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.5}
 LOG_FORMAT_METRICS=${LOG_FORMAT_METRICS:-True}
+MASK_FORMAT_ERROR_ADVANTAGE=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    algorithm.mask_format_error_advantage=$MASK_FORMAT_ERROR_ADVANTAGE \
     algorithm.use_kl_in_reward=False \
     data.train_files=$TRAIN_FILE \
     data.val_files=$VAL_FILE \
