@@ -10,7 +10,7 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     classify_rollout_format,
     rollout_format_infos_to_columns,
 )
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, _build_step_treerl_sampling_metrics, _validation_metric_section
 
 
 class DummyTokenizer:
@@ -118,6 +118,48 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 self.assertEqual(metrics["rollout/format_primary/full_ratio"], 0.5)
                 self.assertEqual(metrics["rollout/format_primary/text_outside_step_ratio"], 0.5)
                 self.assertNotIn("rollout/trajectory_format_total", metrics)
+
+    def test_validation_metric_section_uses_canonical_core_accuracy_and_reward(self):
+        available_vars = {"acc": {}, "answer_acc": {}, "reward": {}, "verifiable_reward": {}, "outcome_reward": {}, "prm_score": {}, "format_full": {}}
+
+        self.assertEqual(_validation_metric_section("acc", available_vars), "val-core")
+        self.assertEqual(_validation_metric_section("reward", available_vars), "val-core")
+        self.assertEqual(_validation_metric_section("verifiable_reward", available_vars), "val-core")
+        self.assertEqual(_validation_metric_section("answer_acc", available_vars), "val-aux")
+        self.assertEqual(_validation_metric_section("outcome_reward", available_vars), "val-aux")
+        self.assertEqual(_validation_metric_section("prm_score", available_vars), "val-aux")
+        self.assertEqual(_validation_metric_section("format_full", available_vars), "val-aux")
+
+        self.assertEqual(_validation_metric_section("answer_acc", {"answer_acc": {}, "reward": {}}), "val-core")
+
+    def test_step_treerl_sampling_metrics_use_tree_prefix_except_reward(self):
+        metrics = _build_step_treerl_sampling_metrics(
+            {
+                "format_steps": 3,
+                "total_steps": 6,
+                "steps_per_problem": 1.5,
+                "format_ratio": 0.5,
+                "process_reward_mean": 0.25,
+                "leaf_acc": 0.75,
+                "candidate_leaves": 4,
+                "selected_traces": 2,
+                "terminal_padding": 1,
+                "trace_total": 2,
+                "full_format_correct_count": 1,
+                "answer_format_only_count": 0,
+                "step_format_only_count": 1,
+                "full_format_correct_ratio": 0.5,
+                "answer_format_only_ratio": 0.0,
+                "step_format_only_ratio": 0.5,
+            },
+            {"branch_generation": 2.0},
+        )
+
+        self.assertEqual(metrics["Tree/format_steps"], 3)
+        self.assertEqual(metrics["Tree/leaf_acc"], 0.75)
+        self.assertEqual(metrics["Tree/time_branch_generation"], 2.0)
+        self.assertEqual(metrics["reward/step_treerl_process_reward_mean"], 0.25)
+        self.assertFalse(any(key.startswith("training/step_treerl") for key in metrics))
 
     def test_answer_acc_metrics_keep_only_two_ratios(self):
         good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"

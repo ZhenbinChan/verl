@@ -71,6 +71,48 @@ from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 WorkerType = Type[Worker]
 FORMAT_ERROR_ADVANTAGE_MASK_KEY = "format_error_advantage_mask"
+VALIDATION_CORE_REWARD_VARS = {"reward", "verifiable_reward"}
+
+
+def _validation_metric_section(var_name: str, available_vars) -> str:
+    if var_name in VALIDATION_CORE_REWARD_VARS:
+        return "val-core"
+    if var_name == "acc":
+        return "val-core"
+    if var_name == "answer_acc" and "acc" not in available_vars:
+        return "val-core"
+    return "val-aux"
+
+
+def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_timing: dict) -> dict:
+    if not step_treerl_metrics and not step_treerl_timing:
+        return {}
+
+    metrics = {}
+    if step_treerl_metrics:
+        metrics.update(
+            {
+                "Tree/format_steps": step_treerl_metrics.get("format_steps", 0),
+                "Tree/total_steps": step_treerl_metrics.get("total_steps", 0),
+                "Tree/steps_per_problem": step_treerl_metrics.get("steps_per_problem", 0.0),
+                "Tree/format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
+                "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("process_reward_mean", 0.0),
+                "Tree/leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
+                "Tree/candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
+                "Tree/selected_traces": step_treerl_metrics.get("selected_traces", 0),
+                "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
+                "Tree/trace_total": step_treerl_metrics.get("trace_total", 0),
+                "Tree/full_format_correct_count": step_treerl_metrics.get("full_format_correct_count", 0),
+                "Tree/answer_format_only_count": step_treerl_metrics.get("answer_format_only_count", 0),
+                "Tree/step_format_only_count": step_treerl_metrics.get("step_format_only_count", 0),
+                "Tree/full_format_correct_ratio": step_treerl_metrics.get("full_format_correct_ratio", 0.0),
+                "Tree/answer_format_only_ratio": step_treerl_metrics.get("answer_format_only_ratio", 0.0),
+                "Tree/step_format_only_ratio": step_treerl_metrics.get("step_format_only_ratio", 0.0),
+            }
+        )
+    for timing_name, timing_value in step_treerl_timing.items():
+        metrics[f"Tree/time_{timing_name}"] = timing_value
+    return metrics
 
 
 class Role(Enum):
@@ -1058,14 +1100,9 @@ class RayPPOTrainer:
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+                metric_sec = _validation_metric_section(var_name, var2metric2val)
                 for metric_name, metric_val in metric2val.items():
-                    if (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
         if val_reward_dict:
@@ -1347,30 +1384,8 @@ class RayPPOTrainer:
                             )
                             gen_batch_output = sampling_result.gen_batch_output
                             step_treerl_metrics = gen_batch_output.meta_info.get("step_treerl_metrics", {})
-                            if step_treerl_metrics:
-                                sampling_metrics.update(
-                                    {
-                                        "training/step_treerl_format_steps": step_treerl_metrics.get("format_steps", 0),
-                                        "training/step_treerl_total_steps": step_treerl_metrics.get("total_steps", 0),
-                                        "training/step_treerl_steps_per_problem": step_treerl_metrics.get("steps_per_problem", 0.0),
-                                        "training/step_treerl_format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
-                                        "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("process_reward_mean", 0.0),
-                                        "training/step_treerl_leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
-                                        "training/step_treerl_candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
-                                        "training/step_treerl_selected_traces": step_treerl_metrics.get("selected_traces", 0),
-                                        "training/step_treerl_terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
-                                        "training/step_treerl_trace_total": step_treerl_metrics.get("trace_total", 0),
-                                        "training/step_treerl_full_format_correct_count": step_treerl_metrics.get("full_format_correct_count", 0),
-                                        "training/step_treerl_answer_format_only_count": step_treerl_metrics.get("answer_format_only_count", 0),
-                                        "training/step_treerl_step_format_only_count": step_treerl_metrics.get("step_format_only_count", 0),
-                                        "training/step_treerl_full_format_correct_ratio": step_treerl_metrics.get("full_format_correct_ratio", 0.0),
-                                        "training/step_treerl_answer_format_only_ratio": step_treerl_metrics.get("answer_format_only_ratio", 0.0),
-                                        "training/step_treerl_step_format_only_ratio": step_treerl_metrics.get("step_format_only_ratio", 0.0),
-                                    }
-                                )
                             step_treerl_timing = gen_batch_output.meta_info.get("step_treerl_timing", {})
-                            for timing_name, timing_value in step_treerl_timing.items():
-                                sampling_metrics[f"training/step_treerl_time_{timing_name}"] = timing_value
+                            sampling_metrics.update(_build_step_treerl_sampling_metrics(step_treerl_metrics, step_treerl_timing))
                         finally:
                             if self.async_rollout_mode:
                                 self.async_rollout_manager.sleep()
