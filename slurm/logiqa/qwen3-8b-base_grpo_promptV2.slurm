@@ -19,17 +19,17 @@ set -x
 
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
 MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
-EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV2'
+EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV2_formatp'
 N_GPUS_PER_NODE=4
-BATCH_SIZE=8
-MICRO_BSZ=2
-ROLLOUT_N=8
+BATCH_SIZE=64
+ROLLOUT_N=64
 TEMPERATURE=0.8
-TOP_P=0.95
+TOP_P=1.0
 PROMPT_PATH=$HOME/prompts/premise_conclusion_simple.txt
 REWARD_MANAGER='naive_plus'
 REWARD_STYLE='null'
 LOG_FORMAT_METRICS=True
+FORMAT_PENALITY=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -68,6 +68,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.reward_manager=${REWARD_MANAGER} \
     reward_model.model.fsdp_config.optimizer_offload=True \
     reward_model.reward_kwargs.reward_style=${REWARD_STYLE} \
+    +reward_model.reward_kwargs.penalize_format_error=${FORMAT_PENALITY} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl \

@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J grpo_only
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_grpo_only.out
+#SBATCH -J grpo_smtm
+#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b_logiqa_grpo_only_n64_ep_3_smtm_stage2.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -19,14 +19,15 @@ set -x
 
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
 MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
+DATASET='logiqa'
 N_GPUS_PER_NODE=4
-BATCH_SIZE=8
-MICRO_BSZ=2
-ROLLOUT_N=8
+BATCH_SIZE=64
+ROLLOUT_N=64
 TEMPERATURE=0.8
-TOP_P=0.95
-EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_only'
+TOP_P=1.0
+EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_only_n64_ep_3_smtm'
 REWARD_MANAGER='naive_plus'
+LOG_FORMAT_METRICS=False
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -34,8 +35,8 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/validate.parquet \
     data.train_batch_size=${BATCH_SIZE} \
-    data.max_prompt_length=2048 \
-    data.max_response_length=4096 \
+    data.max_prompt_length=1024 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation=error \
     data.prompt_path=$HOME/prompts/base.txt \
@@ -48,14 +49,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
-    actor_rollout_ref.actor.kl_loss_coef=0.0001 \
+    actor_rollout_ref.actor.kl_loss_coef=0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${N_GPUS_PER_NODE} \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.n=${ROLLOUT_N} \
     actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
@@ -68,12 +69,14 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl \
+    trainer.rollout_data_dir=$HOME/rollout/${DATASET}/grpo_only \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=100000000 \
-    trainer.test_freq=50 \
+    trainer.log_format_metrics=${LOG_FORMAT_METRICS} \
+    trainer.save_freq=40 \
+    trainer.test_freq=20 \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
     trainer.val_before_train=True \
-    trainer.total_epochs=1 $@
+    trainer.total_epochs=3 $@

@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J promptV1
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_grpo_promptV1.out
+#SBATCH -J grpo_only
+#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/arlsat/qwen3-8b-base_grpo_only.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -15,26 +15,18 @@ export WANDB_API_KEY='wandb_v1_3giQohhlQcnIdPZ7mGuVe92e6aj_vrCTP93juWzmeUzENE8T7
 export WANDB_MODE=online
 export WANDB_ENTITY='verl-fol'
 
-# if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
-#     echo "Unset PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True because it is incompatible with vLLM memory pool."
-#     unset PYTORCH_CUDA_ALLOC_CONF
-# fi
-
 set -x
 
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
 MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
-EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV1_n64_formatp'
 N_GPUS_PER_NODE=4
 BATCH_SIZE=64
 ROLLOUT_N=64
-TEMPERATURE=0.8
-TOP_P=1.0
-PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
+TEMPERATURE=0.6
+TOP_P=0.95
+EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_only'
 REWARD_MANAGER='naive_plus'
-REWARD_STYLE='null'
 LOG_FORMAT_METRICS=True
-FORMAT_PENALITY=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -43,10 +35,10 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$HOME/data/logiqa/validate.parquet \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=2048 \
-    data.max_response_length=4096 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation=error \
-    data.prompt_path=${PROMPT_PATH} \
+    data.prompt_path=$HOME/prompts/base.txt \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -63,7 +55,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${N_GPUS_PER_NODE} \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.n=${ROLLOUT_N} \
     actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
@@ -72,8 +64,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.enable=False \
     reward_model.reward_manager=${REWARD_MANAGER} \
     reward_model.model.fsdp_config.optimizer_offload=True \
-    reward_model.reward_kwargs.reward_style=${REWARD_STYLE} \
-    +reward_model.reward_kwargs.penalize_format_error=${FORMAT_PENALITY} \
+    reward_model.reward_kwargs.reward_style=null \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl \
