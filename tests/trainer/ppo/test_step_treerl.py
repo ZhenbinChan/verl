@@ -363,6 +363,105 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(created[0].process_reward, 0.75)
         self.assertEqual(created[0].R, 0.75)
 
+    def test_generate_full_solutions_keeps_final_boxed_answer_as_terminal_leaf(self):
+        tokenizer = TextTokenizer()
+        strategy = make_strategy(selected_num_traces=1)
+        strategy.tokenizer = tokenizer
+        strategy.pad_token_id = tokenizer.pad_token_id
+        strategy.eos_token_id = 100000
+        strategy.length_penalty_enabled = False
+
+        response = "<step><premise>a</premise><conclusion>b</conclusion></step>\n\\boxed{A}"
+        root = MCTSNode(state=tokenizer.encode("prompt"), tree_idx=0)
+        gen_batch_output = SimpleNamespace(
+            batch={"responses": torch.tensor([tokenizer.encode(response)], dtype=torch.long)},
+            meta_info={"n_samples": 1},
+        )
+
+        created = strategy._generate_full_solutions(
+            gen_batch=None,
+            gen_batch_output=gen_batch_output,
+            roots=[root],
+            batch_size=1,
+        )
+
+        self.assertEqual(len(created), 2)
+        step_node, answer_node = created
+        self.assertEqual(step_node.node_type, "step")
+        self.assertEqual(answer_node.node_type, "answer")
+        self.assertIs(answer_node.parent, step_node)
+        self.assertTrue(answer_node.terminal)
+        self.assertIn("\\boxed{A}", answer_node.accumulated_text)
+        self.assertEqual(tokenizer.decode(answer_node.step_tokens), "\n\\boxed{A}")
+
+        with patch.object(strategy, "_score_process_rewards", return_value=[1.0]) as mocked_score:
+            strategy._assign_process_rewards(created)
+        mocked_score.assert_called_once()
+        self.assertEqual(step_node.process_reward, 1.0)
+        self.assertEqual(answer_node.process_reward, 1.0)
+
+        gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+        strategy._backpropagate_all([root], gen_batch)
+        strategy._assign_segment_rewards(root)
+        self.assertTrue(answer_node.is_correct)
+        self.assertEqual(root.correct_terminal_in_subtree, 1)
+        self.assertEqual(answer_node.segment_reward, 1.0)
+
+        result = strategy._build_output(
+            gen_batch=None,
+            roots=[root],
+            device=torch.device("cpu"),
+            ground_truths=["A"],
+        )
+        decoded_response = tokenizer.decode(result.gen_batch_output.batch["responses"][0].tolist())
+        self.assertIn("\\boxed{A}", decoded_response)
+
+        metrics = result.gen_batch_output.meta_info["step_treerl_metrics"]
+        self.assertEqual(metrics["total_steps"], 1)
+        self.assertEqual(metrics["format_steps"], 1)
+        self.assertEqual(metrics["trace_total"], 1)
+        self.assertEqual(metrics["full_format_correct_count"], 1)
+
+    def test_terminal_step_nodes_remain_branch_candidates_but_answer_nodes_do_not(self):
+        strategy = make_strategy()
+        root = MCTSNode(state=[1], tree_idx=0)
+        step = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, node_idx=1, cached_entropy=0.5, terminal=True)
+        answer = MCTSNode(
+            state=[1, 2, 3],
+            step_tokens=[3],
+            parent=step,
+            tree_idx=0,
+            node_idx=2,
+            cached_entropy=0.9,
+            terminal=True,
+            node_type="answer",
+        )
+        root.children = [step]
+        step.children = [answer]
+
+        candidate_pool = {0: []}
+        strategy._add_candidates(candidate_pool, [step, answer])
+        self.assertEqual(candidate_pool, {0: [step]})
+        self.assertEqual(strategy._collect_branch_candidates([root], candidate_pool), {(0, 1): [step]})
+
+    def test_score_new_candidates_scores_terminal_steps_but_not_answer_nodes(self):
+        strategy = make_strategy()
+        root = MCTSNode(state=[1], tree_idx=0)
+        terminal_step = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, node_idx=1, terminal=True)
+        answer = MCTSNode(state=[1, 3], step_tokens=[3], parent=root, tree_idx=0, node_idx=2, terminal=True, node_type="answer")
+        root.children = [terminal_step, answer]
+
+        def fake_compute_step_entropies(nodes, _compute_log_prob_fn, _device):
+            self.assertEqual(nodes, [terminal_step])
+            return [0.7]
+
+        with patch.object(strategy, "_compute_step_entropies", side_effect=fake_compute_step_entropies) as mocked:
+            strategy._score_new_candidates([terminal_step, answer], compute_log_prob_fn=None, device=torch.device("cpu"))
+
+        mocked.assert_called_once()
+        self.assertEqual(terminal_step.cached_entropy, 0.7)
+        self.assertIsNone(answer.cached_entropy)
+
     def test_continue_from_steps_uses_cached_fol_sample_id(self):
         strategy = make_strategy()
         strategy.process_reward_type = "fol"

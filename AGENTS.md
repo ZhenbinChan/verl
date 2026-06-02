@@ -66,3 +66,9 @@ python3 -m verl.trainer.main_ppo \
 
 ```
 NOTE: Do not use ```${VAR:-...}``` this kind of default override style, directly assign appropriate values to the variables.
+
+
+# Testing principles
+1. ```conda activate verl``` to activate the environment
+2. ```srun -G 2 --cpus-per-task=2 -t 120:00:00 --pty bash -i``` to get a shell in the cluster
+3. run the script

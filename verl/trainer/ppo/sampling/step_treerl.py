@@ -33,7 +33,7 @@ from verl.trainer.ppo.sampling.mcts_node import (
     collect_all_nodes,
     gather_path,
 )
-from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format, format_step_reward
+from verl.trainer.ppo.sampling.mcts_prm import boxed_answer_format_correct, classify_trajectory_format, format_step_reward
 from verl.utils.process_reward import (
     StepRewardRequest,
     build_process_reward_runtime,
@@ -59,6 +59,13 @@ class StepTreeRLMetrics:
     full_format_correct_count: int = 0
     answer_format_only_count: int = 0
     step_format_only_count: int = 0
+
+
+@dataclass
+class GenerationSegment:
+    node_type: str
+    text: str
+    tokens: List[int]
 
 
 @contextmanager
@@ -219,6 +226,9 @@ class StepTreeRLStrategy(SamplingStrategy):
         generate_fn: Optional[Callable[[DataProto], DataProto]] = None,
         device: Optional[torch.device] = None,
     ) -> None:
+        step_nodes = [node for node in nodes if getattr(node, "node_type", "step") == "step"]
+        if not step_nodes:
+            return
         requests = [
             StepRewardRequest(
                 step_text=node.step_text,
@@ -228,10 +238,10 @@ class StepTreeRLStrategy(SamplingStrategy):
                 sample_id=self._sample_ids_by_tree.get(node.tree_idx),
                 question_text=self._question_texts_by_tree.get(node.tree_idx),
             )
-            for node in nodes
+            for node in step_nodes
         ]
         scores = self._score_process_rewards(requests, generate_fn=generate_fn, device=device)
-        for node, score in zip(nodes, scores):
+        for node, score in zip(step_nodes, scores):
             node.process_reward = float(score)
             node.R = float(score)
             node.value = float(score)
@@ -479,32 +489,37 @@ class StepTreeRLStrategy(SamplingStrategy):
 
                 full_text = self.tokenizer.decode(step_tokens_content, skip_special_tokens=True)
 
-                # Split by </step> into individual steps
-                step_blocks = self._split_by_step_end(full_text, step_tokens_content)
+                segments = self._split_generation_segments(full_text, step_tokens_content)
 
                 current_parent = root
-                for block_text, block_tokens in step_blocks:
-                    is_terminal = hit_eos or (current_parent.depth + 1 > self.max_depth)
+                for seg_idx, segment in enumerate(segments):
+                    is_last_segment = seg_idx == len(segments) - 1
+                    is_answer = segment.node_type == "answer"
+                    is_terminal = is_answer or (is_last_segment and hit_eos) or (current_parent.depth + 1 > self.max_depth)
 
-                    accumulated_text = current_parent.accumulated_text + block_text
-                    new_state = current_parent.state + block_tokens
+                    accumulated_text = current_parent.accumulated_text + segment.text
+                    new_state = current_parent.state + segment.tokens
 
                     child = MCTSNode(
                         state=new_state,
-                        step_tokens=block_tokens,
-                        step_text=block_text,
+                        step_tokens=segment.tokens,
+                        step_text=segment.text,
                         accumulated_text=accumulated_text,
-                        trajectory_text=full_text,
+                        trajectory_text=accumulated_text if is_answer else full_text,
                         parent=current_parent,
                         depth=current_parent.depth + 1,
                         terminal=is_terminal,
                         visits=0,
                         tree_idx=tree_idx,
                         node_idx=self._next_node_idx(tree_idx),
+                        node_type=segment.node_type,
+                        process_reward=float(boxed_answer_format_correct(segment.text)) if is_answer else 0.0,
                     )
                     current_parent.children.append(child)
                     current_parent = child
                     created_nodes.append(child)
+                    if is_answer:
+                        break
 
         return created_nodes
 
@@ -530,6 +545,34 @@ class StepTreeRLStrategy(SamplingStrategy):
 
         # Fallback: treat the entire text as one step
         return [(full_text, full_tokens)]
+
+    def _split_generation_segments(
+        self,
+        full_text: str,
+        full_tokens: List[int],
+    ) -> List[GenerationSegment]:
+        """Split generated text into step nodes plus an optional terminal answer node."""
+        import re
+
+        step_pattern = re.compile(r"(<step>.*?</step>)", re.DOTALL)
+        matches = list(step_pattern.finditer(full_text or ""))
+        if not matches:
+            if (full_text or "").strip() and boxed_answer_format_correct(full_text):
+                return [GenerationSegment("answer", full_text, full_tokens)]
+            return [
+                GenerationSegment("step", text, tokens)
+                for text, tokens in self._split_by_step_end(full_text, full_tokens)
+            ]
+
+        segments = [
+            GenerationSegment("step", text, tokens)
+            for text, tokens in self._split_by_step_end(full_text, full_tokens)
+        ]
+        suffix = full_text[matches[-1].end():]
+        if suffix.strip():
+            suffix_tokens = self.tokenizer.encode(suffix, add_special_tokens=False)
+            segments.append(GenerationSegment("answer", suffix, suffix_tokens))
+        return segments
 
     # ------------------------------------------------------------------
     # Multi-round entropy-based branching
@@ -583,7 +626,7 @@ class StepTreeRLStrategy(SamplingStrategy):
 
     def _add_candidates(self, candidate_pool: Dict[int, List[MCTSNode]], nodes: List[MCTSNode]) -> None:
         for node in nodes:
-            if node.parent is None:
+            if node.parent is None or getattr(node, "node_type", "step") != "step":
                 continue
             bucket = candidate_pool.setdefault(node.tree_idx, [])
             if node not in bucket:
@@ -596,7 +639,13 @@ class StepTreeRLStrategy(SamplingStrategy):
         device: torch.device,
         timing_name: Optional[str] = None,
     ) -> None:
-        pending = [node for node in nodes if node.parent is not None and node.cached_entropy is None]
+        pending = [
+            node
+            for node in nodes
+            if node.parent is not None
+            and getattr(node, "node_type", "step") == "step"
+            and node.cached_entropy is None
+        ]
         if not pending:
             return
         if timing_name is None:
@@ -616,7 +665,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         candidates: Dict[Tuple[int, int], List[MCTSNode]] = {}
         for root in roots:
             for node in candidate_pool.get(root.tree_idx, []):
-                if node.parent is None or node.cached_entropy is None:
+                if node.parent is None or node.cached_entropy is None or getattr(node, "node_type", "step") != "step":
                     continue
                 group_key = self._initial_tree_key(node)
                 if group_key is not None:
@@ -763,36 +812,42 @@ class StepTreeRLStrategy(SamplingStrategy):
 
             full_text = self.tokenizer.decode(step_tokens_content, skip_special_tokens=True)
             full_trajectory_text = step.accumulated_text + full_text
-            step_blocks = self._split_by_step_end(full_text, step_tokens_content)
+            segments = self._split_generation_segments(full_text, step_tokens_content)
 
             current_parent = step
-            for block_text, block_tokens in step_blocks:
-                is_terminal = hit_eos or (current_parent.depth + 1 > self.max_depth)
+            for seg_idx, segment in enumerate(segments):
+                is_last_segment = seg_idx == len(segments) - 1
+                is_answer = segment.node_type == "answer"
+                is_terminal = is_answer or (is_last_segment and hit_eos) or (current_parent.depth + 1 > self.max_depth)
 
-                accumulated_text = current_parent.accumulated_text + block_text
-                new_state = current_parent.state + block_tokens
+                accumulated_text = current_parent.accumulated_text + segment.text
+                new_state = current_parent.state + segment.tokens
 
                 # Deduplication is limited to sibling branches from the same parent.
-                if self._is_duplicate_step(block_tokens, current_parent):
+                if self._is_duplicate_step(segment.tokens, current_parent):
                     total_duplicates += 1
                     continue
 
                 child = MCTSNode(
                     state=new_state,
-                    step_tokens=block_tokens,
-                    step_text=block_text,
+                    step_tokens=segment.tokens,
+                    step_text=segment.text,
                     accumulated_text=accumulated_text,
-                    trajectory_text=full_trajectory_text,
+                    trajectory_text=accumulated_text if is_answer else full_trajectory_text,
                     parent=current_parent,
                     depth=current_parent.depth + 1,
                     terminal=is_terminal,
                     visits=0,
                     tree_idx=step.tree_idx,
                     node_idx=self._next_node_idx(step.tree_idx),
+                    node_type=segment.node_type,
+                    process_reward=float(boxed_answer_format_correct(segment.text)) if is_answer else 0.0,
                 )
                 current_parent.children.append(child)
                 current_parent = child
                 created_nodes.append(child)
+                if is_answer:
+                    break
 
         return created_nodes, total_duplicates
 
@@ -962,7 +1017,10 @@ class StepTreeRLStrategy(SamplingStrategy):
             child_value = node.accumulated_value / node.terminal_in_subtree
             node.state_value = child_value
             tree_advantage = child_value - parent_value
-            node.segment_reward = tree_advantage * float(node.process_reward) + self._length_penalty(node.depth, max_depth)
+            if getattr(node, "node_type", "step") == "answer":
+                node.segment_reward = float(node.R)
+            else:
+                node.segment_reward = tree_advantage * float(node.process_reward) + self._length_penalty(node.depth, max_depth)
 
     def _length_penalty(self, step_index: int, max_step: int) -> float:
         if not self.length_penalty_enabled:
@@ -1090,10 +1148,11 @@ class StepTreeRLStrategy(SamplingStrategy):
         metrics.problem_count = len(roots)
         for root in roots:
             nodes = [node for node in collect_all_nodes(root) if node.parent is not None]
-            metrics.total_steps += len(nodes)
-            metrics.format_steps += sum(1 for node in nodes if format_step_reward(node.step_text) > 0.0)
-            metrics.process_reward_sum += sum(float(node.process_reward) for node in nodes)
-            metrics.process_reward_count += len(nodes)
+            step_nodes = [node for node in nodes if getattr(node, "node_type", "step") == "step"]
+            metrics.total_steps += len(step_nodes)
+            metrics.format_steps += sum(1 for node in step_nodes if format_step_reward(node.step_text) > 0.0)
+            metrics.process_reward_sum += sum(float(node.process_reward) for node in step_nodes)
+            metrics.process_reward_count += len(step_nodes)
             leaves = [node for node in nodes if not node.children]
             metrics.leaf_total += len(leaves)
             metrics.leaf_correct += sum(1 for leaf in leaves if bool(leaf.is_correct))

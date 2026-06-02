@@ -36,6 +36,7 @@ class MCTSNode:
     value: float = 0.0  # backed-up value used in UCT
     tree_idx: int = 0   # index into the prompt batch
     node_idx: int = 0   # unique id within this tree
+    node_type: str = "step"  # "step" for <step>...</step>, "answer" for final answer suffix
     process_reward: float = 0.0
     segment_reward: float = 0.0
     state_value: float = 0.0

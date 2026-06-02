@@ -1,9 +1,9 @@
 export VLLM_WORKER_MULTIPROC_METHOD=spawn # Required for vLLM
-MODEL=/home/chenzhb/Workspaces/LLMs/Qwen2.5-1.5B-Instruct
+MODEL=/home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base
 
 # MODEL_ARGS="model_name=$MODEL,dtype=bfloat16,max_model_length=4096,gpu_memory_utilization=0.8,generation_parameters={max_new_tokens:4096,temperature:0.6,top_p:0.95}"
 
-MODEL_ARGS="model_name=$MODEL,dtype=bfloat16,max_model_length=4096,gpu_memory_utilization=0.8,generation_parameters={max_new_tokens:4096,temperature:0.0,top_p:1}"
+MODEL_ARGS="model_name=$MODEL,dtype=bfloat16,max_model_length=8192,gpu_memory_utilization=0.6,generation_parameters={max_new_tokens:4096,temperature:0.8,top_p:1.0}"
 
 OUTPUT_DIR=/home/chenzhb/Workspaces/verl/eval_output/Qwen2.5-1.5B-Instruct
 
@@ -37,19 +37,19 @@ lighteval vllm $MODEL_ARGS "community|arlsat|0|0" \
 
 
 # TriviaQA
-lighteval vllm $MODEL_ARGS "lighteval|triviaqa|0|0" \
-    --use-chat-template \
-    --output-dir $OUTPUT_DIR
+# lighteval vllm $MODEL_ARGS "lighteval|triviaqa|0|0" \
+#     --use-chat-template \
+#     --output-dir $OUTPUT_DIR
 
 # ============================================================
 # Commonsense / Logical / Multi-step Reasoning
 # ============================================================
 
 
-# LSAT QA — logical/analytical reasoning
-lighteval vllm $MODEL_ARGS "helm|lsat_qa|0|0" \
-    --use-chat-template \
-    --output-dir $OUTPUT_DIR
+# # LSAT QA — logical/analytical reasoning
+# lighteval vllm $MODEL_ARGS "helm|lsat_qa|0|0" \
+#     --use-chat-template \
+#     --output-dir $OUTPUT_DIR
 
 # OpenBookQA (HELM)
 lighteval vllm $MODEL_ARGS "helm|openbookqa|0|0" \
@@ -65,6 +65,13 @@ lighteval vllm $MODEL_ARGS "lighteval|openbookqa|0|0" \
 lighteval vllm $MODEL_ARGS "lighteval|gpqa:main|0|0" \
     --use-chat-template \
     --output-dir $OUTPUT_DIR
+
+
+# GPQA diamond
+lighteval vllm $MODEL_ARGS "lighteval|gpqa:diamond|0|0" \
+    --use-chat-template \
+    --output-dir $OUTPUT_DIR
+
 
 # MathQA — math word problem reasoning
 lighteval vllm $MODEL_ARGS "lighteval|mathqa|0|0" \
