@@ -176,6 +176,15 @@ def compute_entropy_reinforce_advantage(
     return advantages, advantages
 
 
+def compute_step_treerl_origin_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    """Use StepTreeRL origin dense segment rewards directly as advantages."""
+    advantages = token_level_rewards * response_mask
+    return advantages, advantages
+
+
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,

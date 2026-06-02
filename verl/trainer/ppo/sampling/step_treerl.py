@@ -91,6 +91,8 @@ class StepTreeRLStrategy(SamplingStrategy):
     def __init__(self, config, tokenizer):
         process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("step_treerl_config", {})
+        self.adv_estimator = str(config.algorithm.get("adv_estimator", "")) if "algorithm" in config else ""
+        self.use_origin_advantage = self.adv_estimator == "step_treerl_origin"
 
         # Shared generation bounds
         self.max_depth = cfg.get("max_depth", 40)
@@ -381,7 +383,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             self._node_counters = {}
             self._metrics = StepTreeRLMetrics()
             self._timing = {}
-            if self.process_reward_type in {"fol", "self_eval"}:
+            if not self.use_origin_advantage and self.process_reward_type in {"fol", "self_eval"}:
                 self._prepare_process_reward_context(
                     gen_batch,
                     require_sample_id=self.process_reward_type == "fol",
@@ -393,8 +395,9 @@ class StepTreeRLStrategy(SamplingStrategy):
             with _timer("init_parse", self._timing):
                 roots = self._init_roots(gen_batch, device)
                 initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
-            with _timer("process_reward", self._timing):
-                self._assign_process_rewards(initial_nodes, generate_fn=generate_fn, device=device)
+            if not self.use_origin_advantage:
+                with _timer("process_reward", self._timing):
+                    self._assign_process_rewards(initial_nodes, generate_fn=generate_fn, device=device)
             candidate_pool = self._build_candidate_pool(roots, initial_nodes)
             self._score_new_candidates(initial_nodes, compute_log_prob_fn, device, timing_name="initial_entropy_logprob")
 
@@ -614,8 +617,9 @@ class StepTreeRLStrategy(SamplingStrategy):
             with _timer("branch_generation", self._timing):
                 new_nodes = self._continue_from_steps(selected, generate_fn, device)
             if new_nodes:
-                with _timer("process_reward", self._timing):
-                    self._assign_process_rewards(new_nodes, generate_fn=generate_fn, device=device)
+                if not self.use_origin_advantage:
+                    with _timer("process_reward", self._timing):
+                        self._assign_process_rewards(new_nodes, generate_fn=generate_fn, device=device)
                 self._add_candidates(candidate_pool, new_nodes)
                 self._score_new_candidates(new_nodes, compute_log_prob_fn, device, timing_name="branch_entropy_logprob")
 
@@ -1011,11 +1015,15 @@ class StepTreeRLStrategy(SamplingStrategy):
         for node in nodes:
             if node.terminal_in_subtree <= 0 or node.parent is None or node.parent.terminal_in_subtree <= 0:
                 node.state_value = 0.0
-                node.segment_reward = self._length_penalty(node.depth, max_depth)
+                node.segment_reward = 0.0 if self.use_origin_advantage else self._length_penalty(node.depth, max_depth)
                 continue
             parent_value = node.parent.accumulated_value / node.parent.terminal_in_subtree
             child_value = node.accumulated_value / node.terminal_in_subtree
             node.state_value = child_value
+            if self.use_origin_advantage:
+                root_value = root.accumulated_value / root.terminal_in_subtree if root.terminal_in_subtree > 0 else 0.0
+                node.segment_reward = 2.0 * child_value - parent_value - root_value
+                continue
             tree_advantage = child_value - parent_value
             if getattr(node, "node_type", "step") == "answer":
                 node.segment_reward = float(node.R)

@@ -67,9 +67,13 @@ def make_strategy(
     branch_repeats=1,
     process_reward_type="format",
     selected_num_traces=2,
+    adv_estimator="step_treerl_reinforce",
 ):
     config = OmegaConf.create(
         {
+            "algorithm": {
+                "adv_estimator": adv_estimator,
+            },
             "trainer": {
                 "process_reward": {
                     "type": process_reward_type,
@@ -576,6 +580,80 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(root.accumulated_value, 0.0)
         self.assertEqual(a.segment_reward, -1.0)
         self.assertEqual(b.segment_reward, 1.0)
+
+    def test_origin_segment_reward_uses_value_formula_without_prm_or_length_penalty(self):
+        strategy = make_strategy(adv_estimator="step_treerl_origin")
+        strategy.length_penalty_enabled = True
+        strategy.length_penalty_p_max = 10.0
+
+        root = MCTSNode(state=[1], tree_idx=0, accumulated_value=4.0, terminal_in_subtree=4)
+        step = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            step_text="step",
+            accumulated_text="step",
+            parent=root,
+            tree_idx=0,
+            process_reward=0.25,
+            accumulated_value=3.0,
+            terminal_in_subtree=2,
+        )
+        root.children = [step]
+
+        strategy._assign_segment_rewards(root)
+
+        # V(root)=1.0, V(step)=1.5, V(parent)=V(root)=1.0
+        self.assertEqual(step.state_value, 1.5)
+        self.assertEqual(step.segment_reward, 1.0)
+
+    def test_origin_answer_leaf_uses_value_formula_instead_of_leaf_r(self):
+        strategy = make_strategy(adv_estimator="step_treerl_origin")
+        strategy.length_penalty_enabled = True
+
+        root = MCTSNode(state=[1], tree_idx=0, accumulated_value=4.0, terminal_in_subtree=4)
+        step = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            step_text="step",
+            accumulated_text="step",
+            parent=root,
+            tree_idx=0,
+            accumulated_value=3.0,
+            terminal_in_subtree=2,
+        )
+        answer = MCTSNode(
+            state=[1, 2, 3],
+            step_tokens=[3],
+            step_text="\\boxed{A}",
+            accumulated_text="step\\boxed{A}",
+            parent=step,
+            tree_idx=0,
+            node_type="answer",
+            R=99.0,
+            accumulated_value=2.0,
+            terminal_in_subtree=1,
+        )
+        root.children = [step]
+        step.children = [answer]
+
+        strategy._assign_segment_rewards(root)
+
+        # V(root)=1.0, V(step)=1.5, V(answer)=2.0
+        self.assertEqual(answer.state_value, 2.0)
+        self.assertEqual(answer.segment_reward, 1.5)
+
+    def test_step_treerl_origin_advantage_returns_masked_dense_rewards(self):
+        rewards = torch.tensor([[1.0, 1.0, -0.5, -0.5, 9.0]], dtype=torch.float32)
+        response_mask = torch.tensor([[1, 1, 1, 1, 0]], dtype=torch.float32)
+
+        advantages, returns = core_algos.compute_step_treerl_origin_advantage(
+            token_level_rewards=rewards,
+            response_mask=response_mask,
+        )
+
+        expected = torch.tensor([[1.0, 1.0, -0.5, -0.5, 0.0]], dtype=torch.float32)
+        self.assertTrue(torch.equal(advantages, expected))
+        self.assertTrue(torch.equal(returns, expected))
 
     def test_select_terminals_keeps_correct_leaf_and_pads_to_num_traces(self):
         strategy = make_strategy(selected_num_traces=4)

@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J TreeWarmup
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_format_warmup.out
+#SBATCH -J OriginWarmup
+#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin_warmup.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -51,12 +51,12 @@ TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
 
-EXPERIMENT_NAME='qwen3-8b_StepTreerl_formatprm_n64_m8n4l2t2_warmup'
+EXPERIMENT_NAME='qwen3-8b_StepTreerl_origin_n64_m8n4l2t2_warmup'
 
 
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=step_treerl_reinforce \
+    algorithm.adv_estimator=step_treerl_origin \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/test.parquet \
