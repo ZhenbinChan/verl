@@ -471,11 +471,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     return data
 
 
-def apply_format_error_advantage_mask(data: DataProto, reward_extra_infos_dict: dict):
+def apply_format_error_advantage_mask(data: DataProto, reward_extra_infos_dict: dict, reward_manager: str = "naive_format"):
+    if reward_manager != "naive_format":
+        raise ValueError(
+            "algorithm.mask_format_error_advantage=True is only supported with "
+            f"reward_model.reward_manager='naive_format', got {reward_manager!r}."
+        )
+
     if FORMAT_ERROR_ADVANTAGE_MASK_KEY not in reward_extra_infos_dict:
         raise ValueError(
             f"algorithm.mask_format_error_advantage=True requires reward_extra_info['{FORMAT_ERROR_ADVANTAGE_MASK_KEY}']. "
-            "Use a reward manager that emits this field and enable reward_model.reward_kwargs.penalize_format_error=True."
+            "Use reward_model.reward_manager='naive_format'."
         )
 
     advantages = data.batch["advantages"]
@@ -1591,7 +1597,13 @@ class RayPPOTrainer:
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                         )
                         if self.config.algorithm.get("mask_format_error_advantage", False):
-                            metrics.update(apply_format_error_advantage_mask(batch, reward_extra_infos_dict))
+                            metrics.update(
+                                apply_format_error_advantage_mask(
+                                    batch,
+                                    reward_extra_infos_dict,
+                                    reward_manager=str(self.config.reward_model.get("reward_manager", "")),
+                                )
+                            )
 
                     # update critic
                     if self.use_critic:

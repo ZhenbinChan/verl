@@ -142,17 +142,13 @@ class NaivePlusRewardManager:
 
             answer_acc = float(raw_answer_acc) if raw_answer_acc is not None else (1.0 if answer_reward > 0.5 else 0.0)
             format_primary = "not_checked"
-            format_error_penalized = False
             reward = answer_reward
             if self.penalize_format_error:
                 format_info = classify_rollout_format(response_str)
                 format_primary = format_info["format_primary"]
                 if format_primary != "full":
                     reward = -1.0
-                    format_error_penalized = True
             reward_extra_info["answer_acc"].append(answer_acc)
-            if self.penalize_format_error:
-                reward_extra_info["format_error_advantage_mask"].append(1.0 if format_error_penalized else 0.0)
             if self.log_format_metrics:
                 format_classes = classify_trajectory_format(response_str)
                 reward_extra_info["format_full"].append(format_classes["format_full"])

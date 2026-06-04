@@ -1,0 +1,28 @@
+{
+  "api": {
+    "base_url": "http://localhost:4869/v1",
+    "api_key": "EMPTY",
+    "model": "eval-model",
+    "timeout": 180,
+    "max_retries": 3,
+    "bypass_env_proxy": true
+  },
+  "sampling": {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "max_tokens": 4096,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "repetition_penalty": 1.0,
+    "seed": null,
+    "stop": null,
+    "logprobs": true,
+    "top_logprobs": 5,
+    "extra_body": {
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      }
+    }
+  }
+}

@@ -78,6 +78,7 @@ class TestNaiveFormatRewardManager(unittest.TestCase):
         self.assertAlmostEqual(float(rewards[len(response) - 1]), 1.0)
         self.assertAlmostEqual(result["format_reward_count"][0], 1.0)
         self.assertAlmostEqual(result["outcome_reward"][0], 2.0)
+        self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [0.0])
 
     def test_invalid_step_counts_in_denominator_but_gets_no_reward(self):
         valid = "<step><premise>a</premise><conclusion>b</conclusion></step>"
@@ -91,6 +92,7 @@ class TestNaiveFormatRewardManager(unittest.TestCase):
         self.assertAlmostEqual(float(rewards[len(response) - 1]), 1.0)
         self.assertAlmostEqual(result["format_reward_count"][0], 0.5)
         self.assertAlmostEqual(result["outcome_reward"][0], 1.5)
+        self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [1.0])
 
     def test_invalid_step_structures_receive_zero(self):
         responses = [
@@ -107,6 +109,7 @@ class TestNaiveFormatRewardManager(unittest.TestCase):
                 self.assertAlmostEqual(float(rewards.sum()), 0.0)
                 self.assertAlmostEqual(result["format_reward_count"][0], 0.0)
                 self.assertAlmostEqual(result["outcome_reward"][0], 0.0)
+                self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [1.0])
 
     def test_answer_reward_accumulates_with_step_end_token(self):
         response = "<step><premise>a</premise><conclusion>b</conclusion></step>"
@@ -116,6 +119,17 @@ class TestNaiveFormatRewardManager(unittest.TestCase):
         self.assertAlmostEqual(float(rewards[len(response) - 1]), 2.0)
         self.assertAlmostEqual(result["format_reward_count"][0], 1.0)
         self.assertAlmostEqual(result["outcome_reward"][0], 2.0)
+        self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [1.0])
+
+    def test_plain_reasoning_is_masked_for_advantage(self):
+        response = "plain reasoning\\boxed{A}"
+
+        rewards, result = self.reward_for(response, answer_score=1.0)
+
+        self.assertAlmostEqual(float(rewards.sum()), 1.0)
+        self.assertAlmostEqual(result["format_reward_count"][0], 0.0)
+        self.assertAlmostEqual(result["outcome_reward"][0], 1.0)
+        self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [1.0])
 
 
 if __name__ == "__main__":

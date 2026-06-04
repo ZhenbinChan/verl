@@ -31,9 +31,11 @@ PROMPT_PATH=$HOME/prompts/premise_conclusion_simple.txt
 REWARD_MANAGER='naive_format'
 REWARD_STYLE='null'
 LOG_FORMAT_METRICS=True
+MASK_FORMAT_ERROR_ADVANTAGE=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    algorithm.mask_format_error_advantage=${MASK_FORMAT_ERROR_ADVANTAGE} \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/validate.parquet \

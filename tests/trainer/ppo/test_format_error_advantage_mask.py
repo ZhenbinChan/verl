@@ -65,6 +65,21 @@ def test_apply_format_error_advantage_mask_requires_reward_extra_info():
         apply_format_error_advantage_mask(batch, {})
 
 
+def test_apply_format_error_advantage_mask_only_supports_naive_format():
+    batch = compute_advantage(
+        make_grpo_batch(),
+        adv_estimator=AdvantageEstimator.GRPO,
+        norm_adv_by_std_in_grpo=False,
+    )
+
+    with pytest.raises(ValueError, match="naive_format"):
+        apply_format_error_advantage_mask(
+            batch,
+            {"format_error_advantage_mask": [0.0, 1.0, 0.0, 0.0]},
+            reward_manager="naive_plus",
+        )
+
+
 def test_apply_format_error_advantage_mask_checks_batch_size():
     batch = compute_advantage(
         make_grpo_batch(),

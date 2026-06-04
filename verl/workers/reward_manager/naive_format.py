@@ -18,7 +18,7 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import strict_step_xml_correct
+from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format, strict_step_xml_correct
 from verl.utils.reward_score import _default_compute_score
 
 
@@ -125,6 +125,10 @@ class NaiveFormatRewardManager:
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
             extra_info = data_item.non_tensor_batch.get("extra_info", None)
+            format_info = classify_rollout_format(response_str)
+            reward_extra_info["format_error_advantage_mask"].append(
+                0.0 if format_info["format_primary"] == "full" else 1.0
+            )
 
             # ----------------------------------------------------------
             # 1. Compute answer reward via the existing scoring function
