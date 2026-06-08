@@ -117,6 +117,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 self.assertEqual(metrics["rollout/format_primary/total"], 2.0)
                 self.assertEqual(metrics["rollout/format_primary/full_ratio"], 0.5)
                 self.assertEqual(metrics["rollout/format_primary/text_outside_step_ratio"], 0.5)
+                self.assertEqual(metrics["rollout/format_primary/relax_correct_ratio"], 1.0)
                 self.assertNotIn("rollout/trajectory_format_total", metrics)
 
     def test_validation_metric_section_uses_canonical_core_accuracy_and_reward(self):
@@ -214,6 +215,62 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{{A}")["format_primary"], "boxed_invalid")
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{AB}")["format_primary"], "boxed_invalid")
 
+    def test_literal_whitespace_escapes_outside_steps_are_accepted(self):
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        literal_whitespace = (r"\n", r"\r", r"\t", r"\v", r"\f")
+
+        for escape in literal_whitespace:
+            cases = (
+                escape + good_step + r"\boxed{A}",
+                good_step + escape + good_step + r"\boxed{A}",
+                good_step + escape + r"\boxed{A}",
+                " \n" + escape + "\t" + good_step + r"\boxed{A}",
+            )
+            for response in cases:
+                with self.subTest(escape=escape, response=response):
+                    self.assertEqual(classify_rollout_format(response)["format_primary"], "full")
+
+        self.assertEqual(
+            classify_rollout_format(r"\n prefix " + good_step + r"\boxed{A}")["format_primary"],
+            "text_outside_step",
+        )
+        self.assertEqual(
+            classify_rollout_format(r"<step>\n<premise>a</premise><conclusion>b</conclusion></step>\boxed{A}")["format_primary"],
+            "step_schema_invalid",
+        )
+
+    def test_relaxed_format_ignores_outside_text_but_validates_remaining_format(self):
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        cases = {
+            "full": (good_step + r"\boxed{A}", True),
+            "outside_text": ("prefix" + good_step + "suffix" + r"\boxed{A}", True),
+            "no_step": (r"plain reasoning \boxed{A}", False),
+            "unmatched_step_tag": ("<step>" + good_step + r"\boxed{A}", False),
+            "schema_invalid": ("prefix<step><premise>a</premise></step>" + r"\boxed{A}", False),
+            "boxed_missing": ("prefix" + good_step, False),
+            "boxed_invalid": ("prefix" + good_step + r"\boxed{AA}", False),
+        }
+
+        for name, (response, expected) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(classify_rollout_format(response)["relaxed_format_correct"], expected)
+
+    def test_relax_correct_ratio_is_derived_and_not_a_primary_category(self):
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        format_infos = [
+            classify_rollout_format(good_step + r"\boxed{A}"),
+            classify_rollout_format("prefix" + good_step + r"\boxed{A}"),
+            classify_rollout_format("prefix<step><premise>a</premise></step>" + r"\boxed{A}"),
+            classify_rollout_format(r"plain reasoning \boxed{A}"),
+        ]
+
+        metrics = aggregate_rollout_format_metrics(format_infos)
+
+        self.assertEqual(metrics["rollout/format_primary/relax_correct_ratio"], 0.5)
+        self.assertNotIn("relax_correct", FORMAT_PRIMARY_CATEGORIES)
+        ratio_sum = sum(metrics[f"rollout/format_primary/{category}_ratio"] for category in FORMAT_PRIMARY_CATEGORIES)
+        self.assertEqual(ratio_sum, 1.0)
+
     def test_aggregate_metrics_are_trainer_level_and_reward_manager_independent(self):
         reward_managers = [
             "naive",
@@ -240,6 +297,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 self.assertEqual(metrics["rollout/format_primary/total"], 2.0)
                 self.assertEqual(metrics["rollout/format_primary/full_ratio"], 0.5)
                 self.assertEqual(metrics["rollout/format_primary/no_step_ratio"], 0.5)
+                self.assertEqual(metrics["rollout/format_primary/relax_correct_ratio"], 0.5)
                 self.assertNotIn("rollout/trajectory_format_total", metrics)
                 ratio_sum = sum(metrics[f"rollout/format_primary/{category}_ratio"] for category in FORMAT_PRIMARY_CATEGORIES)
                 self.assertEqual(ratio_sum, 1.0)
@@ -253,6 +311,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(columns["boxed_status"], ["valid"])
         self.assertEqual(columns["boxed_answer"], ["A"])
         self.assertEqual(columns["step_block_count"], [1.0])
+        self.assertEqual(set(columns), {"format_primary", "boxed_status", "boxed_answer", "step_block_count"})
 
 
 if __name__ == "__main__":

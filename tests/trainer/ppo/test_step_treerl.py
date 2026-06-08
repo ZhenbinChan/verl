@@ -27,6 +27,7 @@ from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.sampling.mcts_node import MCTSNode
 from verl.trainer.ppo.sampling.mcts_prm import (
+    FORMAT_PRIMARY_CATEGORIES,
     aggregate_rollout_format_metrics,
     boxed_answer_format_correct,
     classify_rollout_format,
@@ -752,7 +753,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(rollout_metrics["rollout/format_primary/total"], 2.0)
         self.assertEqual(rollout_metrics["rollout/format_primary/full_ratio"], 0.5)
         self.assertEqual(rollout_metrics["rollout/format_primary/no_step_ratio"], 0.5)
-        ratio_sum = sum(value for key, value in rollout_metrics.items() if key.endswith("_ratio"))
+        self.assertEqual(rollout_metrics["rollout/format_primary/relax_correct_ratio"], 0.5)
+        ratio_sum = sum(rollout_metrics[f"rollout/format_primary/{category}_ratio"] for category in FORMAT_PRIMARY_CATEGORIES)
         self.assertEqual(ratio_sum, 1.0)
 
     def test_build_output_tracks_trace_format_metrics_before_gpu_padding(self):

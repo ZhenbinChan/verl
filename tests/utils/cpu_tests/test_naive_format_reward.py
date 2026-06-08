@@ -131,6 +131,14 @@ class TestNaiveFormatRewardManager(unittest.TestCase):
         self.assertAlmostEqual(result["outcome_reward"][0], 1.0)
         self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [1.0])
 
+    def test_literal_whitespace_escapes_are_not_masked_for_advantage(self):
+        step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        response = r"\n\t" + step + r"\r\v\f\boxed{A}"
+
+        _, result = self.reward_for(response, answer_score=1.0)
+
+        self.assertEqual(result["reward_extra_info"]["format_error_advantage_mask"], [0.0])
+
 
 if __name__ == "__main__":
     unittest.main()

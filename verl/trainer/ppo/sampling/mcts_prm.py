@@ -45,6 +45,7 @@ def strict_step_xml_correct(step_text: str) -> bool:
 BOXED_ANSWER_RE = re.compile(r"\\boxed\{(?:\{\s*([A-Za-z])\s*\}|\s*([A-Za-z])\s*)\}\s*$", re.DOTALL)
 STEP_BLOCK_RE = re.compile(r"<step\b[^>]*>.*?</step>", re.DOTALL)
 STEP_TAG_RE = re.compile(r"</?step\b", re.DOTALL)
+LITERAL_WHITESPACE_ESCAPE_RE = re.compile(r"\\[nrtvf]")
 FORMAT_PRIMARY_CATEGORIES = (
     "full",
     "no_step",
@@ -54,6 +55,11 @@ FORMAT_PRIMARY_CATEGORIES = (
     "boxed_missing",
     "boxed_invalid",
 )
+
+
+def _outside_text_is_effectively_empty(text: str) -> bool:
+    """Treat real whitespace and literal whitespace escapes as empty outside step blocks."""
+    return not LITERAL_WHITESPACE_ESCAPE_RE.sub("", text or "").strip()
 
 
 def _boxed_answer_match(response_text: str):
@@ -79,7 +85,7 @@ def _step_blocks_cover_text(text: str) -> tuple[bool, list[str]]:
     cursor = 0
     blocks = []
     for match in matches:
-        if text[cursor:match.start()].strip():
+        if not _outside_text_is_effectively_empty(text[cursor : match.start()]):
             return False, []
         block = match.group(0)
         if not strict_step_xml_correct(block):
@@ -87,7 +93,7 @@ def _step_blocks_cover_text(text: str) -> tuple[bool, list[str]]:
         blocks.append(block)
         cursor = match.end()
 
-    if text[cursor:].strip():
+    if not _outside_text_is_effectively_empty(text[cursor:]):
         return False, []
     return True, blocks
 
@@ -162,12 +168,28 @@ def _step_block_status(step_text: str) -> str:
     return "ok"
 
 
+def _relaxed_format_correct(step_region: str, step_matches: list[re.Match], boxed_status: str) -> bool:
+    if not step_matches or boxed_status != "valid":
+        return False
+
+    cursor = 0
+    for match in step_matches:
+        if STEP_TAG_RE.search(step_region[cursor : match.start()]):
+            return False
+        cursor = match.end()
+    if STEP_TAG_RE.search(step_region[cursor:]):
+        return False
+
+    return all(_step_block_status(match.group(0)) == "ok" for match in step_matches)
+
+
 def classify_rollout_format(response_text: str, valid_choices: Optional[str] = None) -> Dict[str, object]:
     """Classify one complete rollout trajectory into exactly one primary format bucket."""
     response_text = response_text or ""
     step_region, boxed_status, boxed_answer = _split_answer_region(response_text, valid_choices)
     step_matches = list(STEP_BLOCK_RE.finditer(step_region))
     step_block_count = len(step_matches)
+    relaxed_format_correct = _relaxed_format_correct(step_region, step_matches, boxed_status)
 
     if not step_matches:
         if STEP_TAG_RE.search(step_region):
@@ -178,11 +200,11 @@ def classify_rollout_format(response_text: str, valid_choices: Optional[str] = N
         cursor = 0
         text_outside_step = False
         for match in step_matches:
-            if step_region[cursor : match.start()].strip():
+            if not _outside_text_is_effectively_empty(step_region[cursor : match.start()]):
                 text_outside_step = True
                 break
             cursor = match.end()
-        if not text_outside_step and step_region[cursor:].strip():
+        if not text_outside_step and not _outside_text_is_effectively_empty(step_region[cursor:]):
             text_outside_step = True
 
         if text_outside_step:
@@ -205,6 +227,7 @@ def classify_rollout_format(response_text: str, valid_choices: Optional[str] = N
         "boxed_status": boxed_status,
         "boxed_answer": boxed_answer,
         "step_block_count": float(step_block_count),
+        "relaxed_format_correct": relaxed_format_correct,
     }
 
 
@@ -223,6 +246,7 @@ def aggregate_rollout_format_metrics(format_infos: list[Dict[str, object]]) -> D
     metrics = {"rollout/format_primary/total": total}
     for category in FORMAT_PRIMARY_CATEGORIES:
         metrics[f"rollout/format_primary/{category}_ratio"] = counts[category] / total
+    metrics["rollout/format_primary/relax_correct_ratio"] = sum(bool(info.get("relaxed_format_correct", False)) for info in format_infos) / total
     return metrics
 
 

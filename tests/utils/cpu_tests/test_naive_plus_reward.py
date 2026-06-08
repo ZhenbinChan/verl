@@ -135,6 +135,22 @@ def test_naive_plus_answer_acc_uses_explicit_answer_acc_before_penalty():
     assert result["outcome_reward"] == [-1.0]
 
 
+def test_naive_plus_accepts_literal_whitespace_escapes_outside_steps():
+    good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+    response = r"\n\t" + good_step + r"\r\v\f\boxed{Z}"
+    manager = NaivePlusRewardManager(
+        tokenizer=CharOffsetTokenizer(),
+        num_examine=0,
+        compute_score=lambda **_: 1.0,
+        penalize_format_error=True,
+    )
+
+    result = manager(make_data([response]), return_dict=True)
+
+    assert result["outcome_reward"] == [1.0]
+    assert result["reward_tensor"].sum(-1).tolist() == [1.0]
+
+
 def test_naive_plus_answer_acc_ignores_non_binary_acc_field():
     manager = NaivePlusRewardManager(
         tokenizer=CharOffsetTokenizer(),

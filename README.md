@@ -228,6 +228,7 @@ For validation with `naive_plus`, the same switch also records the `step_tree`-s
 | --- | --- |
 | `rollout/format_primary/total` | Number of rollout trajectories included in the format statistics for this training step. |
 | `rollout/format_primary/full_ratio` | Fraction of trajectories whose step blocks and final boxed answer are both valid. |
+| `rollout/format_primary/relax_correct_ratio` | Fraction whose step XML/schema and final boxed answer are valid when arbitrary text outside complete step blocks is ignored. |
 | `rollout/format_primary/no_step_ratio` | Fraction of trajectories with no `<step>...</step>` block in the reasoning region. |
 | `rollout/format_primary/text_outside_step_ratio` | Fraction of trajectories that contain complete step blocks, but also contain non-whitespace text outside those step blocks before the final answer. |
 | `rollout/format_primary/step_xml_invalid_ratio` | Fraction of trajectories with malformed step XML, such as an opened `<step>` tag without a valid closing block. |
@@ -237,7 +238,7 @@ For validation with `naive_plus`, the same switch also records the `step_tree`-s
 | `rollout/answer_acc/all_correct_ratio` | Answer accuracy over all rollout trajectories whose answer correctness can be read from the reward manager. |
 | `rollout/answer_acc/format_correct_only_ratio` | Answer accuracy after removing format-incorrect trajectories; this is computed only over trajectories with `format_primary=full`. |
 
-The primary categories are mutually exclusive and sum to 1 across the ratio fields for a non-empty rollout batch.
+The primary category ratios are mutually exclusive and sum to 1 for a non-empty rollout batch. `relax_correct_ratio` is a derived metric and is not part of that sum.
 
 `reward/mean_fn_reward` is the mean final training reward, while `rollout/answer_acc/...` records answer correctness. For `naive_plus`, format-incorrect trajectories receive `-1` reward at the last valid response token only when `reward_model.reward_kwargs.penalize_format_error=True`, so `reward/mean_fn_reward` can differ from answer accuracy. The default is `False` to preserve `prompts/base.txt` training behavior.
 
@@ -250,13 +251,15 @@ reward_model.reward_kwargs.penalize_format_error=True
 A trajectory is counted as `full` only when all of the following hold:
 
 - The reasoning region contains one or more complete `<step>...</step>` blocks.
-- There is no non-whitespace text outside the step blocks before the final answer.
+- There is no text outside the step blocks before the final answer other than real whitespace or the literal whitespace escapes `\n`, `\r`, `\t`, `\v`, and `\f`.
 - Each step is valid XML with root tag `step`.
 - Each step contains at least one `<premise>...</premise>` and exactly one `<conclusion>...</conclusion>`.
 - Step children are only `premise` or `conclusion`; nested tags, direct text under `<step>`, and non-whitespace child tails are invalid.
 - The final answer is a strict trailing boxed answer with exactly one alphabetic index, for example `\boxed{A}` or `\boxed{{A}}`.
 
 Examples of invalid boxed answers include `\boxed{A}}`, `\boxed{{A}`, `\boxed{AA}`, `\boxed{AB}`, `\boxed{1}`, and an empty box.
+
+For `relax_correct_ratio`, arbitrary text outside complete step blocks is ignored, but at least one complete step, valid step XML/schema, no unmatched step tags, and a valid trailing boxed answer are still required. Literal whitespace escapes after the boxed answer are not ignored because the boxed answer must remain the strict end of the response.
 
 ### Rollout JSONL Fields
 

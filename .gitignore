@@ -144,6 +144,7 @@ homogeneous_data/
 record/
 TreeRL/
 rollout/
+RuleReasoner/
 
 debug/
 *.pid
