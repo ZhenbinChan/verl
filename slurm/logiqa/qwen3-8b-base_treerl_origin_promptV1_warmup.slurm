@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J OriginWarmup
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin_warmup.out
+#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin_warmup_v2.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -25,8 +25,8 @@ export WANDB_ENTITY='verl-fol'
 
 set -x
 
-HOME=/home/chenzhenbin/Workspaces/verl
-MODEL_PATH=/home/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
+HOME=/share/nlp/chenzhenbin/Workspaces/verl
+MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115_v2
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 N_GPUS_PER_NODE=4
@@ -50,8 +50,9 @@ TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
+LENGTH_PENALTY_ENABLED=false
 
-EXPERIMENT_NAME='qwen3-8b_StepTreerl_origin_n64_m8n4l2t2_warmup'
+EXPERIMENT_NAME='qwen3-8b_StepTreerl_origin_n64_m8n4l2t2_warmup_v2'
 
 
 
@@ -59,7 +60,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_origin \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
-    data.val_files=$HOME/data/logiqa/test.parquet \
+    data.val_files=$HOME/data/logiqa/validate.parquet \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -112,6 +113,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.length_penalty.enabled=false \
     trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
     trainer.step_treerl_config.trajectory_rm_model=eval-model \
+    trainer.step_treerl_config.length_penalty.enabled=$LENGTH_PENALTY_ENABLED \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
@@ -119,5 +121,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=9999999 \
-    trainer.test_freq=25 \
+    trainer.test_freq=20 \
     trainer.total_epochs=1  $@

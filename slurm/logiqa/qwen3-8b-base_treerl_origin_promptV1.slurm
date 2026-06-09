@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J TreeVerl
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_format.out
+#SBATCH -J OriginTree
+#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -24,9 +24,9 @@ export WANDB_ENTITY='verl-fol'
 
 set -x
 
-HOME=/home/chenzhenbin/Workspaces/verl
-MODEL_PATH=/home/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
-PROMPT_PATH=$HOME/prompts/premise_conclusion_v2.txt
+HOME=/share/nlp/chenzhenbin/Workspaces/verl
+MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
+PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 N_GPUS_PER_NODE=4
 BATCH_SIZE=4
@@ -49,16 +49,17 @@ TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
+LENGTH_PENALTY_ENABLED=false
 
-EXPERIMENT_NAME='qwen3-8b_StepTreerl_formatprm_n64_m8n4l2t2_v2'
+EXPERIMENT_NAME='qwen3-8b_StepTreerl_origin_n64_m8n4l2t2'
 
 
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=step_treerl_reinforce \
+    algorithm.adv_estimator=step_treerl_origin \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
-    data.val_files=$HOME/data/logiqa/test.parquet \
+    data.val_files=$HOME/data/logiqa/validate.parquet \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -74,8 +75,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.loss_agg_mode=token-mean \
     actor_rollout_ref.actor.kl_loss_coef=0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -108,12 +109,13 @@ python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.use_weighted_value=true \
     trainer.step_treerl_config.weighted_value_style=sqrt \
     trainer.step_treerl_config.overall_norm_style=none \
+    trainer.step_treerl_config.length_penalty.enabled=$LENGTH_PENALTY_ENABLED \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
-    trainer.test_freq=25 \
+    trainer.save_freq=9999999 \
+    trainer.test_freq=20 \
     trainer.total_epochs=1  $@

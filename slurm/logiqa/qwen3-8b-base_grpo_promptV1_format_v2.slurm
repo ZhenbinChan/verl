@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -J promptV1
-#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_grpo_promptV1_format.out
+#SBATCH -J warmupV2
+#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_grpo_promptV1_format_v2.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -11,16 +11,17 @@
 
 module add cuda12.8/12.8
 
+ray stop
+
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
 export WANDB_ENTITY='verl-fol'
 
 set -x
 
-
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
 MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
-EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV1_format'
+EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV1_format_v2'
 N_GPUS_PER_NODE=4
 BATCH_SIZE=64
 MICRO_BSZ=2
@@ -31,7 +32,9 @@ PROMPT_PATH=$HOME/prompts/premise_conclusion_simple.txt
 REWARD_MANAGER='naive_format'
 REWARD_STYLE='null'
 LOG_FORMAT_METRICS=True
+
 MASK_FORMAT_ERROR_ADVANTAGE=True
+FORMAT_PENALTY=True
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -71,7 +74,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.reward_manager=${REWARD_MANAGER} \
     reward_model.model.fsdp_config.optimizer_offload=True \
     reward_model.reward_kwargs.reward_style=${REWARD_STYLE} \
-    +reward_model.reward_kwargs.penalize_format_error=True \
+    +reward_model.reward_kwargs.penalize_format_error=${FORMAT_PENALTY} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl \
@@ -81,7 +84,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.log_format_metrics=${LOG_FORMAT_METRICS} \
     trainer.save_freq=20 \
     trainer.test_freq=20 \
-    trainer.max_actor_ckpt_to_keep=1 \
-    trainer.max_critic_ckpt_to_keep=1 \
     trainer.val_before_train=True \
     trainer.total_epochs=1 $@

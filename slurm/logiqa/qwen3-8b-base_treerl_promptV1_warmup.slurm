@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J TreeWarmup
-#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_format_warmup.out
+#SBATCH -o /home/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_format_warmup_v2.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -11,7 +11,6 @@
 
 module add cuda12.8/12.8
 
-ray stop
 
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -26,7 +25,7 @@ export WANDB_ENTITY='verl-fol'
 set -x
 
 HOME=/home/chenzhenbin/Workspaces/verl
-MODEL_PATH=/home/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
+MODEL_PATH=/home/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115_v2
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 N_GPUS_PER_NODE=4
@@ -51,7 +50,7 @@ TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
 
-EXPERIMENT_NAME='qwen3-8b_StepTreerl_formatprm_n64_m8n4l2t2_warmup'
+EXPERIMENT_NAME='qwen3-8b_StepTreerl_formatprm_n64_m8n4l2t2_warmup_v2'
 
 
 
@@ -59,7 +58,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_reinforce \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
-    data.val_files=$HOME/data/logiqa/test.parquet \
+    data.val_files=$HOME/data/logiqa/validate.parquet \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -117,5 +116,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=9999999 \
-    trainer.test_freq=25 \
+    trainer.test_freq=20 \
     trainer.total_epochs=1  $@

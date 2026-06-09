@@ -12,8 +12,8 @@
 module add cuda12.8/12.8
 
 BASE_MODEL="/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base"
-CKPT_DIR="/share/nlp/chenzhenbin/Workspaces/verl/ckpt/verl/qwen3-8b_logiqa_grpo_promptV1_n64_formatp/global_step_115/actor"
-OUTPUT_DIR="/share/nlp/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115"
+CKPT_DIR="/share/nlp/chenzhenbin/Workspaces/verl/ckpt/verl/qwen3-8b_logiqa_grpo_promptV1_format_v2/global_step_115/actor"
+OUTPUT_DIR="/share/nlp/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115_v2"
 
 
 python /share/nlp/chenzhenbin/Workspaces/verl/scripts/model_merger.py \
