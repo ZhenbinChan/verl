@@ -107,9 +107,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.selected_num_traces=${NUM_TRACES} \
     trainer.step_treerl_config.path_selection=selected_terminals \
     trainer.step_treerl_config.use_weighted_value=true \
-    trainer.step_treerl_config.weighted_value_style=sqrt \
+    trainer.step_treerl_config.weighted_value_style=terminal_ratio \
     trainer.step_treerl_config.overall_norm_style=none \
     trainer.step_treerl_config.length_penalty.enabled=false \
+    trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
+    trainer.step_treerl_config.trajectory_rm_model=eval-model \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \

@@ -98,6 +98,7 @@ def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_t
                 "Tree/format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
                 "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("process_reward_mean", 0.0),
                 "Tree/leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
+                "val-core/llm_rm_score": step_treerl_metrics.get("llm_rm_score", 0.0),
                 "Tree/candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
                 "Tree/selected_traces": step_treerl_metrics.get("selected_traces", 0),
                 "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),

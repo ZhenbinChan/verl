@@ -59,6 +59,9 @@ class StepTreeRLMetrics:
     full_format_correct_count: int = 0
     answer_format_only_count: int = 0
     step_format_only_count: int = 0
+    # LLM RM trajectory quality scores
+    llm_rm_score_sum: float = 0.0
+    llm_rm_score_count: int = 0
 
 
 @dataclass
@@ -134,6 +137,14 @@ class StepTreeRLStrategy(SamplingStrategy):
         self._sample_ids_by_tree: Dict[int, str] = {}
         self._question_texts_by_tree: Dict[int, str] = {}
 
+        # LLM RM for trajectory quality evaluation
+        self.trajectory_rm_url = str(cfg.get("trajectory_rm_url", "")).strip()
+        self.trajectory_rm_model = str(cfg.get("trajectory_rm_model", "eval-model"))
+        self.trajectory_rm_max_tokens = int(cfg.get("trajectory_rm_max_tokens", 32))
+        self.trajectory_rm_temperature = float(cfg.get("trajectory_rm_temperature", 0.0))
+        # coeff for blending LLM quality score into leaf accumulated_value
+        self.trajectory_rm_coeff = float(cfg.get("trajectory_rm_coeff", 0.5))
+
         self.tokenizer = tokenizer
         self.pad_token_id: int = getattr(tokenizer, "pad_token_id", 0) or 0
         self.eos_token_id: Optional[int] = getattr(tokenizer, "eos_token_id", None)
@@ -172,6 +183,32 @@ class StepTreeRLStrategy(SamplingStrategy):
 
     def _prepare_fol_context(self, gen_batch: DataProto) -> None:
         self._prepare_process_reward_context(gen_batch, require_sample_id=True)
+
+    def _ensure_question_texts(self, gen_batch: DataProto) -> None:
+        """Populate _question_texts_by_tree if not already set.
+
+        Tries non_tensor_batch first, falls back to decoding root state
+        (which is the tokenized prompt prefixed with system/instruction templates).
+        """
+        if self._question_texts_by_tree:
+            return
+
+        non_tensor = gen_batch.non_tensor_batch
+        if non_tensor is not None:
+            for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
+                question_text = get_batch_question_text(non_tensor, tree_idx)
+                if question_text is not None:
+                    self._question_texts_by_tree[tree_idx] = question_text
+
+        # Fallback: decode the raw prompt tokens (may include system/training template)
+        if not self._question_texts_by_tree:
+            for tree_idx in range(gen_batch.batch["input_ids"].size(0)):
+                root_ids = gen_batch.batch["input_ids"][tree_idx]
+                attention = gen_batch.batch["attention_mask"][tree_idx]
+                real_ids = root_ids[attention.bool()].tolist()
+                self._question_texts_by_tree[tree_idx] = self.tokenizer.decode(
+                    real_ids, skip_special_tokens=True
+                )
 
     def _get_sample_id(self, tree_idx: int) -> str:
         if tree_idx not in self._sample_ids_by_tree:
@@ -883,7 +920,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             if not leaves:
                 continue
 
-            # Mark correctness for each leaf
+            # Mark correctness for each leaf via text matching
             for leaf in leaves:
                 terminal_text = leaf.accumulated_text
                 if gt is not None and terminal_text:
@@ -897,8 +934,19 @@ class StepTreeRLStrategy(SamplingStrategy):
                     leaf.is_correct = False
 
                 leaf.leaf_outcome = 1.0 if leaf.is_correct else 0.0
+                leaf.R = leaf.leaf_outcome  # base value before fusion / RLOO
                 if leaf.is_correct:
                     leaf.main_chain = True
+
+            # Optionally refine leaf outcome with LLM trajectory quality evaluation.
+            # This mirrors the original TreeRL external RM: binary_outcome + coeff * quality_score.
+            if self.trajectory_rm_url:
+                self._evaluate_leaves_quality(roots, leaves, gen_batch)
+                # Update is_correct / main_chain to reflect the fused value so that
+                # correct_terminal_in_subtree stays consistent with accumulated_value.
+                for leaf in leaves:
+                    leaf.is_correct = float(leaf.R) > 0.5
+                    leaf.main_chain = leaf.is_correct
 
             self._apply_rloo_to_leaves(leaves)
             for leaf in leaves:
@@ -918,7 +966,8 @@ class StepTreeRLStrategy(SamplingStrategy):
             node.main_chain = False
 
     def _apply_rloo_to_leaves(self, leaves: List[MCTSNode]) -> None:
-        outcomes = [float(leaf.leaf_outcome) for leaf in leaves]
+        # Use leaf.R (may already be fused with LLM quality score) for RLOO normalization.
+        outcomes = [float(leaf.R) for leaf in leaves]
         if len(leaves) <= 1:
             for leaf, outcome in zip(leaves, outcomes):
                 leaf.R = outcome
@@ -931,6 +980,74 @@ class StepTreeRLStrategy(SamplingStrategy):
             mean_others = (total - outcome) / denom
             leaf.R = outcome - mean_others
             leaf.accumulated_value = leaf.R
+
+    def _evaluate_leaves_quality(
+        self,
+        roots: List[MCTSNode],
+        leaves: List[MCTSNode],
+        gen_batch: DataProto,
+    ) -> None:
+        """Refine leaf outcome with LLM trajectory quality evaluation.
+
+        Calls an external LLM (vLLM OpenAI-compatible server) to judge each
+        leaf's trajectory for logical correctness, hallucination, and internal
+        coherence.  The quality score (0 or 1) is blended into the leaf's
+        accumulated_value before RLOO normalization:
+
+            accumulated_value = binary_outcome + coeff * llm_quality_score
+
+        This mirrors the original TreeRL external RM:
+            accumulated_value = reward + 0.5 * sigmoid(value)
+        """
+        from verl.utils.trajectory_eval import evaluate_trajectories
+
+        # Prepare per-leaf context
+        questions: List[str] = []
+        ground_truths: List[Optional[str]] = []
+        trajectories: List[str] = []
+
+        # Ensure question texts are populated for each tree
+        self._ensure_question_texts(gen_batch)
+
+        for leaf in leaves:
+            tree_idx = leaf.tree_idx
+            question_text = self._question_texts_by_tree.get(tree_idx, "")
+            gt = self._get_ground_truths(gen_batch, len(roots))[tree_idx]
+            trajectory = leaf.accumulated_text or ""
+            questions.append(question_text)
+            ground_truths.append(gt)
+            trajectories.append(trajectory)
+
+        print(
+            f"[StepTreeRL] Evaluating {len(trajectories)} leaves via LLM RM "
+            f"at {self.trajectory_rm_url} (model={self.trajectory_rm_model})"
+        )
+
+        quality_scores = evaluate_trajectories(
+            questions=questions,
+            ground_truths=ground_truths,
+            trajectories=trajectories,
+            rm_url=self.trajectory_rm_url,
+            model_name=self.trajectory_rm_model,
+            max_tokens=self.trajectory_rm_max_tokens,
+            temperature=self.trajectory_rm_temperature,
+        )
+
+        # Log raw LLM RM scores for debugging
+        binary_outcomes = [float(leaf.leaf_outcome) for leaf in leaves]
+        print(
+            f"[StepTreeRL] LLM RM done. "
+            f"leaf_outcomes={binary_outcomes} "
+            f"llm_quality_scores={quality_scores}"
+        )
+
+        # Blend quality score into leaf.accumulated_value BEFORE RLOO normalization.
+        # This follows the original TreeRL formula: accumulated_value = reward + coeff * sigmoid(rm_score)
+        for leaf, qscore in zip(leaves, quality_scores):
+            leaf.llm_quality_score = float(qscore)
+            fused = float(leaf.leaf_outcome) + self.trajectory_rm_coeff * leaf.llm_quality_score
+            leaf.R = fused
+            leaf.accumulated_value = fused
 
     def _leaf_backpropagate_value(self, leaf: MCTSNode) -> None:
         """Backpropagate a RLOO leaf value to all ancestors."""
@@ -993,7 +1110,17 @@ class StepTreeRLStrategy(SamplingStrategy):
 
     def _compute_weighted_update(self, node: MCTSNode) -> None:
         if node.selected_terminal_in_subtree > 0:
-            if self.weighted_value_style == "sqrt":
+            if self.weighted_value_style == "terminal_ratio":
+                # Original TreeRL formula: upweight accumulated_value when a subtree
+                # has many terminals but few of them are selected for training.
+                # This concentrates the information from unselected terminals into
+                # the selected ones.
+                node.accumulated_value = (
+                    node.accumulated_value
+                    * node.terminal_in_subtree
+                    / node.selected_terminal_in_subtree
+                )
+            elif self.weighted_value_style == "sqrt":
                 node.accumulated_value = node.accumulated_value / math.sqrt(node.selected_terminal_in_subtree)
             elif self.weighted_value_style == "uniform":
                 node.accumulated_value = node.accumulated_value / node.selected_terminal_in_subtree
@@ -1002,7 +1129,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             else:
                 raise ValueError(
                     f"Unsupported trainer.step_treerl_config.weighted_value_style={self.weighted_value_style!r}. "
-                    "Expected 'sqrt', 'uniform', or 'original'."
+                    "Expected 'terminal_ratio', 'sqrt', 'uniform', or 'original'."
                 )
         for child in node.children:
             self._compute_weighted_update(child)
@@ -1021,8 +1148,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             child_value = node.accumulated_value / node.terminal_in_subtree
             node.state_value = child_value
             if self.use_origin_advantage:
-                root_value = root.accumulated_value / root.terminal_in_subtree if root.terminal_in_subtree > 0 else 0.0
-                node.segment_reward = 2.0 * child_value - parent_value - root_value
+                node.segment_reward = 2.0 * child_value - parent_value
                 continue
             tree_advantage = child_value - parent_value
             if getattr(node, "node_type", "step") == "answer":
@@ -1164,6 +1290,12 @@ class StepTreeRLStrategy(SamplingStrategy):
             leaves = [node for node in nodes if not node.children]
             metrics.leaf_total += len(leaves)
             metrics.leaf_correct += sum(1 for leaf in leaves if bool(leaf.is_correct))
+            # Accumulate LLM RM quality scores from leaves that have them
+            for leaf in leaves:
+                qs = getattr(leaf, "llm_quality_score", None)
+                if qs is not None:
+                    metrics.llm_rm_score_sum += float(qs)
+                    metrics.llm_rm_score_count += 1
         return metrics
 
     # ------------------------------------------------------------------
@@ -1387,6 +1519,11 @@ def _build_sampling_result(
                     else 0.0
                 ),
                 "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
+                "llm_rm_score": (
+                    metrics.llm_rm_score_sum / metrics.llm_rm_score_count
+                    if metrics is not None and metrics.llm_rm_score_count > 0
+                    else 0.0
+                ),
                 "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
                 "selected_traces": metrics.selected_traces if metrics is not None else 0,
                 "terminal_padding": metrics.terminal_padding if metrics is not None else 0,
