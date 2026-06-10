@@ -97,8 +97,19 @@ def main(config):
 def run_ppo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
+        import os
+        _runtime_env_vars = {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "WARN",
+            "VLLM_LOGGING_LEVEL": "WARN",
+        }
+        # Propagate CUDA_VISIBLE_DEVICES to Ray workers so they respect the
+        # same GPU isolation as the parent process.
+        _cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if _cuda_devices:
+            _runtime_env_vars["CUDA_VISIBLE_DEVICES"] = _cuda_devices
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
+            runtime_env={"env_vars": _runtime_env_vars},
             num_cpus=config.ray_init.num_cpus,
         )
 
