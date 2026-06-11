@@ -95,7 +95,8 @@ class StepTreeRLStrategy(SamplingStrategy):
         process_reward_cfg = resolve_process_reward_config(config)
         cfg = config.trainer.get("step_treerl_config", {})
         self.adv_estimator = str(config.algorithm.get("adv_estimator", "")) if "algorithm" in config else ""
-        self.use_origin_advantage = self.adv_estimator == "step_treerl_origin"
+        self.use_origin_advantage = self.adv_estimator in ("step_treerl_origin", "step_rl")
+        self.use_branch_point_search = self.adv_estimator == "step_treerl_origin"
 
         # Shared generation bounds
         self.max_depth = cfg.get("max_depth", 40)
@@ -142,6 +143,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         self.trajectory_rm_model = str(cfg.get("trajectory_rm_model", "eval-model"))
         self.trajectory_rm_max_tokens = int(cfg.get("trajectory_rm_max_tokens", 32))
         self.trajectory_rm_temperature = float(cfg.get("trajectory_rm_temperature", 0.0))
+        self.trajectory_rm_api_key = str(cfg.get("trajectory_rm_api_key", "")).strip()
         # coeff for blending LLM quality score into leaf accumulated_value
         self.trajectory_rm_coeff = float(cfg.get("trajectory_rm_coeff", 0.5))
 
@@ -1031,6 +1033,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             model_name=self.trajectory_rm_model,
             max_tokens=self.trajectory_rm_max_tokens,
             temperature=self.trajectory_rm_temperature,
+            api_key=self.trajectory_rm_api_key,
         )
 
         # Log raw LLM RM scores for debugging
@@ -1148,7 +1151,17 @@ class StepTreeRLStrategy(SamplingStrategy):
             child_value = node.accumulated_value / node.terminal_in_subtree
             node.state_value = child_value
             if self.use_origin_advantage:
-                node.segment_reward = 2.0 * child_value - parent_value
+                if not self.use_branch_point_search:
+                    node.segment_reward = 2.0 * child_value - parent_value
+                elif node.parent.is_branch_point:
+                    node.segment_reward = 2.0 * child_value - parent_value
+                else:
+                    branch_point = self._find_branch_point_ancestor(node)
+                    if branch_point is not None and branch_point.terminal_in_subtree > 0:
+                        branch_point_value = branch_point.accumulated_value / branch_point.terminal_in_subtree
+                        node.segment_reward = child_value - branch_point_value
+                    else:
+                        node.segment_reward = 0.0
                 continue
             tree_advantage = child_value - parent_value
             if getattr(node, "node_type", "step") == "answer":
@@ -1161,6 +1174,15 @@ class StepTreeRLStrategy(SamplingStrategy):
             return 0.0
         t = float(step_index) / max(float(max_step), 1.0)
         return -self.length_penalty_p_max * (1.0 / (1.0 + math.exp(-self.length_penalty_k * (t - self.length_penalty_t0))))
+
+    def _find_branch_point_ancestor(self, node: MCTSNode) -> Optional[MCTSNode]:
+        """Return the nearest branch-point ancestor, or None if root is reached."""
+        cur = node.parent
+        while cur is not None:
+            if cur.is_branch_point:
+                return cur
+            cur = cur.parent
+        return None
 
     # ------------------------------------------------------------------
     # Output construction with GPU padding

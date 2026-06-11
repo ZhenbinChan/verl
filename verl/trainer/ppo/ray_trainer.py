@@ -149,6 +149,7 @@ class AdvantageEstimator(str, Enum):
     STEP_TREERL_GRPO = "step_treerl_grpo"
     STEP_TREERL_REINFORCE = "step_treerl_reinforce"
     STEP_TREERL_ORIGIN = "step_treerl_origin"
+    STEP_RL = "step_rl"
     IG_GRPO = "ig_grpo"
     # New algorithms from latest verl
     CISPO = "cispo"
@@ -413,6 +414,14 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.STEP_RL:
+        origin_rewards = data.batch.get("token_level_scores", data.batch["token_level_rewards"])
+        advantages, returns = core_algos.compute_step_treerl_origin_advantage(
+            token_level_rewards=origin_rewards,
+            response_mask=data.batch["response_mask"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.IG_GRPO:
         step_correctness = data.batch.get(
             "step_correctness_scores", data.batch["reward_fn_scores"]
@@ -635,6 +644,7 @@ class RayPPOTrainer:
             AdvantageEstimator.STEP_TREERL_GRPO,
             AdvantageEstimator.STEP_TREERL_REINFORCE,
             AdvantageEstimator.STEP_TREERL_ORIGIN,
+            AdvantageEstimator.STEP_RL,
             AdvantageEstimator.IG_GRPO,
         ]:
             self.use_critic = False
@@ -820,9 +830,10 @@ class RayPPOTrainer:
                 AdvantageEstimator.STEP_TREERL_GRPO,
                 AdvantageEstimator.STEP_TREERL_REINFORCE,
                 AdvantageEstimator.STEP_TREERL_ORIGIN,
+                AdvantageEstimator.STEP_RL,
             ], (
                 "sampling_strategy='step_treerl' requires algorithm.adv_estimator to be "
-                "'step_treerl_grpo', 'step_treerl_reinforce', or 'step_treerl_origin', "
+                "'step_treerl_grpo', 'step_treerl_reinforce', 'step_treerl_origin', or 'step_rl', "
                 f"but got '{config.algorithm.adv_estimator}'."
             )
             assert process_reward_type in {"format", "fol", "self_eval"}, (

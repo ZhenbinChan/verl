@@ -79,6 +79,7 @@ def _call_llm(
     timeout: int = 60,
     max_retries: int = 2,
     system_prompt: str = "",
+    api_key: str = "",
 ) -> float:
     """Send a single prompt to the LLM RM and parse the 0/1 response."""
     url = f"{rm_url.rstrip('/')}/chat/completions"
@@ -92,10 +93,13 @@ def _call_llm(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(url, json=payload, timeout=timeout)
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
                 # Try first: the very first non-whitespace character is 0 or 1
@@ -134,6 +138,7 @@ def evaluate_trajectories(
     max_tokens: int = 32,
     temperature: float = 0.0,
     max_workers: int = 8,
+    api_key: str = "",
 ) -> List[float]:
     """Batch-evaluate reasoning trajectories via an external LLM.
 
@@ -146,6 +151,7 @@ def evaluate_trajectories(
         max_tokens: Max tokens for the LLM response (should be small, default 32).
         temperature: Sampling temperature (zero for deterministic).
         max_workers: Number of concurrent HTTP workers.
+        api_key: Optional Bearer token for authenticated APIs.
 
     Returns:
         A list of float scores (0.0 or 1.0), one per trajectory.
@@ -172,6 +178,7 @@ def evaluate_trajectories(
                 60,     # timeout
                 2,      # max_retries
                 _DEFAULT_SYSTEM_PROMPT,
+                api_key,
             ): idx
             for idx, prompt in enumerate(prompts)
         }
