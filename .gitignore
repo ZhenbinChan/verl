@@ -146,7 +146,9 @@ TreeRL/
 rollout/
 RuleReasoner/
 llm_server/output/
+.vllm/
 
 debug/
 *.pid
 *.log
+*.out
