@@ -144,6 +144,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 "leaf_acc": 0.75,
                 "candidate_leaves": 4,
                 "selected_traces": 2,
+                "step_num": 2.5,
                 "terminal_padding": 1,
                 "trace_total": 2,
                 "full_format_correct_count": 1,
@@ -160,6 +161,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(metrics["Tree/leaf_acc"], 0.75)
         self.assertEqual(metrics["Tree/time_branch_generation"], 2.0)
         self.assertEqual(metrics["reward/step_treerl_process_reward_mean"], 0.25)
+        self.assertEqual(metrics["rollout/step_num"], 2.5)
         self.assertFalse(any(key.startswith("training/step_treerl") for key in metrics))
 
     def test_answer_acc_metrics_keep_only_two_ratios(self):

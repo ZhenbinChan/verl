@@ -59,6 +59,7 @@ class StepTreeRLMetrics:
     full_format_correct_count: int = 0
     answer_format_only_count: int = 0
     step_format_only_count: int = 0
+    step_num: float = 0.0
     # LLM RM trajectory quality scores
     llm_rm_score_sum: float = 0.0
     llm_rm_score_count: int = 0
@@ -922,33 +923,38 @@ class StepTreeRLStrategy(SamplingStrategy):
             if not leaves:
                 continue
 
-            # Mark correctness for each leaf via text matching
+            # Score each leaf using both full-trajectory format and answer correctness.
             for leaf in leaves:
                 terminal_text = leaf.accumulated_text
+                format_valid = bool(
+                    terminal_text
+                    and classify_trajectory_format(terminal_text, valid_choices="ABCDEF")["format_full"]
+                )
+                answer_correct = False
                 if gt is not None and terminal_text:
                     try:
                         from verl.utils.reward_score.logi import compute_score
                         score, _ = compute_score(terminal_text, gt)
-                        leaf.is_correct = float(score) == 1.0
+                        answer_correct = float(score) == 1.0
                     except Exception:
-                        leaf.is_correct = False
-                else:
-                    leaf.is_correct = False
+                        answer_correct = False
 
-                leaf.leaf_outcome = 1.0 if leaf.is_correct else 0.0
+                leaf.is_correct = format_valid and answer_correct
+                if not format_valid:
+                    leaf.leaf_outcome = 0.0
+                elif answer_correct:
+                    leaf.leaf_outcome = 1.0
+                else:
+                    leaf.leaf_outcome = 0.1
                 leaf.R = leaf.leaf_outcome  # base value before fusion / RLOO
                 if leaf.is_correct:
                     leaf.main_chain = True
 
             # Optionally refine leaf outcome with LLM trajectory quality evaluation.
-            # This mirrors the original TreeRL external RM: binary_outcome + coeff * quality_score.
+            # The external RM changes the value used by RLOO, but never overrides
+            # format-aware correctness or main-chain membership.
             if self.trajectory_rm_url:
                 self._evaluate_leaves_quality(roots, leaves, gen_batch)
-                # Update is_correct / main_chain to reflect the fused value so that
-                # correct_terminal_in_subtree stays consistent with accumulated_value.
-                for leaf in leaves:
-                    leaf.is_correct = float(leaf.R) > 0.5
-                    leaf.main_chain = leaf.is_correct
 
             self._apply_rloo_to_leaves(leaves)
             for leaf in leaves:
@@ -1037,10 +1043,10 @@ class StepTreeRLStrategy(SamplingStrategy):
         )
 
         # Log raw LLM RM scores for debugging
-        binary_outcomes = [float(leaf.leaf_outcome) for leaf in leaves]
+        base_outcomes = [float(leaf.leaf_outcome) for leaf in leaves]
         print(
             f"[StepTreeRL] LLM RM done. "
-            f"leaf_outcomes={binary_outcomes} "
+            f"leaf_outcomes={base_outcomes} "
             f"llm_quality_scores={quality_scores}"
         )
 
@@ -1248,6 +1254,15 @@ class StepTreeRLStrategy(SamplingStrategy):
                 all_paths.append(all_paths[-1])
                 all_gt.append(all_gt[-1])
             print(f"[StepTreeRL] Padded {padding_needed} samples to make {total + padding_needed} divisible by {self._n_gpus}")
+
+        # Average number of reasoning steps in the actual actor-training batch.
+        # Answer nodes (the trailing boxed answer) are intentionally excluded;
+        # repeated terminal/GPU-padding paths are included because they are trained.
+        if all_paths:
+            self._metrics.step_num = sum(
+                sum(1 for node in path if getattr(node, "node_type", "step") == "step")
+                for path in all_paths
+            ) / len(all_paths)
 
         return _build_sampling_result(
             all_paths,
@@ -1548,6 +1563,7 @@ def _build_sampling_result(
                 ),
                 "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
                 "selected_traces": metrics.selected_traces if metrics is not None else 0,
+                "step_num": metrics.step_num if metrics is not None else 0.0,
                 "terminal_padding": metrics.terminal_padding if metrics is not None else 0,
                 "trace_total": metrics.trace_total if metrics is not None else 0,
                 "full_format_correct_count": metrics.full_format_correct_count if metrics is not None else 0,

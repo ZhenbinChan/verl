@@ -426,6 +426,99 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(metrics["format_steps"], 1)
         self.assertEqual(metrics["trace_total"], 1)
         self.assertEqual(metrics["full_format_correct_count"], 1)
+        self.assertEqual(metrics["step_num"], 1.0)
+
+    def test_leaf_outcome_combines_full_format_and_answer_correctness(self):
+        valid = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}"
+        invalid = "unwrapped reasoning \\boxed{A}"
+        invalid_schema = "<step><conclusion>b</conclusion></step>\\boxed{A}"
+        invalid_choice = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{G}"
+        cases = [
+            ("valid_correct", valid, 1.0, 1.0, True),
+            ("valid_wrong", valid, 0.0, 0.1, False),
+            ("invalid_correct", invalid, 1.0, 0.0, False),
+            ("invalid_wrong", invalid, 0.0, 0.0, False),
+            ("invalid_step_schema", invalid_schema, 1.0, 0.0, False),
+            ("invalid_boxed_choice", invalid_choice, 1.0, 0.0, False),
+        ]
+
+        for name, trajectory, answer_score, expected_outcome, expected_correct in cases:
+            with self.subTest(name=name):
+                strategy = make_strategy()
+                root = MCTSNode(state=[1], tree_idx=0)
+                leaf = MCTSNode(
+                    state=[1, 2],
+                    step_tokens=[2],
+                    accumulated_text=trajectory,
+                    parent=root,
+                    tree_idx=0,
+                )
+                root.children = [leaf]
+                gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+
+                with patch("verl.utils.reward_score.logi.compute_score", return_value=(answer_score, {})):
+                    strategy._backpropagate_all([root], gen_batch)
+
+                self.assertEqual(leaf.leaf_outcome, expected_outcome)
+                self.assertEqual(leaf.R, expected_outcome)
+                self.assertIs(leaf.is_correct, expected_correct)
+                self.assertIs(leaf.main_chain, expected_correct)
+
+    def test_trajectory_rm_does_not_override_format_aware_correctness(self):
+        strategy = make_strategy()
+        strategy.trajectory_rm_url = "http://localhost:4869/v1"
+        root = MCTSNode(state=[1], tree_idx=0)
+        leaf = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            accumulated_text="unwrapped reasoning \\boxed{A}",
+            parent=root,
+            tree_idx=0,
+        )
+        root.children = [leaf]
+        gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+
+        def apply_rm(_roots, leaves, _gen_batch):
+            leaves[0].R = 0.6
+            leaves[0].accumulated_value = 0.6
+
+        with (
+            patch("verl.utils.reward_score.logi.compute_score", return_value=(1.0, {})),
+            patch.object(strategy, "_evaluate_leaves_quality", side_effect=apply_rm),
+        ):
+            strategy._backpropagate_all([root], gen_batch)
+
+        self.assertEqual(leaf.leaf_outcome, 0.0)
+        self.assertEqual(leaf.R, 0.6)
+        self.assertFalse(leaf.is_correct)
+        self.assertFalse(leaf.main_chain)
+
+    def test_step_num_counts_only_step_nodes_in_padded_training_paths(self):
+        strategy = make_strategy()
+        strategy.path_selection = "all_leaves"
+        strategy._n_gpus = 4
+        root = MCTSNode(state=[1], tree_idx=0)
+
+        short_step = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, node_idx=1)
+        short_answer = MCTSNode(state=[1, 2, 3], step_tokens=[3], parent=short_step, tree_idx=0, node_idx=2, node_type="answer")
+        long_step_1 = MCTSNode(state=[1, 4], step_tokens=[4], parent=root, tree_idx=0, node_idx=3)
+        long_step_2 = MCTSNode(state=[1, 4, 5], step_tokens=[5], parent=long_step_1, tree_idx=0, node_idx=4)
+        long_answer = MCTSNode(state=[1, 4, 5, 6], step_tokens=[6], parent=long_step_2, tree_idx=0, node_idx=5, node_type="answer")
+        root.children = [short_step, long_step_1]
+        short_step.children = [short_answer]
+        long_step_1.children = [long_step_2]
+        long_step_2.children = [long_answer]
+
+        result = strategy._build_output(
+            gen_batch=None,
+            roots=[root],
+            device=torch.device("cpu"),
+            ground_truths=[None],
+        )
+
+        metrics = result.gen_batch_output.meta_info["step_treerl_metrics"]
+        self.assertEqual(result.gen_batch_output.batch["responses"].shape[0], 4)
+        self.assertEqual(metrics["step_num"], 1.75)
 
     def test_terminal_step_nodes_remain_branch_candidates_but_answer_nodes_do_not(self):
         strategy = make_strategy()
@@ -565,8 +658,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         strategy = make_strategy()
         strategy.length_penalty_enabled = False
         root = MCTSNode(state=[1], tree_idx=0)
-        a = MCTSNode(state=[1, 2], step_tokens=[2], step_text="a", accumulated_text="wrong", parent=root, tree_idx=0, process_reward=1.0)
-        b = MCTSNode(state=[1, 3], step_tokens=[3], step_text="b", accumulated_text="right", parent=root, tree_idx=0, process_reward=1.0)
+        valid_a = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}"
+        valid_b = "<step><premise>c</premise><conclusion>d</conclusion></step>\\boxed{B}"
+        a = MCTSNode(state=[1, 2], step_tokens=[2], step_text="a", accumulated_text=valid_a, parent=root, tree_idx=0, process_reward=1.0)
+        b = MCTSNode(state=[1, 3], step_tokens=[3], step_text="b", accumulated_text=valid_b, parent=root, tree_idx=0, process_reward=1.0)
         root.children = [a, b]
 
         gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -574,13 +669,13 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             strategy._backpropagate_all([root], gen_batch)
         strategy._assign_segment_rewards(root)
 
-        self.assertEqual(a.R, -1.0)
-        self.assertEqual(b.R, 1.0)
+        self.assertAlmostEqual(a.R, -0.9)
+        self.assertAlmostEqual(b.R, 0.9)
         self.assertEqual(root.terminal_in_subtree, 2)
         self.assertEqual(root.correct_terminal_in_subtree, 1)
-        self.assertEqual(root.accumulated_value, 0.0)
-        self.assertEqual(a.segment_reward, -1.0)
-        self.assertEqual(b.segment_reward, 1.0)
+        self.assertAlmostEqual(root.accumulated_value, 0.0)
+        self.assertAlmostEqual(a.segment_reward, -0.9)
+        self.assertAlmostEqual(b.segment_reward, 0.9)
 
     def test_origin_segment_reward_uses_value_formula_without_prm_or_length_penalty(self):
         strategy = make_strategy(adv_estimator="step_treerl_origin")

@@ -101,6 +101,7 @@ def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_t
                 "val-core/llm_rm_score": step_treerl_metrics.get("llm_rm_score", 0.0),
                 "Tree/candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
                 "Tree/selected_traces": step_treerl_metrics.get("selected_traces", 0),
+                "rollout/step_num": step_treerl_metrics.get("step_num", 0.0),
                 "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
                 "Tree/trace_total": step_treerl_metrics.get("trace_total", 0),
                 "Tree/full_format_correct_count": step_treerl_metrics.get("full_format_correct_count", 0),
