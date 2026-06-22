@@ -4,7 +4,6 @@
 # 所有运行时缓存都放到 ~/run 下，避免写 ~/.cache 或 home quota
 CACHE_ROOT=~/run/Workspaces/vllm_runtime_cache
 
-<<<<<<< Updated upstream
 export HF_HOME=$CACHE_ROOT/huggingface
 export HF_MODULES_CACHE=$HF_HOME/modules
 export TRANSFORMERS_CACHE=$HF_HOME/transformers
@@ -28,10 +27,6 @@ mkdir -p \
 
 CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
     --model /data/home/scyb224/run/Workspaces/LLMs/Qwen3-8B-Base \
-=======
-CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
-    --model /home/chenzhb/Workspaces/LLMs/Qwen3-8B-Base \
->>>>>>> Stashed changes
     --host 0.0.0.0 \
     --port 4869 \
     --gpu-memory-utilization 0.9 \

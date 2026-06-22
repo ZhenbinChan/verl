@@ -69,6 +69,7 @@ def make_strategy(
     process_reward_type="format",
     selected_num_traces=2,
     adv_estimator="step_treerl_reinforce",
+    trajectory_rm_enabled=None,
 ):
     config = OmegaConf.create(
         {
@@ -109,6 +110,8 @@ def make_strategy(
             },
         }
     )
+    if trajectory_rm_enabled is not None:
+        config.trainer.step_treerl_config.trajectory_rm_enabled = trajectory_rm_enabled
     return StepTreeRLStrategy(config, DummyTokenizer())
 
 
@@ -466,6 +469,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
 
     def test_trajectory_rm_does_not_override_format_aware_correctness(self):
         strategy = make_strategy()
+        self.assertTrue(strategy.trajectory_rm_enabled)
         strategy.trajectory_rm_url = "http://localhost:4869/v1"
         root = MCTSNode(state=[1], tree_idx=0)
         leaf = MCTSNode(
@@ -492,6 +496,32 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(leaf.R, 0.6)
         self.assertFalse(leaf.is_correct)
         self.assertFalse(leaf.main_chain)
+
+    def test_disabled_trajectory_rm_skips_request_and_uses_zero_score(self):
+        strategy = make_strategy(trajectory_rm_enabled=False)
+        strategy.trajectory_rm_url = "http://localhost:4869/v1"
+        root = MCTSNode(state=[1], tree_idx=0)
+        leaf = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            accumulated_text="<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}",
+            parent=root,
+            tree_idx=0,
+            llm_quality_score=1.0,
+        )
+        root.children = [leaf]
+        gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+
+        with (
+            patch("verl.utils.reward_score.logi.compute_score", return_value=(1.0, {})),
+            patch.object(strategy, "_evaluate_leaves_quality") as evaluate_mock,
+        ):
+            strategy._backpropagate_all([root], gen_batch)
+
+        evaluate_mock.assert_not_called()
+        self.assertEqual(leaf.llm_quality_score, 0.0)
+        self.assertEqual(leaf.leaf_outcome, 1.0)
+        self.assertEqual(leaf.R, 1.0)
 
     def test_step_num_counts_only_step_nodes_in_padded_training_paths(self):
         strategy = make_strategy()

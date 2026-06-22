@@ -140,6 +140,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         self._question_texts_by_tree: Dict[int, str] = {}
 
         # LLM RM for trajectory quality evaluation
+        self.trajectory_rm_enabled = bool(cfg.get("trajectory_rm_enabled", True))
         self.trajectory_rm_url = str(cfg.get("trajectory_rm_url", "")).strip()
         self.trajectory_rm_model = str(cfg.get("trajectory_rm_model", "eval-model"))
         self.trajectory_rm_max_tokens = int(cfg.get("trajectory_rm_max_tokens", 32))
@@ -953,7 +954,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             # Optionally refine leaf outcome with LLM trajectory quality evaluation.
             # The external RM changes the value used by RLOO, but never overrides
             # format-aware correctness or main-chain membership.
-            if self.trajectory_rm_url:
+            if self.trajectory_rm_enabled and self.trajectory_rm_url:
                 self._evaluate_leaves_quality(roots, leaves, gen_batch)
 
             self._apply_rloo_to_leaves(leaves)
@@ -970,6 +971,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             node.state_value = 0.0
             node.segment_reward = 0.0
             node.leaf_outcome = 0.0
+            node.llm_quality_score = 0.0
             node.is_correct = None
             node.main_chain = False
 

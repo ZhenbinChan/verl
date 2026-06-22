@@ -38,6 +38,7 @@ TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
 LENGTH_PENALTY_ENABLED=false
+TRAJECTORY_RM_ENABLED=false
 
 EXPERIMENT_NAME='qwen3-8b_steprl_originv2_n16_m4n2l2t2_warmup_v2'
 
@@ -99,6 +100,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.weighted_value_style=terminal_ratio \
     trainer.step_treerl_config.overall_norm_style=none \
     trainer.step_treerl_config.length_penalty.enabled=false \
+    trainer.step_treerl_config.trajectory_rm_enabled=${TRAJECTORY_RM_ENABLED} \
     +trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
     +trainer.step_treerl_config.trajectory_rm_model=eval-model \
     trainer.step_treerl_config.length_penalty.enabled=$LENGTH_PENALTY_ENABLED \

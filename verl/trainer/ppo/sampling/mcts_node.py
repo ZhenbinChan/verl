@@ -41,6 +41,7 @@ class MCTSNode:
     segment_reward: float = 0.0
     state_value: float = 0.0
     leaf_outcome: float = 0.0
+    llm_quality_score: float = 0.0
 
     # --- ORM / correctness (set after tree is built) ---
     is_correct: Optional[bool] = None   # ORM: leaf only, None until computed
