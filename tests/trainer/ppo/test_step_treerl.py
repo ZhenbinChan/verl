@@ -36,6 +36,7 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     strict_step_xml_correct,
 )
 from verl.trainer.ppo.sampling.step_treerl import StepTreeRLStrategy
+from verl.utils.reward_score.logi import compute_score as logi_compute_score
 from verl.workers.rollout.sampling_params import extract_rollout_sampling_kwargs
 from verl.workers.reward_manager.step_tree import StepTreeRewardManager
 
@@ -846,22 +847,40 @@ class TestStepTreeRLStrategy(unittest.TestCase):
 
         self.assertTrue(boxed_answer_format_correct(r"\boxed{A}"))
         self.assertTrue(boxed_answer_format_correct(r"final \boxed{{B}}"))
+        self.assertTrue(boxed_answer_format_correct(r"\boxed{(A)}"))
+        self.assertTrue(boxed_answer_format_correct(r"final \boxed{ (B) }"))
+        self.assertTrue(boxed_answer_format_correct(r"final \boxed{{(C)}}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{AB}"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{(AB)}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{A}}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{{A}"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{(A}}"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{A)}"))
         self.assertFalse(boxed_answer_format_correct(r"\boxed{A} trailing"))
+        self.assertFalse(boxed_answer_format_correct(r"\boxed{(A)}."))
 
         full = good_step + r"\boxed{A}"
+        full_parenthesized = good_step + r"\boxed{(A)}"
         answer_only = r"Reasoning without XML. \boxed{B}"
         step_only = good_step
         bad = "Reasoning without the requested structure."
         self.assertEqual(classify_trajectory_format(full)["format_full"], 1.0)
+        self.assertEqual(classify_trajectory_format(full_parenthesized)["format_full"], 1.0)
         self.assertEqual(classify_trajectory_format(answer_only)["format_answer_only"], 1.0)
+        self.assertEqual(classify_trajectory_format(r"Reasoning without XML. \boxed{(B)}")["format_answer_only"], 1.0)
         self.assertEqual(classify_trajectory_format(step_only)["format_step_only"], 1.0)
         self.assertEqual(classify_trajectory_format(bad)["format_incorrect"], 1.0)
         self.assertEqual(classify_trajectory_format(good_step + r"\boxed{A}}")["format_incorrect"], 1.0)
+        self.assertEqual(classify_trajectory_format(good_step + r"\boxed{(A)}.")["format_incorrect"], 1.0)
+
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{(A)}", "A"), (1.0, None))
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{{(b)}}", "B"), (1.0, None))
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{(A)}", "B"), (0.0, None))
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{(AB)}", "A"), (0.0, None))
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{A}}", "A"), (0.0, None))
 
         self.assertEqual(classify_rollout_format(full)["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(full_parenthesized)["format_primary"], "full")
         self.assertEqual(classify_rollout_format(answer_only)["format_primary"], "no_step")
         self.assertEqual(classify_rollout_format("prefix\n" + full)["format_primary"], "text_outside_step")
         self.assertEqual(classify_rollout_format("<step><premise>a</premise>")["format_primary"], "step_xml_invalid")

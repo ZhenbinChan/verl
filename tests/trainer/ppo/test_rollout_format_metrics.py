@@ -213,9 +213,17 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{A}")["format_primary"], "full")
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{{A}}")["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{(A)}")["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{ (A) }")["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{{(A)}}")["format_primary"], "full")
+        self.assertEqual(classify_rollout_format(r"plain reasoning \boxed{(A)}")["format_primary"], "no_step")
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{A}}")["format_primary"], "boxed_invalid")
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{{A}")["format_primary"], "boxed_invalid")
         self.assertEqual(classify_rollout_format(good_step + r"\boxed{AB}")["format_primary"], "boxed_invalid")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{(AB)}")["format_primary"], "boxed_invalid")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{(A}}")["format_primary"], "boxed_invalid")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{A)}")["format_primary"], "boxed_invalid")
+        self.assertEqual(classify_rollout_format(good_step + r"\boxed{(A)}.")["format_primary"], "boxed_invalid")
 
     def test_literal_whitespace_escapes_outside_steps_are_accepted(self):
         good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"

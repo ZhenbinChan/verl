@@ -42,7 +42,7 @@ def strict_step_xml_correct(step_text: str) -> bool:
     return premise_count >= 1 and conclusion_count == 1
 
 
-BOXED_ANSWER_RE = re.compile(r"\\boxed\{(?:\{\s*([A-Za-z])\s*\}|\s*([A-Za-z])\s*)\}\s*$", re.DOTALL)
+BOXED_ANSWER_RE = re.compile(r"\\boxed\{(?:\{\s*(?:\(\s*([A-Za-z])\s*\)|([A-Za-z]))\s*\}|\s*(?:\(\s*([A-Za-z])\s*\)|([A-Za-z]))\s*)\}\s*$", re.DOTALL)
 STEP_BLOCK_RE = re.compile(r"<step\b[^>]*>.*?</step>", re.DOTALL)
 STEP_TAG_RE = re.compile(r"</?step\b", re.DOTALL)
 LITERAL_WHITESPACE_ESCAPE_RE = re.compile(r"\\[nrtvf]")
@@ -66,12 +66,16 @@ def _boxed_answer_match(response_text: str):
     return BOXED_ANSWER_RE.search(response_text or "")
 
 
+def _boxed_answer_letter(match: re.Match) -> str:
+    return next(group for group in match.groups() if group).upper()
+
+
 def boxed_answer_format_correct(response_text: str, valid_choices: Optional[str] = None) -> bool:
     """Return True when the response ends with a boxed single-letter answer."""
     match = _boxed_answer_match(response_text)
     if not match:
         return False
-    answer = (match.group(1) or match.group(2)).upper()
+    answer = _boxed_answer_letter(match)
     if valid_choices is None:
         return True
     return answer in {choice.upper() for choice in valid_choices}
@@ -104,7 +108,7 @@ def classify_trajectory_format(response_text: str, valid_choices: Optional[str] 
     answer_ok = False
     step_region = response_text
     if answer_match is not None:
-        answer = (answer_match.group(1) or answer_match.group(2)).upper()
+        answer = _boxed_answer_letter(answer_match)
         answer_ok = valid_choices is None or answer in {choice.upper() for choice in valid_choices}
         step_region = response_text[:answer_match.start()]
 
@@ -126,7 +130,7 @@ def classify_trajectory_format(response_text: str, valid_choices: Optional[str] 
 def _split_answer_region(response_text: str, valid_choices: Optional[str] = None) -> tuple[str, str, str]:
     match = _boxed_answer_match(response_text)
     if match:
-        answer = (match.group(1) or match.group(2)).upper()
+        answer = _boxed_answer_letter(match)
         if valid_choices is None or answer in {choice.upper() for choice in valid_choices}:
             return response_text[: match.start()], "valid", answer
         return response_text[: match.start()], "invalid", ""
