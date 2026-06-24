@@ -1,25 +1,24 @@
 #!/bin/bash
 #SBATCH -J OriginWarmup
-#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin_warmup_v2.out
+#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_steprlv2_promptv3.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH -t 48:00:00
-#SBATCH --gres=gpu:5
-#SBATCH --mem=400G
+#SBATCH --gres=gpu:4
+#SBATCH --mem=320G
 
 module add cuda12.8/12.8
 
-
-# Start VLLM as RM
-CUDA_VISIBLE_DEVICES=0 nohup python -m vllm.entrypoints.openai.api_server \
-    --model /share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-7B-Instruct \
+# ======================= Start VLLM as RM ======================== #
+CUDA_VISIBLE_DEVICES=0,1,2,3 nohup python -m vllm.entrypoints.openai.api_server \
+    --model /share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-1.5B-Instruct \
     --host 0.0.0.0 \
     --port 4869 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.1 \
     --max-model-len 8192 \
-    --tensor-parallel-size 1 \
+    --tensor-parallel-size 4 \
     --served-model-name eval-model \
     --trust-remote-code \
     --guided-decoding-backend xgrammar > vllm_server_outlines_backend.log 2>&1 &
@@ -37,6 +36,7 @@ done
 
 echo "[info] Start RL Training"
 
+# =============================================================== #
 
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
@@ -51,8 +51,8 @@ export WANDB_ENTITY='verl-fol'
 set -x
 
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
-MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115_v2
-PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
+MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
+PROMPT_PATH=$HOME/prompts/premise_conclusion_v2.txt
 
 N_GPUS_PER_NODE=4
 BATCH_SIZE=4
@@ -60,28 +60,28 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=4
 LOGPROB_MICRO_BATCH_SIZE_PER_GPU=4
 
 
-M=8
-N=4
-L=2
+M=2
+N=2
+L=1
 T=2
-NUM_TRACES=64
+NUM_TRACES=8
 
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=4096
 MAX_MODEL_LEN=8192
 PPO_MAX_TOKEN_LEN_PER_GPU=16384
-GPU_MEMORY_UTILIZATION=0.3
+GPU_MEMORY_UTILIZATION=0.4
 TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
 LENGTH_PENALTY_ENABLED=false
 
-EXPERIMENT_NAME='qwen3-8b_steprl_originv2_n64_m8n4l2t2_warmup_v2'
+EXPERIMENT_NAME='qwen3-8b_steprl_originv2_n16_m4n2l1t2_warmup_v2'
 
 
 
-CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_origin \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
@@ -91,7 +91,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.prompt_path=$HOME/prompts/premise_conclusion.txt \
+    data.prompt_path=${PROMPT_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \
     actor_rollout_ref.actor.policy_loss=tree_loss \
@@ -136,8 +136,8 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.weighted_value_style=terminal_ratio \
     trainer.step_treerl_config.overall_norm_style=none \
     trainer.step_treerl_config.length_penalty.enabled=false \
-    trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
-    trainer.step_treerl_config.trajectory_rm_model=eval-model \
+    +trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
+    +trainer.step_treerl_config.trajectory_rm_model=eval-model \
     trainer.step_treerl_config.length_penalty.enabled=$LENGTH_PENALTY_ENABLED \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \

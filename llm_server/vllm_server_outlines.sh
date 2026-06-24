@@ -2,7 +2,7 @@
 
 # 更高的版本，启用 outlines： --structured-outputs-config '{"backend":"outlines"}' 
 # 所有运行时缓存都放到 ~/run 下，避免写 ~/.cache 或 home quota
-CACHE_ROOT=~/run/Workspaces/vllm_runtime_cache
+CACHE_ROOT=/share/nlp/chenzhenbin/Workspaces/vllm_runtime_cache
 
 export HF_HOME=$CACHE_ROOT/huggingface
 export HF_MODULES_CACHE=$HF_HOME/modules
@@ -25,8 +25,8 @@ mkdir -p \
   "$XDG_CACHE_HOME"
 
 
-CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
-    --model /data/home/scyb224/run/Workspaces/LLMs/Qwen3-8B-Base \
+CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
+    --model /share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-7B-Instruct \
     --host 0.0.0.0 \
     --port 4869 \
     --gpu-memory-utilization 0.9 \

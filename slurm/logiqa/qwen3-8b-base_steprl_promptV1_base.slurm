@@ -1,57 +1,27 @@
 #!/bin/bash
-#SBATCH -J OriginWarmup
-#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b-base_Tree_origin_warmup_v2.out
+#SBATCH -J Base
+#SBATCH -o /share/nlp/chenzhenbin/Workspaces/verl/slurm/logs/logiqa/qwen3-8b_steprl_n16_m4n2l2t2_base.out
 #SBATCH --qos=lv0b
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH -t 48:00:00
-#SBATCH --gres=gpu:5
-#SBATCH --mem=400G
-
-module add cuda12.8/12.8
-
-
-# Start VLLM as RM
-CUDA_VISIBLE_DEVICES=0 nohup python -m vllm.entrypoints.openai.api_server \
-    --model /share/nlp/chenzhenbin/Workspaces/LLMs/Qwen2.5-7B-Instruct \
-    --host 0.0.0.0 \
-    --port 4869 \
-    --gpu-memory-utilization 0.9 \
-    --max-model-len 8192 \
-    --tensor-parallel-size 1 \
-    --served-model-name eval-model \
-    --trust-remote-code \
-    --guided-decoding-backend xgrammar > vllm_server_outlines_backend.log 2>&1 &
-
-echo $! > vllm_server_outlines_backend.pid
-
-for i in $(seq 1 180); do
-    if curl -s http://localhost:${VLLM_PORT}/health > /dev/null 2>&1; then
-        echo "[info] VLLM server Started after ${i}s"
-        VLLM_READY=1
-        break
-    fi
-    sleep 1
-done
-
-echo "[info] Start RL Training"
-
+#SBATCH --gres=gpu:4
+#SBATCH --mem=320G
 
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
+unset http_proxy https_proxy
+export no_proxy='127.0.0.1,localhost'
 
-export TOKENIZERS_PARALLELISM=true
-export NCCL_DEBUG=WARN
-export VLLM_LOGGING_LEVEL=WARN
+ray stop
+
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
 export WANDB_ENTITY='verl-fol'
 
-set -x
-
 HOME=/share/nlp/chenzhenbin/Workspaces/verl
-MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/verl/output_models/qwen3-8b-base_warmup_115_v2
+MODEL_PATH=/share/nlp/chenzhenbin/Workspaces/LLMs/Qwen3-8B-Base
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 N_GPUS_PER_NODE=4
@@ -60,28 +30,28 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=4
 LOGPROB_MICRO_BATCH_SIZE_PER_GPU=4
 
 
-M=8
-N=4
+M=4
+N=2
 L=2
 T=2
-NUM_TRACES=64
+NUM_TRACES=16
 
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=4096
 MAX_MODEL_LEN=8192
 PPO_MAX_TOKEN_LEN_PER_GPU=16384
-GPU_MEMORY_UTILIZATION=0.3
+GPU_MEMORY_UTILIZATION=0.4
 TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
 LOG_FORMAT_METRICS=True
 LENGTH_PENALTY_ENABLED=false
+TRAJECTORY_RM_ENABLED=false
 
-EXPERIMENT_NAME='qwen3-8b_steprl_originv2_n64_m8n4l2t2_warmup_v2'
+EXPERIMENT_NAME='qwen3-8b_steprl_n16_m4n2l2t2_base_v2'
 
 
-
-CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
+CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_origin \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
@@ -91,20 +61,22 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    data.prompt_path=$HOME/prompts/premise_conclusion.txt \
+    data.prompt_path=${PROMPT_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \
     actor_rollout_ref.actor.policy_loss=tree_loss \
+    actor_rollout_ref.actor.clip_ratio=0.2 \
+    actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${BATCH_SIZE} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.loss_agg_mode=token-mean \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0 \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.loss_agg_mode=token-mean \
+    actor_rollout_ref.actor.kl_loss_type=mse \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -136,8 +108,9 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.weighted_value_style=terminal_ratio \
     trainer.step_treerl_config.overall_norm_style=none \
     trainer.step_treerl_config.length_penalty.enabled=false \
-    trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
-    trainer.step_treerl_config.trajectory_rm_model=eval-model \
+    trainer.step_treerl_config.trajectory_rm_enabled=${TRAJECTORY_RM_ENABLED} \
+    +trainer.step_treerl_config.trajectory_rm_url=http://localhost:4869/v1 \
+    +trainer.step_treerl_config.trajectory_rm_model=eval-model \
     trainer.step_treerl_config.length_penalty.enabled=$LENGTH_PENALTY_ENABLED \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
@@ -145,6 +118,6 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=9999999 \
+    trainer.save_freq=80 \
     trainer.test_freq=20 \
     trainer.total_epochs=1  $@
