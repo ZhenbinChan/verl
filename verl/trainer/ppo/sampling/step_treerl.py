@@ -21,7 +21,7 @@ import random
 import re
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -33,7 +33,12 @@ from verl.trainer.ppo.sampling.mcts_node import (
     collect_all_nodes,
     gather_path,
 )
-from verl.trainer.ppo.sampling.mcts_prm import boxed_answer_format_correct, classify_trajectory_format, format_step_reward
+from verl.trainer.ppo.sampling.mcts_prm import (
+    FORMAT_PRIMARY_CATEGORIES,
+    boxed_answer_format_correct,
+    classify_rollout_format,
+    format_step_reward,
+)
 from verl.utils.process_reward import (
     StepRewardRequest,
     build_process_reward_runtime,
@@ -56,9 +61,8 @@ class StepTreeRLMetrics:
     candidate_leaves: int = 0
     terminal_padding: int = 0
     trace_total: int = 0
-    full_format_correct_count: int = 0
-    answer_format_only_count: int = 0
-    step_format_only_count: int = 0
+    format_primary_counts: Dict[str, int] = field(default_factory=lambda: {category: 0 for category in FORMAT_PRIMARY_CATEGORIES})
+    relaxed_format_correct_count: int = 0
     step_num: float = 0.0
     # LLM RM trajectory quality scores
     llm_rm_score_sum: float = 0.0
@@ -931,7 +935,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 terminal_text = leaf.accumulated_text
                 format_valid = bool(
                     terminal_text
-                    and classify_trajectory_format(terminal_text, valid_choices="ABCDEF")["format_full"]
+                    and classify_rollout_format(terminal_text, valid_choices="ABCDEF")["format_primary"] == "full"
                 )
                 answer_correct = False
                 if gt is not None and terminal_text:
@@ -1312,11 +1316,12 @@ class StepTreeRLStrategy(SamplingStrategy):
 
     def _record_trace_format_metrics(self, leaf: MCTSNode) -> None:
         response_text = leaf.trajectory_text or leaf.accumulated_text
-        classes = classify_trajectory_format(response_text)
+        format_info = classify_rollout_format(response_text)
         self._metrics.trace_total += 1
-        self._metrics.full_format_correct_count += int(classes["format_full"])
-        self._metrics.answer_format_only_count += int(classes["format_answer_only"])
-        self._metrics.step_format_only_count += int(classes["format_step_only"])
+        primary = str(format_info.get("format_primary", ""))
+        if primary in self._metrics.format_primary_counts:
+            self._metrics.format_primary_counts[primary] += 1
+        self._metrics.relaxed_format_correct_count += int(bool(format_info.get("relaxed_format_correct", False)))
 
     def _collect_metrics(self, roots: List[MCTSNode]) -> StepTreeRLMetrics:
         metrics = StepTreeRLMetrics()
@@ -1525,6 +1530,46 @@ def _build_sampling_result(
         for j, s in enumerate(scores[:max_steps]):
             step_correctness_padded[i, j] = s
 
+    trace_total = metrics.trace_total if metrics is not None else 0
+    format_primary_counts = metrics.format_primary_counts if metrics is not None else {category: 0 for category in FORMAT_PRIMARY_CATEGORIES}
+    step_treerl_metrics = {
+        "format_steps": metrics.format_steps if metrics is not None else 0,
+        "total_steps": metrics.total_steps if metrics is not None else 0,
+        "problem_count": metrics.problem_count if metrics is not None else 0,
+        "steps_per_problem": (
+            metrics.total_steps / metrics.problem_count
+            if metrics is not None and metrics.problem_count > 0
+            else 0.0
+        ),
+        "format_ratio": (metrics.format_steps / metrics.total_steps) if metrics is not None and metrics.total_steps > 0 else 0.0,
+        "process_reward_mean": (
+            metrics.process_reward_sum / metrics.process_reward_count
+            if metrics is not None and metrics.process_reward_count > 0
+            else 0.0
+        ),
+        "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
+        "llm_rm_score": (
+            metrics.llm_rm_score_sum / metrics.llm_rm_score_count
+            if metrics is not None and metrics.llm_rm_score_count > 0
+            else 0.0
+        ),
+        "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
+        "selected_traces": metrics.selected_traces if metrics is not None else 0,
+        "step_num": metrics.step_num if metrics is not None else 0.0,
+        "terminal_padding": metrics.terminal_padding if metrics is not None else 0,
+        "trace_total": trace_total,
+        "relaxed_format_correct_count": metrics.relaxed_format_correct_count if metrics is not None else 0,
+        "relaxed_format_correct_ratio": (
+            metrics.relaxed_format_correct_count / trace_total
+            if metrics is not None and trace_total > 0
+            else 0.0
+        ),
+    }
+    for category in FORMAT_PRIMARY_CATEGORIES:
+        count = format_primary_counts.get(category, 0)
+        step_treerl_metrics[f"format_primary_{category}_count"] = count
+        step_treerl_metrics[f"format_primary_{category}_ratio"] = count / trace_total if trace_total > 0 else 0.0
+
     output = DataProto.from_dict(
         tensors={
             "input_ids": input_ids,
@@ -1539,53 +1584,7 @@ def _build_sampling_result(
             "step_correctness_scores": step_correctness_padded,
         },
         non_tensors={},
-        meta_info={
-            "step_treerl_metrics": {
-                "format_steps": metrics.format_steps if metrics is not None else 0,
-                "total_steps": metrics.total_steps if metrics is not None else 0,
-                "problem_count": metrics.problem_count if metrics is not None else 0,
-                "steps_per_problem": (
-                    metrics.total_steps / metrics.problem_count
-                    if metrics is not None and metrics.problem_count > 0
-                    else 0.0
-                ),
-                "format_ratio": (metrics.format_steps / metrics.total_steps) if metrics is not None and metrics.total_steps > 0 else 0.0,
-                "process_reward_mean": (
-                    metrics.process_reward_sum / metrics.process_reward_count
-                    if metrics is not None and metrics.process_reward_count > 0
-                    else 0.0
-                ),
-                "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
-                "llm_rm_score": (
-                    metrics.llm_rm_score_sum / metrics.llm_rm_score_count
-                    if metrics is not None and metrics.llm_rm_score_count > 0
-                    else 0.0
-                ),
-                "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
-                "selected_traces": metrics.selected_traces if metrics is not None else 0,
-                "step_num": metrics.step_num if metrics is not None else 0.0,
-                "terminal_padding": metrics.terminal_padding if metrics is not None else 0,
-                "trace_total": metrics.trace_total if metrics is not None else 0,
-                "full_format_correct_count": metrics.full_format_correct_count if metrics is not None else 0,
-                "answer_format_only_count": metrics.answer_format_only_count if metrics is not None else 0,
-                "step_format_only_count": metrics.step_format_only_count if metrics is not None else 0,
-                "full_format_correct_ratio": (
-                    metrics.full_format_correct_count / metrics.trace_total
-                    if metrics is not None and metrics.trace_total > 0
-                    else 0.0
-                ),
-                "answer_format_only_ratio": (
-                    metrics.answer_format_only_count / metrics.trace_total
-                    if metrics is not None and metrics.trace_total > 0
-                    else 0.0
-                ),
-                "step_format_only_ratio": (
-                    metrics.step_format_only_count / metrics.trace_total
-                    if metrics is not None and metrics.trace_total > 0
-                    else 0.0
-                ),
-            }
-        },
+        meta_info={"step_treerl_metrics": step_treerl_metrics},
     )
 
     repeat_times = n_paths // batch_size if batch_size > 0 else 1

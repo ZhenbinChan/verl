@@ -31,7 +31,6 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     aggregate_rollout_format_metrics,
     boxed_answer_format_correct,
     classify_rollout_format,
-    classify_trajectory_format,
     format_step_reward,
     strict_step_xml_correct,
 )
@@ -429,7 +428,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(metrics["total_steps"], 1)
         self.assertEqual(metrics["format_steps"], 1)
         self.assertEqual(metrics["trace_total"], 1)
-        self.assertEqual(metrics["full_format_correct_count"], 1)
+        self.assertEqual(metrics["format_primary_full_count"], 1)
         self.assertEqual(metrics["step_num"], 1.0)
 
     def test_leaf_outcome_combines_full_format_and_answer_correctness(self):
@@ -864,15 +863,6 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         answer_only = r"Reasoning without XML. \boxed{B}"
         step_only = good_step
         bad = "Reasoning without the requested structure."
-        self.assertEqual(classify_trajectory_format(full)["format_full"], 1.0)
-        self.assertEqual(classify_trajectory_format(full_parenthesized)["format_full"], 1.0)
-        self.assertEqual(classify_trajectory_format(answer_only)["format_answer_only"], 1.0)
-        self.assertEqual(classify_trajectory_format(r"Reasoning without XML. \boxed{(B)}")["format_answer_only"], 1.0)
-        self.assertEqual(classify_trajectory_format(step_only)["format_step_only"], 1.0)
-        self.assertEqual(classify_trajectory_format(bad)["format_incorrect"], 1.0)
-        self.assertEqual(classify_trajectory_format(good_step + r"\boxed{A}}")["format_incorrect"], 1.0)
-        self.assertEqual(classify_trajectory_format(good_step + r"\boxed{(A)}.")["format_incorrect"], 1.0)
-
         self.assertEqual(logi_compute_score(r"reasoning \boxed{(A)}", "A"), (1.0, None))
         self.assertEqual(logi_compute_score(r"reasoning \boxed{{(b)}}", "B"), (1.0, None))
         self.assertEqual(logi_compute_score(r"reasoning \boxed{(A)}", "B"), (0.0, None))
@@ -959,10 +949,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertAlmostEqual(metrics["steps_per_problem"], 3.0)
         self.assertEqual(metrics["trace_total"], 3)
         self.assertEqual(metrics["selected_traces"], 3)
-        self.assertEqual(metrics["full_format_correct_count"], 1)
-        self.assertEqual(metrics["answer_format_only_count"], 1)
-        self.assertEqual(metrics["step_format_only_count"], 1)
-        self.assertAlmostEqual(metrics["full_format_correct_ratio"], 1 / 3)
+        self.assertEqual(metrics["format_primary_full_count"], 1)
+        self.assertEqual(metrics["format_primary_no_step_count"], 1)
+        self.assertEqual(metrics["format_primary_boxed_missing_count"], 1)
+        self.assertAlmostEqual(metrics["format_primary_full_ratio"], 1 / 3)
         self.assertAlmostEqual(metrics["process_reward_mean"], 2 / 3)
         self.assertEqual(result.gen_batch_output.batch["responses"].shape[0], 4)
 
@@ -994,11 +984,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
 
         extra = result["reward_extra_info"]
         self.assertEqual(extra["acc"], [1.0])
-        self.assertEqual(extra["format_full"], [1.0])
+        self.assertEqual(extra["format_primary_full"], [1.0])
         self.assertEqual(extra["format_error_advantage_mask"], [0.0])
-        self.assertEqual(extra["format_answer_only"], [0.0])
-        self.assertEqual(extra["format_step_only"], [0.0])
-        self.assertEqual(extra["format_trace_total"], [1.0])
+        self.assertEqual(extra["boxed_status_valid"], [1.0])
+        self.assertEqual(extra["relaxed_format_correct"], [1.0])
 
     def test_step_tree_reward_manager_marks_format_error_advantage_mask(self):
         tokenizer = TextTokenizer()
@@ -1027,7 +1016,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         result = manager(data, return_dict=True)
 
         extra = result["reward_extra_info"]
-        self.assertEqual(extra["format_full"], [0.0])
+        self.assertEqual(extra["format_primary_no_step"], [1.0])
         self.assertEqual(extra["format_error_advantage_mask"], [1.0])
 
     def test_step_tree_reward_manager_accepts_precomputed_self_eval_scores(self):

@@ -220,7 +220,7 @@ LOG_FORMAT_METRICS=True bash bash_scripts/logiqa/Qwen2.5-7B_LogiQA_GRPO_only.sh
 
 These metrics are computed after rollout expansion is finished and after the final training trajectories have been assembled. This means they apply to plain GRPO rollouts and to expanded traces from `tree_search`, `treerl`, `parallel_mcts`, `step_treerl`, and `information_gain`. They are independent of the reward manager. Keep `trainer.log_format_metrics=False` for prompts such as `prompts/base.txt`, where the step/premise/conclusion format is not expected.
 
-For validation with `naive_plus`, the same switch also records the `step_tree`-style auxiliary fields `format_full`, `format_answer_only`, `format_step_only`, and `format_trace_total`, which appear as `val-aux/{data_source}/format_*/...` metrics.
+For validation with `naive_plus` or `step_tree`, format details are recorded as numeric `classify_rollout_format`-derived fields such as `format_primary_full`, `format_primary_boxed_missing`, `boxed_status_valid`, `relaxed_format_correct`, `step_block_count`, and `format_error_advantage_mask`. These appear as `val-aux/{data_source}/...` metrics.
 
 ### Training Metrics
 
@@ -271,6 +271,7 @@ When `trainer.rollout_data_dir` is set and `trainer.log_format_metrics=True`, du
 | `boxed_status` | `valid`, `invalid`, or `missing`, describing only the final boxed answer region. |
 | `boxed_answer` | The extracted answer letter when `boxed_status=valid`; otherwise an empty string. |
 | `step_block_count` | Number of complete `<step>...</step>` blocks found before the final answer region. |
+| `format_error_advantage_mask` | `0.0` when `format_primary=full`, otherwise `1.0`. If `algorithm.mask_format_error_advantage=True`, rows with `1.0` have their advantages zeroed. |
 | `answer_acc` | Per-trajectory answer correctness, when provided by the reward manager. |
 
 ### FOL PRM

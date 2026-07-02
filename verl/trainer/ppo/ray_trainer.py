@@ -54,6 +54,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.sampling.mcts_prm import (
+    FORMAT_PRIMARY_CATEGORIES,
     aggregate_rollout_answer_acc_metrics,
     aggregate_rollout_format_metrics,
     classify_rollout_format,
@@ -104,14 +105,13 @@ def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_t
                 "rollout/step_num": step_treerl_metrics.get("step_num", 0.0),
                 "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
                 "Tree/trace_total": step_treerl_metrics.get("trace_total", 0),
-                "Tree/full_format_correct_count": step_treerl_metrics.get("full_format_correct_count", 0),
-                "Tree/answer_format_only_count": step_treerl_metrics.get("answer_format_only_count", 0),
-                "Tree/step_format_only_count": step_treerl_metrics.get("step_format_only_count", 0),
-                "Tree/full_format_correct_ratio": step_treerl_metrics.get("full_format_correct_ratio", 0.0),
-                "Tree/answer_format_only_ratio": step_treerl_metrics.get("answer_format_only_ratio", 0.0),
-                "Tree/step_format_only_ratio": step_treerl_metrics.get("step_format_only_ratio", 0.0),
+                "Tree/format_primary/relaxed_format_correct_count": step_treerl_metrics.get("relaxed_format_correct_count", 0),
+                "Tree/format_primary/relaxed_format_correct_ratio": step_treerl_metrics.get("relaxed_format_correct_ratio", 0.0),
             }
         )
+        for category in FORMAT_PRIMARY_CATEGORIES:
+            metrics[f"Tree/format_primary/{category}_count"] = step_treerl_metrics.get(f"format_primary_{category}_count", 0)
+            metrics[f"Tree/format_primary/{category}_ratio"] = step_treerl_metrics.get(f"format_primary_{category}_ratio", 0.0)
     for timing_name, timing_value in step_treerl_timing.items():
         metrics[f"Tree/time_{timing_name}"] = timing_value
     return metrics
@@ -964,14 +964,7 @@ class RayPPOTrainer:
         return []
 
     def _filter_training_reward_extra_infos(self, reward_extra_infos_dict):
-        legacy_format_keys = {
-            "format_full",
-            "format_answer_only",
-            "format_step_only",
-            "format_incorrect",
-            "format_trace_total",
-        }
-        return {key: value for key, value in reward_extra_infos_dict.items() if key not in legacy_format_keys}
+        return dict(reward_extra_infos_dict)
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""

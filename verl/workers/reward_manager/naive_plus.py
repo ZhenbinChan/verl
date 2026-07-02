@@ -17,7 +17,7 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format, classify_trajectory_format
+from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format, rollout_format_infos_to_metric_columns
 from verl.utils.reward_score import _default_compute_score
 
 
@@ -141,20 +141,21 @@ class NaivePlusRewardManager:
                 raw_answer_acc = None
 
             answer_acc = float(raw_answer_acc) if raw_answer_acc is not None else (1.0 if answer_reward > 0.5 else 0.0)
+            format_info = None
             format_primary = "not_checked"
             reward = answer_reward
             if self.penalize_format_error:
                 format_info = classify_rollout_format(response_str)
-                format_primary = format_info["format_primary"]
-                if format_primary != "full":
+                format_primary = str(format_info["format_primary"])
+                if format_info["format_primary"] != "full":
                     reward = -1.0
             reward_extra_info["answer_acc"].append(answer_acc)
             if self.log_format_metrics:
-                format_classes = classify_trajectory_format(response_str)
-                reward_extra_info["format_full"].append(format_classes["format_full"])
-                reward_extra_info["format_answer_only"].append(format_classes["format_answer_only"])
-                reward_extra_info["format_step_only"].append(format_classes["format_step_only"])
-                reward_extra_info["format_trace_total"].append(format_classes["format_trace_total"])
+                if format_info is None:
+                    format_info = classify_rollout_format(response_str)
+                    format_primary = str(format_info["format_primary"])
+                for key, values in rollout_format_infos_to_metric_columns([format_info]).items():
+                    reward_extra_info[key].extend(values)
 
             outcome_reward.append(reward)# 每个 sample的最终reward
             prompt.append(prompt_str)# 每个sample 的prompt

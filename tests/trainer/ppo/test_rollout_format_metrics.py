@@ -9,6 +9,7 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     aggregate_rollout_format_metrics,
     classify_rollout_format,
     rollout_format_infos_to_columns,
+    rollout_format_infos_to_metric_columns,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, _build_step_treerl_sampling_metrics, _validation_metric_section
 
@@ -121,7 +122,15 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 self.assertNotIn("rollout/trajectory_format_total", metrics)
 
     def test_validation_metric_section_uses_canonical_core_accuracy_and_reward(self):
-        available_vars = {"acc": {}, "answer_acc": {}, "reward": {}, "verifiable_reward": {}, "outcome_reward": {}, "prm_score": {}, "format_full": {}}
+        available_vars = {
+            "acc": {},
+            "answer_acc": {},
+            "reward": {},
+            "verifiable_reward": {},
+            "outcome_reward": {},
+            "prm_score": {},
+            "format_primary_full": {},
+        }
 
         self.assertEqual(_validation_metric_section("acc", available_vars), "val-core")
         self.assertEqual(_validation_metric_section("reward", available_vars), "val-core")
@@ -129,7 +138,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(_validation_metric_section("answer_acc", available_vars), "val-aux")
         self.assertEqual(_validation_metric_section("outcome_reward", available_vars), "val-aux")
         self.assertEqual(_validation_metric_section("prm_score", available_vars), "val-aux")
-        self.assertEqual(_validation_metric_section("format_full", available_vars), "val-aux")
+        self.assertEqual(_validation_metric_section("format_primary_full", available_vars), "val-aux")
 
         self.assertEqual(_validation_metric_section("answer_acc", {"answer_acc": {}, "reward": {}}), "val-core")
 
@@ -147,18 +156,34 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 "step_num": 2.5,
                 "terminal_padding": 1,
                 "trace_total": 2,
-                "full_format_correct_count": 1,
-                "answer_format_only_count": 0,
-                "step_format_only_count": 1,
-                "full_format_correct_ratio": 0.5,
-                "answer_format_only_ratio": 0.0,
-                "step_format_only_ratio": 0.5,
+                "format_primary_full_count": 1,
+                "format_primary_full_ratio": 0.5,
+                "format_primary_no_step_count": 0,
+                "format_primary_no_step_ratio": 0.0,
+                "format_primary_text_outside_step_count": 0,
+                "format_primary_text_outside_step_ratio": 0.0,
+                "format_primary_step_xml_invalid_count": 0,
+                "format_primary_step_xml_invalid_ratio": 0.0,
+                "format_primary_step_schema_invalid_count": 0,
+                "format_primary_step_schema_invalid_ratio": 0.0,
+                "format_primary_boxed_missing_count": 1,
+                "format_primary_boxed_missing_ratio": 0.5,
+                "format_primary_boxed_invalid_count": 0,
+                "format_primary_boxed_invalid_ratio": 0.0,
+                "relaxed_format_correct_count": 1,
+                "relaxed_format_correct_ratio": 0.5,
             },
             {"branch_generation": 2.0},
         )
 
         self.assertEqual(metrics["Tree/format_steps"], 3)
         self.assertEqual(metrics["Tree/leaf_acc"], 0.75)
+        self.assertEqual(metrics["Tree/format_primary/full_count"], 1)
+        self.assertEqual(metrics["Tree/format_primary/full_ratio"], 0.5)
+        self.assertEqual(metrics["Tree/format_primary/boxed_missing_count"], 1)
+        self.assertEqual(metrics["Tree/format_primary/boxed_missing_ratio"], 0.5)
+        self.assertEqual(metrics["Tree/format_primary/relaxed_format_correct_count"], 1)
+        self.assertEqual(metrics["Tree/format_primary/relaxed_format_correct_ratio"], 0.5)
         self.assertEqual(metrics["Tree/time_branch_generation"], 2.0)
         self.assertEqual(metrics["reward/step_treerl_process_reward_mean"], 0.25)
         self.assertEqual(metrics["rollout/step_num"], 2.5)
@@ -321,7 +346,27 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(columns["boxed_status"], ["valid"])
         self.assertEqual(columns["boxed_answer"], ["A"])
         self.assertEqual(columns["step_block_count"], [1.0])
-        self.assertEqual(set(columns), {"format_primary", "boxed_status", "boxed_answer", "step_block_count"})
+        self.assertEqual(columns["format_error_advantage_mask"], [0.0])
+        self.assertEqual(
+            set(columns),
+            {"format_primary", "boxed_status", "boxed_answer", "step_block_count", "format_error_advantage_mask"},
+        )
+
+    def test_rollout_format_metric_columns_are_numeric_one_hot_fields(self):
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        columns = rollout_format_infos_to_metric_columns(
+            [
+                classify_rollout_format(good_step + r"\boxed{A}"),
+                classify_rollout_format("plain reasoning " + r"\boxed{A}"),
+            ]
+        )
+
+        self.assertEqual(columns["format_primary_full"], [1.0, 0.0])
+        self.assertEqual(columns["format_primary_no_step"], [0.0, 1.0])
+        self.assertEqual(columns["boxed_status_valid"], [1.0, 1.0])
+        self.assertEqual(columns["relaxed_format_correct"], [1.0, 0.0])
+        self.assertEqual(columns["step_block_count"], [1.0, 0.0])
+        self.assertEqual(columns["format_error_advantage_mask"], [0.0, 1.0])
 
 
 if __name__ == "__main__":

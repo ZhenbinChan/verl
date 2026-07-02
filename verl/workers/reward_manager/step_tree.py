@@ -24,7 +24,7 @@ from typing import Callable, Dict, Optional
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.sampling.mcts_prm import classify_trajectory_format
+from verl.trainer.ppo.sampling.mcts_prm import classify_rollout_format, rollout_format_infos_to_metric_columns
 from verl.utils.reward_score import _default_compute_score
 from verl.utils.process_reward import (
     build_process_reward_runtime,
@@ -171,12 +171,9 @@ class StepTreeRewardManager:
             orm_scores.append(orm_score)
             reward_extra_info["acc"].append(orm_score)
             reward_extra_info["prm_score"].append(float(reward_tensor[i].sum()))
-            format_classes = classify_trajectory_format(response_str)
-            reward_extra_info["format_full"].append(format_classes["format_full"])
-            reward_extra_info["format_error_advantage_mask"].append(0.0 if format_classes["format_full"] else 1.0)
-            reward_extra_info["format_answer_only"].append(format_classes["format_answer_only"])
-            reward_extra_info["format_step_only"].append(format_classes["format_step_only"])
-            reward_extra_info["format_trace_total"].append(format_classes["format_trace_total"])
+            format_info = classify_rollout_format(response_str)
+            for key, values in rollout_format_infos_to_metric_columns([format_info]).items():
+                reward_extra_info[key].extend(values)
 
             prompts_list.append(prompt_str)
             responses_list.append(response_str)

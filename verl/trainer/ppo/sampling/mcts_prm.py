@@ -81,52 +81,6 @@ def boxed_answer_format_correct(response_text: str, valid_choices: Optional[str]
     return answer in {choice.upper() for choice in valid_choices}
 
 
-def _step_blocks_cover_text(text: str) -> tuple[bool, list[str]]:
-    matches = list(STEP_BLOCK_RE.finditer(text or ""))
-    if not matches:
-        return False, []
-
-    cursor = 0
-    blocks = []
-    for match in matches:
-        if not _outside_text_is_effectively_empty(text[cursor : match.start()]):
-            return False, []
-        block = match.group(0)
-        if not strict_step_xml_correct(block):
-            return False, []
-        blocks.append(block)
-        cursor = match.end()
-
-    if not _outside_text_is_effectively_empty(text[cursor:]):
-        return False, []
-    return True, blocks
-
-
-def classify_trajectory_format(response_text: str, valid_choices: Optional[str] = None) -> Dict[str, float]:
-    """Classify a full trajectory into mutually exclusive format buckets."""
-    answer_match = _boxed_answer_match(response_text)
-    answer_ok = False
-    step_region = response_text
-    if answer_match is not None:
-        answer = _boxed_answer_letter(answer_match)
-        answer_ok = valid_choices is None or answer in {choice.upper() for choice in valid_choices}
-        step_region = response_text[:answer_match.start()]
-
-    step_ok, _ = _step_blocks_cover_text(step_region)
-
-    full = float(step_ok and answer_ok)
-    answer_only = float(answer_ok and not step_ok)
-    step_only = float(step_ok and not answer_ok)
-    incorrect = float(not (full or answer_only or step_only))
-    return {
-        "format_full": full,
-        "format_answer_only": answer_only,
-        "format_step_only": step_only,
-        "format_incorrect": incorrect,
-        "format_trace_total": 1.0,
-    }
-
-
 def _split_answer_region(response_text: str, valid_choices: Optional[str] = None) -> tuple[str, str, str]:
     match = _boxed_answer_match(response_text)
     if match:
@@ -283,7 +237,38 @@ def rollout_format_infos_to_columns(format_infos: list[Dict[str, object]]) -> Di
         "boxed_status": [str(info.get("boxed_status", "")) for info in format_infos],
         "boxed_answer": [str(info.get("boxed_answer", "")) for info in format_infos],
         "step_block_count": [float(info.get("step_block_count", 0.0)) for info in format_infos],
+        "format_error_advantage_mask": [0.0 if info.get("format_primary") == "full" else 1.0 for info in format_infos],
     }
+
+
+def rollout_format_infos_to_metric_columns(format_infos: list[Dict[str, object]]) -> Dict[str, list[float]]:
+    """Convert rollout format info to numeric columns suitable for aggregation and validation metrics."""
+    columns: Dict[str, list[float]] = {
+        f"format_primary_{category}": [] for category in FORMAT_PRIMARY_CATEGORIES
+    }
+    columns.update(
+        {
+            "boxed_status_valid": [],
+            "boxed_status_invalid": [],
+            "boxed_status_missing": [],
+            "relaxed_format_correct": [],
+            "step_block_count": [],
+            "format_error_advantage_mask": [],
+        }
+    )
+
+    for info in format_infos:
+        primary = str(info.get("format_primary", ""))
+        boxed_status = str(info.get("boxed_status", ""))
+        for category in FORMAT_PRIMARY_CATEGORIES:
+            columns[f"format_primary_{category}"].append(1.0 if primary == category else 0.0)
+        for status in ("valid", "invalid", "missing"):
+            columns[f"boxed_status_{status}"].append(1.0 if boxed_status == status else 0.0)
+        columns["relaxed_format_correct"].append(1.0 if bool(info.get("relaxed_format_correct", False)) else 0.0)
+        columns["step_block_count"].append(float(info.get("step_block_count", 0.0)))
+        columns["format_error_advantage_mask"].append(0.0 if primary == "full" else 1.0)
+
+    return columns
 
 
 def fol_step_reward(
