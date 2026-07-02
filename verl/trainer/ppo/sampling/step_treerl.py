@@ -1386,6 +1386,9 @@ class StepTreeRLStrategy(SamplingStrategy):
             full_attention_mask[i, max_prompt_len:max_prompt_len + step_len] = 1   # 将步骤 token 的 attention mask 设置为 1
             responses[i, :step_len] = torch.tensor(node.step_tokens, dtype=torch.long, device=device)   # 将步骤 token 填充到 responses
 
+        position_ids_full = full_attention_mask.long().cumsum(dim=-1) - 1
+        position_ids_full.masked_fill_(full_attention_mask == 0, 0)
+
         orig_batch_size = len(nodes)   # 原始 batch 大小
         ws = max(self._n_gpus, 1)   # 每个 GPU 的 batch 大小
         padded_size = ((orig_batch_size + ws - 1) // ws) * ws   # 填充后的 batch 大小
