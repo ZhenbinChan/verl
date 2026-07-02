@@ -143,6 +143,7 @@ results/
 homogeneous_data/
 record/
 TreeRL/
+hf_model/
 rollout/
 RuleReasoner/
 llm_server/output/

@@ -102,6 +102,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         # Shared generation bounds
         self.max_depth = cfg.get("max_depth", 40)
         self.max_token_num = cfg.get("max_token_num", 4096)
+        self.dedup_sibling_steps = bool(cfg.get("dedup_sibling_steps", True))
         self.branch_max_new_tokens = cfg.get("branch_max_new_tokens", self.max_token_num)
 
         # TreeRL-style params. Legacy aliases are kept for existing scripts.
@@ -636,6 +637,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             if not candidate_groups:
                 break
 
+            # 选择 Top-K 高熵节点
             selected: List[MCTSNode] = []
             for nodes in candidate_groups.values():
                 if not nodes:
@@ -643,7 +645,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 pairs = sorted(
                     ((node.cached_entropy, node) for node in nodes if node.cached_entropy is not None),
                     key=lambda x: x[0],
-                    reverse=True,
+                    reverse=True, # 高熵节点在前
                 )
                 k = min(self.top_k, len(pairs))
                 selected.extend(node for _, node in pairs[:k])
@@ -860,8 +862,8 @@ class StepTreeRLStrategy(SamplingStrategy):
             segments = self._split_generation_segments(full_text, step_tokens_content)
 
             current_parent = step
-            for seg_idx, segment in enumerate(segments):
-                is_last_segment = seg_idx == len(segments) - 1
+            for seg_idx, segment in enumerate(segments): # 遍历每个 segment
+                is_last_segment = seg_idx == len(segments) - 1   # 是否是最后一个 segment
                 is_answer = segment.node_type == "answer"
                 is_terminal = is_answer or (is_last_segment and hit_eos) or (current_parent.depth + 1 > self.max_depth)
 
@@ -869,7 +871,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 new_state = current_parent.state + segment.tokens
 
                 # Deduplication is limited to sibling branches from the same parent.
-                if self._is_duplicate_step(segment.tokens, current_parent):
+                if self.dedup_sibling_steps and self._is_duplicate_step(segment.tokens, current_parent):
                     total_duplicates += 1
                     continue
 
@@ -888,11 +890,11 @@ class StepTreeRLStrategy(SamplingStrategy):
                     node_type=segment.node_type,
                     process_reward=float(boxed_answer_format_correct(segment.text)) if is_answer else 0.0,
                 )
-                current_parent.children.append(child)
-                current_parent = child
-                created_nodes.append(child)
+                current_parent.children.append(child)# 将子节点添加到父节点的 children 列表中
+                current_parent = child# 将当前节点设置为子节点
+                created_nodes.append(child)# 将子节点添加到 created_nodes 列表中
                 if is_answer:
-                    break
+                    break   # 如果当前节点是答案节点, 则跳出循环
 
         return created_nodes, total_duplicates
 
@@ -942,25 +944,25 @@ class StepTreeRLStrategy(SamplingStrategy):
 
                 leaf.is_correct = format_valid and answer_correct
                 if not format_valid:
-                    leaf.leaf_outcome = 0.0
+                    leaf.leaf_outcome = 0.0 # 如果格式不正确, 则设置为 0.0
                 elif answer_correct:
-                    leaf.leaf_outcome = 1.0
+                    leaf.leaf_outcome = 1.0 # 如果答案正确, 则设置为 1.0
                 else:
-                    leaf.leaf_outcome = 0.1
-                leaf.R = leaf.leaf_outcome  # base value before fusion / RLOO
+                    leaf.leaf_outcome = 0.1 # 否则, 设置为 0.1
+                leaf.R = leaf.leaf_outcome  # base value before fusion / RLOO # 设置叶子节点的 R 值
                 if leaf.is_correct:
-                    leaf.main_chain = True
+                    leaf.main_chain = True # 如果叶子节点正确, 则设置为 True
 
             # Optionally refine leaf outcome with LLM trajectory quality evaluation.
             # The external RM changes the value used by RLOO, but never overrides
             # format-aware correctness or main-chain membership.
             if self.trajectory_rm_enabled and self.trajectory_rm_url:
-                self._evaluate_leaves_quality(roots, leaves, gen_batch)
+                self._evaluate_leaves_quality(roots, leaves, gen_batch) # 评估叶子节点的质量
 
-            self._apply_rloo_to_leaves(leaves)
+            self._apply_rloo_to_leaves(leaves) # 应用 RLOO 到叶子节点
             for leaf in leaves:
-                self._leaf_backpropagate_value(leaf)
-            self._normalize_all_steps(root)
+                self._leaf_backpropagate_value(leaf) # 回传叶子节点的价值
+            self._normalize_all_steps(root) # 归一化所有步骤
 
     def _reset_tree_statistics(self, root: MCTSNode) -> None:
         for node in collect_all_nodes(root):
@@ -1354,11 +1356,11 @@ class StepTreeRLStrategy(SamplingStrategy):
         prompt_prefixes: List[List[int]] = [
             node.parent.state if node.parent is not None else node.state
             for node in nodes
-        ]
-        max_prompt_len = max(len(prefix) for prefix in prompt_prefixes)
-        max_step_len = max(len(node.step_tokens) for node in nodes)
+        ]   # 每个 node 的前缀 token
+        max_prompt_len = max(len(prefix) for prefix in prompt_prefixes)   # 最大的前缀 token 长度
+        max_step_len = max(len(node.step_tokens) for node in nodes)   # 最大的步骤 token 长度
         if max_step_len == 0:
-            return [0.0] * len(nodes)
+            return [0.0] * len(nodes)   # 如果最大的步骤 token 长度为 0, 则返回 0.0
 
         batch_size = len(nodes)
         total_len = max_prompt_len + max_step_len
@@ -1368,27 +1370,23 @@ class StepTreeRLStrategy(SamplingStrategy):
         responses = torch.full((batch_size, max_step_len), self.pad_token_id, dtype=torch.long, device=device)
 
         for i, node in enumerate(nodes):
-            prompt_tokens = prompt_prefixes[i]
-            state_len = len(prompt_tokens)
-            step_len = len(node.step_tokens)
-            p_offset = max_prompt_len - state_len
-            full_input_ids[i, p_offset:max_prompt_len] = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
-            full_attention_mask[i, p_offset:max_prompt_len] = 1
-            full_input_ids[i, max_prompt_len:max_prompt_len + step_len] = torch.tensor(
-                node.step_tokens, dtype=torch.long, device=device,
-            )
-            full_attention_mask[i, max_prompt_len:max_prompt_len + step_len] = 1
-            responses[i, :step_len] = torch.tensor(node.step_tokens, dtype=torch.long, device=device)
+            # prompt 左对齐到 max_prompt_len，step 紧跟在 prompt 后面
+            prompt_tokens = prompt_prefixes[i]  # 每个 node 的前缀 token
+            state_len = len(prompt_tokens)   # 前缀 token 长度
+            step_len = len(node.step_tokens)   # 步骤 token 长度
+            p_offset = max_prompt_len - state_len   # 前缀 token 偏移量
+            full_input_ids[i, p_offset:max_prompt_len] = torch.tensor(prompt_tokens, dtype=torch.long, device=device)   # 将前缀 token 填充到 full_input_ids
+            full_attention_mask[i, p_offset:max_prompt_len] = 1   # 将前缀 token 的 attention mask 设置为 1
+            full_input_ids[i, max_prompt_len:max_prompt_len + step_len] = torch.tensor(node.step_tokens, dtype=torch.long, device=device)   # 将步骤 token 填充到 full_input_ids
+            full_attention_mask[i, max_prompt_len:max_prompt_len + step_len] = 1   # 将步骤 token 的 attention mask 设置为 1
+            responses[i, :step_len] = torch.tensor(node.step_tokens, dtype=torch.long, device=device)   # 将步骤 token 填充到 responses
 
-        position_ids_full = full_attention_mask.long().cumsum(dim=-1) - 1
-        position_ids_full.masked_fill_(full_attention_mask == 0, 0)
+        orig_batch_size = len(nodes)   # 原始 batch 大小
+        ws = max(self._n_gpus, 1)   # 每个 GPU 的 batch 大小
+        padded_size = ((orig_batch_size + ws - 1) // ws) * ws   # 填充后的 batch 大小
+        pad_slots = padded_size - orig_batch_size   # 填充的 slot 数量
 
-        orig_batch_size = len(nodes)
-        ws = max(self._n_gpus, 1)
-        padded_size = ((orig_batch_size + ws - 1) // ws) * ws
-        pad_slots = padded_size - orig_batch_size
-
-        if pad_slots > 0:
+        if pad_slots > 0:   # 如果填充的 slot 数量大于 0, 则填充
             full_input_ids = torch.cat([full_input_ids, full_input_ids[:pad_slots].clone()], dim=0)
             full_attention_mask = torch.cat([full_attention_mask, full_attention_mask[:pad_slots].clone()], dim=0)
             position_ids_full = torch.cat([position_ids_full, position_ids_full[:pad_slots].clone()], dim=0)

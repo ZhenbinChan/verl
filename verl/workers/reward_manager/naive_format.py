@@ -142,10 +142,15 @@ class NaiveFormatRewardManager:
 
             if isinstance(answer_score, dict):
                 answer_reward = float(answer_score.get("score", 0.0))
+                answer_acc = float(answer_score.get("score", 0.0))
             elif isinstance(answer_score, (list, tuple)):
                 answer_reward = float(answer_score[0])
+                answer_acc = float(answer_score[0])
             else:
                 answer_reward = float(answer_score)
+                answer_acc = float(answer_score)
+
+            reward_extra_info["acc"].append(answer_acc)
 
             # ----------------------------------------------------------
             # 2. Parse format: find valid <step> blocks and their

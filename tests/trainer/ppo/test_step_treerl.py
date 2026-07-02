@@ -995,9 +995,40 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         extra = result["reward_extra_info"]
         self.assertEqual(extra["acc"], [1.0])
         self.assertEqual(extra["format_full"], [1.0])
+        self.assertEqual(extra["format_error_advantage_mask"], [0.0])
         self.assertEqual(extra["format_answer_only"], [0.0])
         self.assertEqual(extra["format_step_only"], [0.0])
         self.assertEqual(extra["format_trace_total"], [1.0])
+
+    def test_step_tree_reward_manager_marks_format_error_advantage_mask(self):
+        tokenizer = TextTokenizer()
+        response = "plain reasoning\n\\boxed{A}"
+        prompt_ids = tokenizer.encode("prompt")
+        response_ids = tokenizer.encode(response)
+        attention_mask = torch.ones((1, len(prompt_ids) + len(response_ids)), dtype=torch.long)
+        data = DataProto.from_dict(
+            tensors={
+                "prompts": torch.tensor([prompt_ids], dtype=torch.long),
+                "responses": torch.tensor([response_ids], dtype=torch.long),
+                "attention_mask": attention_mask,
+            },
+            non_tensors={
+                "answer": np.array(["A"], dtype=object),
+                "data_source": np.array(["reclor"], dtype=object),
+            },
+        )
+        manager = StepTreeRewardManager(
+            tokenizer=tokenizer,
+            num_examine=0,
+            compute_score=lambda **_: 1.0,
+            process_reward_cfg={"type": "format"},
+        )
+
+        result = manager(data, return_dict=True)
+
+        extra = result["reward_extra_info"]
+        self.assertEqual(extra["format_full"], [0.0])
+        self.assertEqual(extra["format_error_advantage_mask"], [1.0])
 
     def test_step_tree_reward_manager_accepts_precomputed_self_eval_scores(self):
         tokenizer = TextTokenizer()

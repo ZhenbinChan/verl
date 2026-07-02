@@ -483,16 +483,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 
 
 def apply_format_error_advantage_mask(data: DataProto, reward_extra_infos_dict: dict, reward_manager: str = "naive_format"):
-    if reward_manager != "naive_format":
+    supported_reward_managers = {"naive_format", "step_tree"}
+    if reward_manager not in supported_reward_managers:
         raise ValueError(
             "algorithm.mask_format_error_advantage=True is only supported with "
-            f"reward_model.reward_manager='naive_format', got {reward_manager!r}."
+            f"reward_model.reward_manager in {sorted(supported_reward_managers)!r}, got {reward_manager!r}."
         )
 
     if FORMAT_ERROR_ADVANTAGE_MASK_KEY not in reward_extra_infos_dict:
         raise ValueError(
             f"algorithm.mask_format_error_advantage=True requires reward_extra_info['{FORMAT_ERROR_ADVANTAGE_MASK_KEY}']. "
-            "Use reward_model.reward_manager='naive_format'."
+            f"Use one of reward_model.reward_manager={sorted(supported_reward_managers)!r}."
         )
 
     advantages = data.batch["advantages"]

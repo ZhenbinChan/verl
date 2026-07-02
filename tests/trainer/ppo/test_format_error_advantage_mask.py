@@ -54,6 +54,30 @@ def test_apply_format_error_advantage_mask_zeroes_only_selected_advantages():
     }
 
 
+def test_apply_format_error_advantage_mask_supports_step_tree():
+    batch = compute_advantage(
+        make_grpo_batch(),
+        adv_estimator=AdvantageEstimator.GRPO,
+        norm_adv_by_std_in_grpo=False,
+    )
+    original_advantages = batch.batch["advantages"].clone()
+
+    metrics = apply_format_error_advantage_mask(
+        batch,
+        {"format_error_advantage_mask": [1.0, 0.0, 1.0, 0.0]},
+        reward_manager="step_tree",
+    )
+
+    assert torch.equal(batch.batch["advantages"][0], torch.zeros(3))
+    assert torch.equal(batch.batch["advantages"][1], original_advantages[1])
+    assert torch.equal(batch.batch["advantages"][2], torch.zeros(3))
+    assert torch.equal(batch.batch["advantages"][3], original_advantages[3])
+    assert metrics == {
+        "algorithm/format_error_advantage_mask/count": 2.0,
+        "algorithm/format_error_advantage_mask/ratio": 0.5,
+    }
+
+
 def test_apply_format_error_advantage_mask_requires_reward_extra_info():
     batch = compute_advantage(
         make_grpo_batch(),
@@ -65,7 +89,7 @@ def test_apply_format_error_advantage_mask_requires_reward_extra_info():
         apply_format_error_advantage_mask(batch, {})
 
 
-def test_apply_format_error_advantage_mask_only_supports_naive_format():
+def test_apply_format_error_advantage_mask_only_supports_expected_reward_managers():
     batch = compute_advantage(
         make_grpo_batch(),
         adv_estimator=AdvantageEstimator.GRPO,

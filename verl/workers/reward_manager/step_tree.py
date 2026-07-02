@@ -73,6 +73,7 @@ class StepTreeRewardManager:
         return self._step_prm_fn
 
     def _decode_response(self, data_item, prompt_length: int):
+        """从 batch 中抽取一个样本的 prompt 和 response 文本。"""
         prompt_ids = data_item.batch["prompts"]
         valid_prompt_len = int(data_item.batch["attention_mask"][:prompt_length].sum())
         valid_prompt_ids = prompt_ids[-valid_prompt_len:]
@@ -87,6 +88,7 @@ class StepTreeRewardManager:
 
     def _fallback_step_scores(self, response_str: str, sample_id: Optional[str] = None) -> list:
         """Score each <step> block individually using the PRM function."""
+        """当 batch 中没有预计算的 reward_fn_scores 时（比如验证阶段），回退到用正则提取 <step>...</step> 块，逐块调用 PRM 函数评分。"""
         import re
 
         steps = re.findall(r"<step>(.*?)</step>", response_str, re.DOTALL)
@@ -171,6 +173,7 @@ class StepTreeRewardManager:
             reward_extra_info["prm_score"].append(float(reward_tensor[i].sum()))
             format_classes = classify_trajectory_format(response_str)
             reward_extra_info["format_full"].append(format_classes["format_full"])
+            reward_extra_info["format_error_advantage_mask"].append(0.0 if format_classes["format_full"] else 1.0)
             reward_extra_info["format_answer_only"].append(format_classes["format_answer_only"])
             reward_extra_info["format_step_only"].append(format_classes["format_step_only"])
             reward_extra_info["format_trace_total"].append(format_classes["format_trace_total"])
