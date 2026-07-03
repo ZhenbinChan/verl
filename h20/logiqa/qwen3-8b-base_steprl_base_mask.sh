@@ -38,11 +38,13 @@ LR=1e-6
 LOG_FORMAT_METRICS=True
 LENGTH_PENALTY_ENABLED=false
 TRAJECTORY_RM_ENABLED=false
-EXPERIMENT_NAME='qwen3-8b_steprl_n16_m4n2l2t2_base_v2_mask_false'
+MASK_FORMAT_ERROR_ADVANTAGE=True
+EXPERIMENT_NAME='qwen3-8b_steprl_n16_m4n2l2t2_base_v2_mask_true'
 
 
 CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=step_treerl_origin \
+    algorithm.mask_format_error_advantage=${MASK_FORMAT_ERROR_ADVANTAGE} \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/validate.parquet \
