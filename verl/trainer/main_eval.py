@@ -74,8 +74,36 @@ def aggregate_scores(score_lst, mode):
     raise ValueError(f"Unsupported sample_agg mode: {mode}")
 
 
+def load_reward_fn_on_worker(reward_fn_config):
+    import importlib.util
+    import os
+    import sys
+
+    file_path = reward_fn_config.get("path")
+    if not file_path:
+        return None
+
+    spec = importlib.util.spec_from_file_location("custom_module", file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["custom_module"] = module
+    spec.loader.exec_module(module)
+
+    function_name = reward_fn_config.get("name")
+    if not hasattr(module, function_name):
+        raise AttributeError(f"Reward function '{function_name}' not found in '{file_path}'.")
+
+    raw_fn = getattr(module, function_name)
+    reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
+
+    def wrapped_fn(*args, **kwargs):
+        return raw_fn(*args, **kwargs, **reward_kwargs)
+
+    return wrapped_fn
+
+
 @ray.remote
-def process_item(reward_fn, data_source, response_lst, reward_data, sample_agg):
+def process_item(reward_fn_config, data_source, response_lst, reward_data, sample_agg):
+    reward_fn = load_reward_fn_on_worker(reward_fn_config)
     ground_truth = reward_data["ground_truth"]
     score_lst = [reward_fn(data_source, r, ground_truth) for r in response_lst]
     return data_source, aggregate_scores(score_lst, sample_agg)
@@ -97,12 +125,12 @@ def main(config):
 
     # evaluate test_score based on data source
     data_source_reward = defaultdict(list)
-    compute_score = get_custom_reward_fn(config)
+    reward_fn_config = config.get("custom_reward_function") or {}
 
     sample_agg = config.get("sample_agg", "mean")
 
     # Create remote tasks
-    remote_tasks = [process_item.remote(compute_score, data_sources[i], responses[i], reward_model_data[i], sample_agg) for i in range(total)]
+    remote_tasks = [process_item.remote(reward_fn_config, data_sources[i], responses[i], reward_model_data[i], sample_agg) for i in range(total)]
 
     # Process results as they come in
     with tqdm(total=total) as pbar:
