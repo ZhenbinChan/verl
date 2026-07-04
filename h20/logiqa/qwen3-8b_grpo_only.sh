@@ -37,7 +37,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+    actor_rollout_ref.actor.loss_agg_mode=token-mean \
     actor_rollout_ref.actor.kl_loss_coef=0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -57,6 +57,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.reward_kwargs.reward_style=${REWARD_STYLE} \
     +reward_model.reward_kwargs.penalize_format_error=${FORMAT_PENALTY} \
     trainer.critic_warmup=0 \
+    trainer.rollout_data_dir=$HOME/rollout/${EXPERIMENT_NAME}/ \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl \
     trainer.experiment_name=${EXPERIMENT_NAME} \
