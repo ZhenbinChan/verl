@@ -89,6 +89,8 @@ def main_task(config):
     local_path = copy_to_local(config.model.path)
     trust_remote_code = config.data.get("trust_remote_code", False)
     tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+    # 2026-07-05: kwargs passed to tokenizer.apply_chat_template, e.g. enable_thinking=false for Qwen3
+    apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
 
     if config.rollout.temperature == 0.0:
         assert config.data.n_samples == 1, "When temperature=0, n_samples must be 1."
@@ -130,6 +132,7 @@ def main_task(config):
             return_tensors="pt",
             return_dict=True,
             tokenize=True,
+            **apply_chat_template_kwargs,
         )
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]

@@ -47,6 +47,7 @@ python3 -m verl.trainer.main_generation \
     data.prompt_key=prompt \
     data.prompt_path=$PROMPT_PATH \
     data.batch_size=$BATCH_SIZE \
+    data.apply_chat_template_kwargs.enable_thinking=false \
     data.n_samples=$N_SAMPLES \
     data.output_path=$GENERATED_PATH \
     model.path=$MODEL_PATH \
