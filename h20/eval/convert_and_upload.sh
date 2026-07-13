@@ -1,9 +1,9 @@
-base_model_dir="/2024133105/Workspaces/llms/Qwen3-8B-Base"
+base_model_dir="/2024133105/Workspaces/llms/Qwen3-8B"
 
-checkpoint_dir="/2024133105/Workspaces/verl/ckpt/verl/qwen3-8b_logiqa_grpo_promptV1_format_v2/global_step_20/actor"
+checkpoint_dir="/2024133105/Workspaces/verl/ckpt/verl/qwen3-8b_logiqa_grpo_promptV1_FormatPenalty_nothink/global_step_360/actor"
 
 
-output_dir="/2024133105/Workspaces/verl/hf_model/qwen3-8b-base_warmup_20_v2"
+output_dir="/2024133105/Workspaces/verl/hf_model/qwen3-8b_grpo360_promptv1_wothink"
 
 # python /home/chenzhb/Workspaces/verl/scripts/model_merger.py \
 #     --backend "fsdp" \

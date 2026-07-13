@@ -4,7 +4,7 @@ export WANDB_ENTITY='verl-fol'
 
 
 HOME=/2024133105/Workspaces/verl
-MODEL_PATH=/2024133105/Workspaces/llms/Qwen3-8B
+MODEL_PATH=/2024133105/Workspaces/llms/checkpoint-100
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 
@@ -28,10 +28,11 @@ GPU_MEMORY_UTILIZATION=0.4
 TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
-LOG_FORMAT_METRICS=True
-LENGTH_PENALTY_ENABLED=false
-TRAJECTORY_RM_ENABLED=false
-EXPERIMENT_NAME='qwen3-8b_steprl_base_think'
+LOG_FORMAT_METRICS=True # 是否统计 xml 格式正确性指标
+LENGTH_PENALTY_ENABLED=false # #PRM 的长度惩罚项 
+TRAJECTORY_RM_ENABLED=false # # 是否使用外部模型给整条轨迹打质量分
+EXPERIMENT_NAME='qwen3-8b-base-sft100_steprl_think'
+THINK_MODE=True # Qwen3 系列模型是否使用 Think 模式
 
 
 CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
@@ -44,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    +data.apply_chat_template_kwargs.enable_thinking=True \
+    +data.apply_chat_template_kwargs.enable_thinking=${THINK_MODE} \
     data.prompt_path=${PROMPT_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \

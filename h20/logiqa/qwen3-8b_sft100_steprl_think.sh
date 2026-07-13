@@ -4,34 +4,35 @@ export WANDB_ENTITY='verl-fol'
 
 
 HOME=/2024133105/Workspaces/verl
-MODEL_PATH=/2024133105/Workspaces/llms/Qwen3-8B
+MODEL_PATH=/2024133105/Workspaces/llms/qwen3-8b_sft50
 PROMPT_PATH=$HOME/prompts/premise_conclusion.txt
 
 
 N_GPUS_PER_NODE=4
-BATCH_SIZE=16
-PPO_MICRO_BATCH_SIZE_PER_GPU=16
-LOGPROB_MICRO_BATCH_SIZE_PER_GPU=16
+BATCH_SIZE=8
+PPO_MICRO_BATCH_SIZE_PER_GPU=8
+LOGPROB_MICRO_BATCH_SIZE_PER_GPU=8
 
 
 M=4
 N=2
 L=2
 T=2
-NUM_TRACES=16
+NUM_TRACES=8
 
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=4096
 MAX_MODEL_LEN=8192
 PPO_MAX_TOKEN_LEN_PER_GPU=16384
-GPU_MEMORY_UTILIZATION=0.4
+GPU_MEMORY_UTILIZATION=0.2
 TEMPERATURE=0.8
 TOP_P=1.0
 LR=1e-6
-LOG_FORMAT_METRICS=True
-LENGTH_PENALTY_ENABLED=false
-TRAJECTORY_RM_ENABLED=false
-EXPERIMENT_NAME='qwen3-8b_steprl_base_think'
+LOG_FORMAT_METRICS=True # # 是否统计 xml 格式正确性指标
+LENGTH_PENALTY_ENABLED=false #PRM 的长度惩罚项 
+TRAJECTORY_RM_ENABLED=false # 是否使用外部模型给整条轨迹打质量分
+EXPERIMENT_NAME='qwen3-8b-sft100_steprl_thk'
+THINK_MODE=True # Qwen3 系列模型是否使用 Think 模式
 
 
 CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
@@ -44,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    +data.apply_chat_template_kwargs.enable_thinking=True \
+    +data.apply_chat_template_kwargs.enable_thinking=${THINK_MODE} \
     data.prompt_path=${PROMPT_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \

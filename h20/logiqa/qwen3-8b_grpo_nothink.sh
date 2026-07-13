@@ -6,7 +6,7 @@ set -x
 
 HOME=/2024133105/Workspaces/verl
 MODEL_PATH=/2024133105/Workspaces/llms/Qwen3-8B
-EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV1_FormatPenalty'
+EXPERIMENT_NAME='qwen3-8b_logiqa_grpo_promptV1_FormatPenalty_nothink'
 N_GPUS_PER_NODE=4
 BATCH_SIZE=16
 ROLLOUT_N=16
@@ -18,11 +18,13 @@ REWARD_STYLE='null'
 LOG_FORMAT_METRICS=True
 FORMAT_PENALTY=True
 
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     data.train_files=$HOME/data/logiqa/train.parquet \
     data.val_files=$HOME/data/logiqa/validate.parquet \
+    +data.apply_chat_template_kwargs.enable_thinking=False \
     data.train_batch_size=${BATCH_SIZE} \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
@@ -66,7 +68,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.log_format_metrics=${LOG_FORMAT_METRICS} \
     trainer.save_freq=20 \
     trainer.test_freq=20 \
-    trainer.max_actor_ckpt_to_keep=1 \
+    trainer.max_actor_ckpt_to_keep=100 \
     trainer.max_critic_ckpt_to_keep=1 \
     trainer.val_before_train=True \
     trainer.total_epochs=1 $@
