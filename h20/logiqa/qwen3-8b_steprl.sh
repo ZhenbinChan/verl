@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 export WANDB_API_KEY='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'
 export WANDB_MODE=online
 export WANDB_ENTITY='verl-fol'
@@ -31,7 +33,9 @@ LR=1e-6
 LOG_FORMAT_METRICS=True
 LENGTH_PENALTY_ENABLED=false
 TRAJECTORY_RM_ENABLED=false
-EXPERIMENT_NAME='qwen3-8b_steprl_base_think'
+THINK_MODE=false
+EXPERIMENT_NAME='qwen3-8b_steprl_wothk_branchpadfix'
+RESUME_MODE=disable
 
 
 CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
@@ -44,7 +48,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    +data.apply_chat_template_kwargs.enable_thinking=True \
+    +data.apply_chat_template_kwargs.enable_thinking=${THINK_MODE} \
     data.prompt_path=${PROMPT_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=${LR} \
@@ -91,7 +95,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     trainer.step_treerl_config.use_weighted_value=true \
     trainer.step_treerl_config.weighted_value_style=terminal_ratio \
     trainer.step_treerl_config.overall_norm_style=none \
-    trainer.step_treerl_config.length_penalty.enabled=false \
     +trainer.step_treerl_config.dedup_sibling_steps=false \
     trainer.rollout_data_dir=$HOME/rollout/${EXPERIMENT_NAME}/ \
     trainer.step_treerl_config.trajectory_rm_enabled=${TRAJECTORY_RM_ENABLED} \
@@ -102,6 +105,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python3 -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl' \
     trainer.experiment_name=${EXPERIMENT_NAME} \
+    trainer.resume_mode=${RESUME_MODE} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=20 \

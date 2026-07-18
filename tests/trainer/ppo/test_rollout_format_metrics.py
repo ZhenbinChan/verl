@@ -1,7 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
+import numpy as np
+import torch
 from omegaconf import OmegaConf
 
+from verl import DataProto
 from verl.trainer.ppo.sampling import _STRATEGY_REGISTRY, create_sampling_strategy
 from verl.trainer.ppo.sampling.mcts_prm import (
     FORMAT_PRIMARY_CATEGORIES,
@@ -367,6 +371,46 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(columns["relaxed_format_correct"], [1.0, 0.0])
         self.assertEqual(columns["step_block_count"], [1.0, 0.0])
         self.assertEqual(columns["format_error_advantage_mask"], [0.0, 1.0])
+
+    def test_trainer_metrics_include_rollout_provenance(self):
+        tokenizer = DummyTokenizer()
+        good_step = "<step><premise>a</premise><conclusion>b</conclusion></step>"
+        outputs = [good_step + r"\boxed{A}", "prefix" + good_step + r"\boxed{A}"]
+        encoded = [tokenizer.encode(output) for output in outputs]
+        response_width = max(len(tokens) for tokens in encoded)
+        responses = torch.zeros((2, response_width), dtype=torch.long)
+        response_mask = torch.zeros_like(responses)
+        for index, tokens in enumerate(encoded):
+            responses[index, : len(tokens)] = torch.tensor(tokens)
+            response_mask[index, : len(tokens)] = 1
+
+        prompts = torch.tensor([[10, 11], [12, 13]])
+        attention_mask = torch.cat([torch.ones_like(prompts), response_mask], dim=-1)
+        batch = DataProto.from_dict(
+            tensors={
+                "prompts": prompts,
+                "responses": responses,
+                "attention_mask": attention_mask,
+                "response_mask": response_mask,
+            },
+            non_tensors={
+                "trace_source": np.asarray(["origin", "branch"], dtype=object),
+                "branch_round": np.asarray([0, 2], dtype=np.int64),
+            },
+        )
+        trainer = SimpleNamespace(tokenizer=tokenizer)
+        trainer._decode_rollout_responses = lambda rollout_batch: RayPPOTrainer._decode_rollout_responses(
+            trainer, rollout_batch
+        )
+
+        metrics, columns, format_infos = RayPPOTrainer._compute_rollout_format_metrics(trainer, batch)
+
+        self.assertEqual([info["format_primary"] for info in format_infos], ["full", "text_outside_step"])
+        self.assertEqual(columns["trace_source"], ["origin", "branch"])
+        self.assertEqual(columns["branch_round"], [0, 2])
+        self.assertEqual(metrics["rollout/format_by_source/origin/strict_correct_ratio"], 1.0)
+        self.assertEqual(metrics["rollout/format_by_source/branch/strict_correct_ratio"], 0.0)
+        self.assertEqual(metrics["rollout/format_by_source/branch/relaxed_correct_ratio"], 1.0)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     aggregate_rollout_format_metrics,
     classify_rollout_format,
     rollout_format_infos_to_columns,
+    rollout_format_infos_to_metric_columns,
 )
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
@@ -952,10 +953,119 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    def _decode_rollout_responses(self, batch: DataProto):
+        responses = batch.batch["responses"]
+        response_width = responses.shape[-1]
+        if response_width <= 0:
+            raise ValueError("Rollout responses must have non-zero width.")
+
+        prompts = batch.batch["prompts"]
+        attention_mask = batch.batch["attention_mask"]
+        expected_total_width = prompts.shape[-1] + response_width
+        if attention_mask.shape[-1] != expected_total_width:
+            raise ValueError(
+                "Invalid prompt/response batch layout: "
+                f"attention_mask width {attention_mask.shape[-1]} does not equal "
+                f"prompt width {prompts.shape[-1]} + response width {response_width}."
+            )
+
+        attention_response_mask = attention_mask[:, -response_width:].bool()
+        response_mask = (
+            batch.batch["response_mask"]
+            if "response_mask" in batch.batch
+            else None
+        )
+        if response_mask is None:
+            response_mask = attention_response_mask
+        else:
+            if response_mask.shape != responses.shape:
+                raise ValueError(
+                    f"response_mask shape {tuple(response_mask.shape)} does not match "
+                    f"responses shape {tuple(responses.shape)}."
+                )
+            response_mask = response_mask.bool()
+            if not torch.equal(response_mask, attention_response_mask):
+                raise ValueError("response_mask does not match the response segment of attention_mask.")
+
+        return [
+            self.tokenizer.decode(response[mask].tolist(), skip_special_tokens=True)
+            for response, mask in zip(responses, response_mask)
+        ]
+
     def _compute_rollout_format_metrics(self, batch: DataProto):
-        outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        outputs = self._decode_rollout_responses(batch)
         format_infos = [classify_rollout_format(output) for output in outputs]
-        return aggregate_rollout_format_metrics(format_infos), rollout_format_infos_to_columns(format_infos), format_infos
+        format_columns = rollout_format_infos_to_metric_columns(format_infos)
+        format_columns.update(rollout_format_infos_to_columns(format_infos))
+        metrics = aggregate_rollout_format_metrics(format_infos)
+
+        trace_sources = batch.non_tensor_batch.get("trace_source")
+        branch_rounds = batch.non_tensor_batch.get("branch_round")
+        if (trace_sources is None) != (branch_rounds is None):
+            raise ValueError("trace_source and branch_round must either both be present or both be absent.")
+        if trace_sources is not None:
+            if len(trace_sources) != len(format_infos) or len(branch_rounds) != len(format_infos):
+                raise ValueError(
+                    "Rollout provenance length mismatch: "
+                    f"trace_source={len(trace_sources)}, branch_round={len(branch_rounds)}, "
+                    f"responses={len(format_infos)}."
+                )
+
+            normalized_sources = [str(source) for source in trace_sources]
+            normalized_rounds = [int(round_idx) for round_idx in branch_rounds]
+            for index, (source, round_idx) in enumerate(zip(normalized_sources, normalized_rounds)):
+                if source not in {"origin", "branch"}:
+                    raise ValueError(f"Invalid trace_source at index {index}: {source!r}.")
+                if (source == "origin" and round_idx != 0) or (source == "branch" and round_idx <= 0):
+                    raise ValueError(
+                        f"Invalid rollout provenance at index {index}: trace_source={source!r}, "
+                        f"branch_round={round_idx}."
+                    )
+
+            format_columns["trace_source"] = normalized_sources
+            format_columns["branch_round"] = normalized_rounds
+            for source in ("origin", "branch"):
+                source_infos = [info for info, item_source in zip(format_infos, normalized_sources) if item_source == source]
+                total = len(source_infos)
+                metrics[f"rollout/format_by_source/{source}/total"] = float(total)
+                metrics[f"rollout/format_by_source/{source}/strict_correct_ratio"] = (
+                    sum(info.get("format_primary") == "full" for info in source_infos) / total if total else 0.0
+                )
+                metrics[f"rollout/format_by_source/{source}/relaxed_correct_ratio"] = (
+                    sum(bool(info.get("relaxed_format_correct", False)) for info in source_infos) / total if total else 0.0
+                )
+
+        return metrics, format_columns, format_infos
+
+
+    def _validate_rollout_format_reward_infos(
+        self,
+        batch: DataProto,
+        reward_extra_infos_dict: dict,
+        format_infos: list[dict],
+    ) -> None:
+        expected_columns = rollout_format_infos_to_metric_columns(format_infos)
+        response_mask = batch.batch["response_mask"]
+
+        for key, expected_values in expected_columns.items():
+            actual_values = reward_extra_infos_dict.get(key)
+            if actual_values is None:
+                continue
+            if len(actual_values) != len(expected_values):
+                raise RuntimeError(
+                    f"Rollout format metric length mismatch for {key}: "
+                    f"trainer={len(expected_values)}, reward_manager={len(actual_values)}."
+                )
+            for index, (actual, expected) in enumerate(zip(actual_values, expected_values)):
+                if float(actual) == float(expected):
+                    continue
+                response_token_count = int(response_mask[index].sum().item())
+                raise RuntimeError(
+                    "Rollout format metric mismatch: "
+                    f"sample={index}, field={key}, trainer={expected}, reward_manager={actual}, "
+                    f"trainer_primary={format_infos[index].get('format_primary')}, "
+                    f"response_token_count={response_token_count}."
+                )
 
     def _extract_rollout_answer_acc(self, reward_extra_infos_dict, expected_len):
         values = reward_extra_infos_dict.get("answer_acc")
@@ -1518,6 +1628,8 @@ class RayPPOTrainer:
                             ##########################################################
 
                     if self.config.trainer.get("log_format_metrics", False) and rollout_format_infos:
+                        self._validate_rollout_format_reward_infos(batch, reward_extra_infos_dict, rollout_format_infos)
+                        metrics["rollout/format_metric_mismatch_count"] = 0.0
                         rollout_answer_acc = self._extract_rollout_answer_acc(
                             reward_extra_infos_dict,
                             expected_len=len(rollout_format_infos),
@@ -1634,7 +1746,7 @@ class RayPPOTrainer:
                         with _timer("dump_rollout_generations", timing_raw):
                             # print(batch.batch.keys())
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            outputs = self._decode_rollout_responses(batch)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
                             import os
                             experiment_name = self.config.trainer.get("experiment_name", None)

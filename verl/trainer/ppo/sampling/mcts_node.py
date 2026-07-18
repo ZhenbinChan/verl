@@ -37,6 +37,8 @@ class MCTSNode:
     tree_idx: int = 0   # index into the prompt batch
     node_idx: int = 0   # unique id within this tree
     node_type: str = "step"  # "step" for <step>...</step>, "answer" for final answer suffix
+    generation_source: str = "origin"  # "origin" for initial rollout, "branch" for tree continuation
+    branch_round: int = 0  # 0 for initial rollout, 1..L for branch generations
     process_reward: float = 0.0
     segment_reward: float = 0.0
     state_value: float = 0.0

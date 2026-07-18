@@ -5,12 +5,13 @@ export WANDB_MODE=online
 export WANDB_ENTITY='verl-fol'
 
 HOME=/2024133105/Workspaces/verl
-MODEL_PATH=/2024133105/Workspaces/verl/hf_model/qwen3-8b_grpo360_promptv1_wothink
+MODEL_PATH=/2024133105/Workspaces/verl/hf_model/qwen3-8b-sft50_steprl_wothk
 DATASET_NAME=logiqa
-MODEL_NAME=qwen3-8b_grpo360_promptv1_wothink
+MODEL_NAME=qwen3-8b-sft50_steprl_wothk
+THINK_MODE=True
 
 
-N_GPUS=4
+N_GPU=4
 BATCH_SIZE=16
 N_SAMPLES=1
 TEMPERATURE=0.8
@@ -41,9 +42,10 @@ fi
 
 python3 -m verl.trainer.main_generation \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=$N_GPUS \
+    trainer.n_gpus_per_node=$N_GPU \
     trainer.max_colocate_count=${MAX_COLOCATE_COUNT} \
     data.path=$DATA_PATH \
+    +data.apply_chat_template_kwargs.enable_thinking=${THINK_MODE} \
     data.prompt_key=prompt \
     data.prompt_path=$PROMPT_PATH \
     data.batch_size=$BATCH_SIZE \

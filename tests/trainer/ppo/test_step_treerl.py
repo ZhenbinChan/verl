@@ -34,7 +34,8 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     format_step_reward,
     strict_step_xml_correct,
 )
-from verl.trainer.ppo.sampling.step_treerl import StepTreeRLStrategy
+from verl.trainer.ppo.sampling.step_treerl import StepTreeRLStrategy, _build_sampling_result, _pad_sequences
+from verl.utils.ppo_batch import build_padded_prompt_response_batch
 from verl.utils.reward_score.logi import compute_score as logi_compute_score
 from verl.workers.rollout.sampling_params import extract_rollout_sampling_kwargs
 from verl.workers.reward_manager.step_tree import StepTreeRewardManager
@@ -145,6 +146,84 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(captured["responses"].tolist(), [[20], [30]])
         self.assertIs(captured["calculate_entropy"], False)
 
+    def test_compute_step_entropies_pads_single_node_to_gpu_count(self):
+        strategy = make_strategy()
+        strategy._n_gpus = 4
+        device = torch.device("cpu")
+        root = MCTSNode(state=[10], tree_idx=0)
+        child = MCTSNode(state=[10, 20], step_tokens=[20], parent=root, tree_idx=0)
+
+        captured = {}
+
+        def compute_log_prob_fn(data):
+            captured["batch_size"] = len(data)
+            captured["responses"] = data.batch["responses"].clone()
+            return SimpleNamespace(batch={"old_log_probs": torch.tensor([[-0.5], [-9.0], [-9.0], [-9.0]])})
+
+        entropies = strategy._compute_step_entropies([child], compute_log_prob_fn, device)
+
+        self.assertEqual(entropies, [0.5])
+        self.assertEqual(captured["batch_size"], 4)
+        self.assertEqual(captured["responses"].tolist(), [[20], [20], [20], [20]])
+
+    def test_build_sampling_result_keeps_branch_prefix_in_response(self):
+        device = torch.device("cpu")
+        short_root = MCTSNode(state=[1, 2], tree_idx=0)
+        prefix_step = MCTSNode(
+            state=[1, 2, 10, 11],
+            step_tokens=[10, 11],
+            parent=short_root,
+            tree_idx=0,
+        )
+        branch_step = MCTSNode(
+            state=[1, 2, 10, 11, 12, 13],
+            step_tokens=[12, 13],
+            parent=prefix_step,
+            tree_idx=0,
+            generation_source="branch",
+            branch_round=2,
+        )
+        long_root = MCTSNode(state=[3, 4, 5, 6], tree_idx=1)
+        long_root_step = MCTSNode(
+            state=[3, 4, 5, 6, 20],
+            step_tokens=[20],
+            parent=long_root,
+            tree_idx=1,
+        )
+
+        result = _build_sampling_result(
+            all_paths=[[prefix_step, branch_step], [long_root_step]],
+            all_gt=[None, None],
+            pad_token_id=0,
+            device=device,
+            batch_size=2,
+        )
+        batch = result.gen_batch_output.batch
+
+        self.assertEqual(batch["prompts"].tolist(), [[0, 0, 1, 2], [3, 4, 5, 6]])
+        self.assertEqual(batch["responses"].tolist(), [[10, 11, 12, 13], [20, 0, 0, 0]])
+        self.assertTrue(
+            torch.equal(
+                batch["input_ids"],
+                torch.cat((batch["prompts"], batch["responses"]), dim=-1),
+            )
+        )
+        self.assertEqual(
+            batch["attention_mask"][:, -batch["responses"].shape[-1] :].tolist(),
+            [[1, 1, 1, 1], [1, 0, 0, 0]],
+        )
+        self.assertEqual(result.gen_batch_output.non_tensor_batch["trace_source"].tolist(), ["branch", "origin"])
+        self.assertEqual(result.gen_batch_output.non_tensor_batch["branch_round"].tolist(), [2, 0])
+
+        with self.assertRaisesRegex(ValueError, "direct child of the root"):
+            _build_sampling_result(
+                all_paths=[[branch_step]],
+                all_gt=[None],
+                pad_token_id=0,
+                device=device,
+                batch_size=1,
+            )
+
     def test_score_new_candidates_caches_only_unscored_nodes(self):
         strategy = make_strategy(top_k=1, iter_rounds=2)
         device = torch.device("cpu")
@@ -190,7 +269,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         selected_rounds = []
         new_nodes = [MCTSNode(state=[1, 11, 13], step_tokens=[13], parent=node0_internal, tree_idx=0, node_idx=3, cached_entropy=0.4)]
 
-        def fake_continue_from_steps(nodes, _generate_fn, _device):
+        def fake_continue_from_steps(nodes, _generate_fn, _device, branch_round):
+            self.assertEqual(branch_round, len(selected_rounds) + 1)
             selected_rounds.append([node.step_text for node in nodes])
             return [] if len(selected_rounds) == 1 else new_nodes
 
@@ -234,7 +314,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
 
         selected_rounds = []
 
-        def fake_continue_from_steps(nodes, _generate_fn, _device):
+        def fake_continue_from_steps(nodes, _generate_fn, _device, branch_round):
+            self.assertEqual(branch_round, 1)
             selected_rounds.append([node.step_text for node in nodes])
             return []
 
@@ -274,9 +355,24 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertIs(parent.children[0], existing_child)
         new_branch = parent.children[1]
         self.assertEqual(new_branch.step_tokens, [11, 12])
+        self.assertEqual(new_branch.generation_source, "branch")
+        self.assertEqual(new_branch.branch_round, 1)
         self.assertEqual(len(new_branch.children), 1)
         self.assertEqual(new_branch.children[0].step_tokens, [13, 14])
+        self.assertEqual(new_branch.children[0].generation_source, "branch")
+        self.assertEqual(new_branch.children[0].branch_round, 1)
         self.assertEqual(created, [new_branch, new_branch.children[0]])
+
+    def test_generation_prompts_are_left_padded(self):
+        input_ids, attention_mask, position_ids = _pad_sequences(
+            [torch.tensor([11, 12]), torch.tensor([21, 22, 23, 24])],
+            pad_token_id=0,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(input_ids.tolist(), [[0, 0, 11, 12], [21, 22, 23, 24]])
+        self.assertEqual(attention_mask.tolist(), [[0, 0, 1, 1], [1, 1, 1, 1]])
+        self.assertEqual(position_ids.tolist(), [[0, 0, 0, 1], [0, 1, 2, 3]])
 
     def test_continue_from_steps_uses_dynamic_branch_budget(self):
         strategy = make_strategy()
@@ -988,6 +1084,78 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(extra["format_error_advantage_mask"], [0.0])
         self.assertEqual(extra["boxed_status_valid"], [1.0])
         self.assertEqual(extra["relaxed_format_correct"], [1.0])
+
+    def test_step_tree_reward_manager_decodes_mixed_lengths_with_response_mask(self):
+        tokenizer = TextTokenizer()
+        schema_invalid = "<step> </step>\\boxed{C}"
+        full = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{C}"
+        padded = build_padded_prompt_response_batch(
+            prompt_sequences=[
+                torch.tensor(tokenizer.encode("short"), dtype=torch.long),
+                torch.tensor(tokenizer.encode("a much longer prompt"), dtype=torch.long),
+            ],
+            response_sequences=[
+                torch.tensor(tokenizer.encode(schema_invalid), dtype=torch.long),
+                torch.tensor(tokenizer.encode(full), dtype=torch.long),
+            ],
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        data = DataProto.from_dict(
+            tensors={
+                "prompts": padded.prompts,
+                "responses": padded.responses,
+                "input_ids": padded.input_ids,
+                "attention_mask": padded.attention_mask,
+                "position_ids": padded.position_ids,
+                "response_mask": padded.response_mask,
+                "reward_fn_scores": torch.zeros_like(padded.responses, dtype=torch.float32),
+            },
+            non_tensors={
+                "answer": np.array(["C", "C"], dtype=object),
+                "data_source": np.array(["reclor", "reclor"], dtype=object),
+            },
+        )
+        manager = StepTreeRewardManager(
+            tokenizer=tokenizer,
+            num_examine=0,
+            compute_score=lambda **_: 1.0,
+            process_reward_cfg={"type": "format"},
+        )
+
+        result = manager(data, return_dict=True)
+        extra = result["reward_extra_info"]
+
+        self.assertEqual(result["response"], [schema_invalid, full])
+        self.assertEqual(extra["format_primary_step_schema_invalid"], [1.0, 0.0])
+        self.assertEqual(extra["format_primary_full"], [0.0, 1.0])
+        self.assertEqual(extra["boxed_status_valid"], [1.0, 1.0])
+        self.assertEqual(extra["relaxed_format_correct"], [0.0, 1.0])
+
+    def test_step_tree_reward_manager_rejects_misaligned_attention_mask(self):
+        tokenizer = TextTokenizer()
+        response = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{C}"
+        prompt_ids = tokenizer.encode("prompt")
+        response_ids = tokenizer.encode(response)
+        data = DataProto.from_dict(
+            tensors={
+                "prompts": torch.tensor([prompt_ids], dtype=torch.long),
+                "responses": torch.tensor([response_ids], dtype=torch.long),
+                "attention_mask": torch.ones((1, len(prompt_ids) + len(response_ids) - 1), dtype=torch.long),
+            },
+            non_tensors={
+                "answer": np.array(["C"], dtype=object),
+                "data_source": np.array(["reclor"], dtype=object),
+            },
+        )
+        manager = StepTreeRewardManager(
+            tokenizer=tokenizer,
+            num_examine=0,
+            compute_score=lambda **_: 1.0,
+            process_reward_cfg={"type": "format"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "Invalid prompt/response batch layout"):
+            manager(data, return_dict=True)
 
     def test_step_tree_reward_manager_marks_format_error_advantage_mask(self):
         tokenizer = TextTokenizer()

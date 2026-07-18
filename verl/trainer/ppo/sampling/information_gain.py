@@ -30,6 +30,7 @@ from verl.trainer.ppo.sampling.mcts_node import (
     leaf_backpropagate_correct,
     leaf_normalize,
 )
+from verl.utils.ppo_batch import build_padded_prompt_response_batch
 from verl.utils.process_reward import (
     build_process_reward_runtime,
     require_batch_sample_id,
@@ -718,7 +719,6 @@ def _build_sampling_result(
 ) -> SamplingResult:
     """Build padded tensors and SamplingResult from selected paths."""
     prompt_ids_list: List[torch.Tensor] = []
-    full_seq_list: List[torch.Tensor] = []
     resp_ids_list: List[torch.Tensor] = []
     step_spans_list: List[List[Tuple[int, int]]] = []
     step_rewards_list: List[List[float]] = []
@@ -728,6 +728,8 @@ def _build_sampling_result(
 
     for path, gt in zip(all_paths, all_gt):
         root_node = path[0].parent
+        if root_node is None or root_node.parent is not None:
+            raise ValueError("InformationGain paths must start at a direct child of the root node.")
         prompt_tokens = torch.tensor(root_node.state, dtype=torch.long, device=device)
 
         response_tokens: List[int] = []
@@ -753,10 +755,8 @@ def _build_sampling_result(
             offset = end
 
         resp_tensor = torch.tensor(response_tokens, dtype=torch.long, device=device)
-        full_tensor = torch.cat([prompt_tokens, resp_tensor], dim=0)
 
         prompt_ids_list.append(prompt_tokens)
-        full_seq_list.append(full_tensor)
         resp_ids_list.append(resp_tensor)
         step_spans_list.append(spans)
         step_rewards_list.append(rewards)
@@ -764,9 +764,12 @@ def _build_sampling_result(
         response_lens.append(len(response_tokens))
         verifiable_rewards_list.append(1.0 if path[-1].is_correct else 0.0)
 
-    input_ids, attention_mask, position_ids = _pad_sequences(full_seq_list, pad_token_id, device)
-    prompts_padded, _, _ = _pad_sequences(prompt_ids_list, pad_token_id, device)
-    responses_padded, _, _ = _pad_sequences(resp_ids_list, pad_token_id, device)
+    padded_batch = build_padded_prompt_response_batch(prompt_ids_list, resp_ids_list, pad_token_id)
+    input_ids = padded_batch.input_ids
+    attention_mask = padded_batch.attention_mask
+    position_ids = padded_batch.position_ids
+    prompts_padded = padded_batch.prompts
+    responses_padded = padded_batch.responses
 
     reward_fn_scores = _build_token_level_scores(
         responses=responses_padded,

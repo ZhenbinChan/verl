@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 
 from verl import DataProto
@@ -39,6 +40,7 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     classify_rollout_format,
     format_step_reward,
 )
+from verl.utils.ppo_batch import build_padded_prompt_response_batch
 from verl.utils.process_reward import (
     StepRewardRequest,
     build_process_reward_runtime,
@@ -562,6 +564,8 @@ class StepTreeRLStrategy(SamplingStrategy):
                         tree_idx=tree_idx,
                         node_idx=self._next_node_idx(tree_idx),
                         node_type=segment.node_type,
+                        generation_source="origin",
+                        branch_round=0,
                         process_reward=float(boxed_answer_format_correct(segment.text)) if is_answer else 0.0,
                     )
                     current_parent.children.append(child)
@@ -662,7 +666,12 @@ class StepTreeRLStrategy(SamplingStrategy):
                 step.is_branch_point = True
 
             with _timer("branch_generation", self._timing):
-                new_nodes = self._continue_from_steps(selected, generate_fn, device)
+                new_nodes = self._continue_from_steps(
+                    selected,
+                    generate_fn,
+                    device,
+                    branch_round=_round_idx + 1,
+                )
             if new_nodes:
                 if not self.use_origin_advantage:
                     with _timer("process_reward", self._timing):
@@ -742,6 +751,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         steps: List[MCTSNode],
         generate_fn: Callable[[DataProto], DataProto],
         device: torch.device,
+        branch_round: int = 1,
     ) -> List[MCTSNode]:
         """Generate continuation from selected nodes, preserving existing branches."""
         if not steps:
@@ -780,6 +790,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                 max_new_tokens=round_budget,
                 generate_fn=generate_fn,
                 device=device,
+                branch_round=branch_round,
             )
             total_new_nodes += len(group_nodes)
             total_duplicates += group_duplicates
@@ -797,6 +808,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         max_new_tokens: int,
         generate_fn: Callable[[DataProto], DataProto],
         device: torch.device,
+        branch_round: int = 1,
     ) -> Tuple[List[MCTSNode], int]:
         if not active_steps:
             return [], 0
@@ -892,6 +904,8 @@ class StepTreeRLStrategy(SamplingStrategy):
                     tree_idx=step.tree_idx,
                     node_idx=self._next_node_idx(step.tree_idx),
                     node_type=segment.node_type,
+                    generation_source="branch",
+                    branch_round=branch_round,
                     process_reward=float(boxed_answer_format_correct(segment.text)) if is_answer else 0.0,
                 )
                 current_parent.children.append(child)# 将子节点添加到父节点的 children 列表中
@@ -1394,11 +1408,12 @@ class StepTreeRLStrategy(SamplingStrategy):
         padded_size = ((orig_batch_size + ws - 1) // ws) * ws   # 填充后的 batch 大小
         pad_slots = padded_size - orig_batch_size   # 填充的 slot 数量
 
-        if pad_slots > 0:   # 如果填充的 slot 数量大于 0, 则填充
-            full_input_ids = torch.cat([full_input_ids, full_input_ids[:pad_slots].clone()], dim=0)
-            full_attention_mask = torch.cat([full_attention_mask, full_attention_mask[:pad_slots].clone()], dim=0)
-            position_ids_full = torch.cat([position_ids_full, position_ids_full[:pad_slots].clone()], dim=0)
-            responses = torch.cat([responses, responses[:pad_slots].clone()], dim=0)
+        if pad_slots > 0:   # 循环复用已有样本，确保即使 batch_size=1 也能精确补齐到 GPU 数的倍数
+            pad_indices = torch.arange(pad_slots, device=device) % orig_batch_size
+            full_input_ids = torch.cat([full_input_ids, full_input_ids.index_select(0, pad_indices)], dim=0)
+            full_attention_mask = torch.cat([full_attention_mask, full_attention_mask.index_select(0, pad_indices)], dim=0)
+            position_ids_full = torch.cat([position_ids_full, position_ids_full.index_select(0, pad_indices)], dim=0)
+            responses = torch.cat([responses, responses.index_select(0, pad_indices)], dim=0)
 
         data = DataProto.from_dict(
             tensors={
@@ -1450,18 +1465,21 @@ def _build_sampling_result(
 ) -> SamplingResult:
     """Build padded tensors and SamplingResult from selected paths."""
     prompt_ids_list: List[torch.Tensor] = []
-    full_seq_list: List[torch.Tensor] = []
     resp_ids_list: List[torch.Tensor] = []
     step_spans_list: List[List[Tuple[int, int]]] = []
     step_rewards_list: List[List[float]] = []
     step_correctness_scores_list: List[List[float]] = []
     response_lens: List[int] = []
     leaf_accuracy_list: List[float] = []
+    trace_source_list: List[str] = []
+    branch_round_list: List[int] = []
 
     for path, gt in zip(all_paths, all_gt):
         if not path:
             continue
         root_node = path[0].parent
+        if root_node is None or root_node.parent is not None:
+            raise ValueError("StepTreeRL paths must start at a direct child of the root node.")
         prompt_tokens = torch.tensor(root_node.state, dtype=torch.long, device=device)
 
         response_tokens: List[int] = []
@@ -1482,24 +1500,27 @@ def _build_sampling_result(
             offset = end
 
         resp_tensor = torch.tensor(response_tokens, dtype=torch.long, device=device)
-        full_tensor = torch.cat([prompt_tokens, resp_tensor], dim=0)
 
         prompt_ids_list.append(prompt_tokens)
-        full_seq_list.append(full_tensor)
         resp_ids_list.append(resp_tensor)
         step_spans_list.append(spans)
         step_rewards_list.append(rewards)
         step_correctness_scores_list.append(correctness_scores)
         response_lens.append(len(response_tokens))
         leaf_accuracy_list.append(1.0 if path[-1].is_correct else 0.0)
+        max_branch_round = max((int(node.branch_round) for node in path), default=0)
+        trace_source_list.append("branch" if max_branch_round > 0 else "origin")
+        branch_round_list.append(max_branch_round)
 
     if not prompt_ids_list:
         raise ValueError("StepTreeRL produced no non-empty training paths.")
 
-    # Pad and stack
-    input_ids, attention_mask, position_ids = _pad_sequences(full_seq_list, pad_token_id, device)
-    prompts_padded, _, _ = _pad_sequences(prompt_ids_list, pad_token_id, device)
-    responses_padded, _, _ = _pad_sequences(resp_ids_list, pad_token_id, device)
+    padded_batch = build_padded_prompt_response_batch(prompt_ids_list, resp_ids_list, pad_token_id)
+    input_ids = padded_batch.input_ids
+    attention_mask = padded_batch.attention_mask
+    position_ids = padded_batch.position_ids
+    prompts_padded = padded_batch.prompts
+    responses_padded = padded_batch.responses
 
     # Token-level PRM scores
     reward_fn_scores = _build_token_level_scores(
@@ -1586,7 +1607,10 @@ def _build_sampling_result(
             "leaf_accuracy": leaf_accuracy,
             "step_correctness_scores": step_correctness_padded,
         },
-        non_tensors={},
+        non_tensors={
+            "trace_source": np.asarray(trace_source_list, dtype=object),
+            "branch_round": np.asarray(branch_round_list, dtype=np.int64),
+        },
         meta_info={"step_treerl_metrics": step_treerl_metrics},
     )
 
@@ -1609,9 +1633,11 @@ def _pad_sequences(
     attn = torch.zeros((len(seqs), max_len), dtype=dtype, device=device)
     for i, seq in enumerate(seqs):
         l = seq.size(0)
-        batch[i, :l] = seq
-        attn[i, :l] = 1
-    pos = torch.arange(max_len, device=device).unsqueeze(0).expand(len(seqs), max_len)
+        offset = max_len - l
+        batch[i, offset:] = seq
+        attn[i, offset:] = 1
+    pos = attn.long().cumsum(dim=-1) - 1
+    pos.masked_fill_(attn == 0, 0)
     return batch, attn, pos
 
 

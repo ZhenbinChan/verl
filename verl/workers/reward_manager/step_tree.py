@@ -75,12 +75,48 @@ class StepTreeRewardManager:
     def _decode_response(self, data_item, prompt_length: int):
         """从 batch 中抽取一个样本的 prompt 和 response 文本。"""
         prompt_ids = data_item.batch["prompts"]
-        valid_prompt_len = int(data_item.batch["attention_mask"][:prompt_length].sum())
-        valid_prompt_ids = prompt_ids[-valid_prompt_len:]
-
         response_ids = data_item.batch["responses"]
-        valid_response_len = int(data_item.batch["attention_mask"][prompt_length:].sum())
-        valid_response_ids = response_ids[:valid_response_len]
+        attention_mask = data_item.batch["attention_mask"]
+        response_width = response_ids.shape[-1]
+
+        if prompt_length != prompt_ids.shape[-1]:
+            raise ValueError(
+                f"Prompt width mismatch: prompt_length={prompt_length}, prompts.shape[-1]={prompt_ids.shape[-1]}."
+            )
+        if response_width <= 0:
+            raise ValueError("StepTreeRewardManager received a response tensor with zero width.")
+
+        expected_total_width = prompt_length + response_width
+        if attention_mask.shape[-1] != expected_total_width:
+            raise ValueError(
+                "Invalid prompt/response batch layout: "
+                f"attention_mask width {attention_mask.shape[-1]} does not equal "
+                f"prompt width {prompt_length} + response width {response_width}."
+            )
+
+        prompt_mask = attention_mask[:prompt_length].bool()
+        attention_response_mask = attention_mask[-response_width:].bool()
+        response_mask = (
+            data_item.batch["response_mask"]
+            if "response_mask" in data_item.batch
+            else None
+        )
+        if response_mask is None:
+            response_mask = attention_response_mask
+        else:
+            if response_mask.shape[-1] != response_width:
+                raise ValueError(
+                    f"Response mask width {response_mask.shape[-1]} does not equal response width {response_width}."
+                )
+            response_mask = response_mask.bool()
+            if not torch.equal(response_mask, attention_response_mask):
+                raise ValueError("response_mask does not match the response segment of attention_mask.")
+
+        valid_prompt_ids = prompt_ids[prompt_mask]
+        valid_response_ids = response_ids[response_mask]
+        valid_response_len = int(response_mask.sum().item())
+        if valid_response_len <= 0:
+            raise ValueError("StepTreeRewardManager received an empty valid response.")
 
         prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
         response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
@@ -135,7 +171,12 @@ class StepTreeRewardManager:
                 step_scores = self._fallback_step_scores(response_str, sample_id=sample_id)
                 if step_scores:
                     # Locate </step> boundaries in tokenized response
-                    response_ids = item.batch["responses"][:valid_resp_len]
+                    response_width = item.batch["responses"].shape[-1]
+                    if "response_mask" in item.batch:
+                        response_mask = item.batch["response_mask"].bool()
+                    else:
+                        response_mask = item.batch["attention_mask"][-response_width:].bool()
+                    response_ids = item.batch["responses"][response_mask]
                     full_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
                     import re
                     boundaries = []

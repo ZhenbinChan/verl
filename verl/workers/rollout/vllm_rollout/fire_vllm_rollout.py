@@ -37,21 +37,13 @@ from vllm import SamplingParams
 
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
+from verl.workers.rollout.prompt_utils import extract_prompt_token_ids
 from verl.workers.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 
 # TODO
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
 # 3. simplify init logics
-
-
-# NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
-def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[int]:
-    # remove the left padding in the prompt token_id
-    # pad_token_id = self.llm_engine.tokenizer.pad_token_id if self.llm_engine.tokenizer.pad_token_id is not None else self.llm_engine.tokenizer.eos_token_id
-    non_pad_index = torch.nonzero(prompt_token_ids != pad_token_id, as_tuple=False)[0][0]
-    token_ids = prompt_token_ids[non_pad_index:].tolist()
-    return token_ids
 
 
 class FIREvLLMRollout(vLLMRollout):
@@ -126,7 +118,7 @@ class FIREvLLMRollout(vLLMRollout):
         idx_list = []
         # parse idx from torch.Tensor to List[List[str]]
         for i in range(batch_size):
-            idx_list.append(_pre_process_inputs(self.pad_token_id, idx[i]))
+            idx_list.append(extract_prompt_token_ids(idx[i], attention_mask[i]))
 
         do_sample = prompts.meta_info.get("do_sample", True)
         if not do_sample:

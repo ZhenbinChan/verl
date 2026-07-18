@@ -19,9 +19,9 @@ import re
 import numpy as np
 import torch
 
-from verl.utils.reward_score.logi import compute_score
-
 from verl.protocol import DataProto, unpad_dataproto
+from verl.utils.ppo_batch import build_padded_prompt_response_batch
+from verl.utils.reward_score.logi import compute_score
 
 
 @dataclass
@@ -971,7 +971,6 @@ class TreeManager:
         device = response_data_list[0]["full_sequence_ids"].device
         
         # Collect all components in tree order
-        full_sequences = [r["full_sequence_ids"] for r in response_data_list]
         prompts = [r["prompt_ids"] for r in response_data_list]
         responses = [r["response_ids"] for r in response_data_list]
         step_rewards_list = [r["step_rewards"] for r in response_data_list]
@@ -981,10 +980,12 @@ class TreeManager:
         response_lens = [r["response_len"] for r in response_data_list]
         ground_truths = [r.get("ground_truth") for r in response_data_list]
         
-        # Pad sequences
-        input_ids, attention_mask, position_ids = _pad_sequences(full_sequences, pad_token_id=self.pad_token_id, device=device)
-        prompts_padded, _, _ = _pad_sequences(prompts, pad_token_id=self.pad_token_id, device=device)
-        responses_padded, _, _ = _pad_sequences(responses, pad_token_id=self.pad_token_id, device=device)
+        padded_batch = build_padded_prompt_response_batch(prompts, responses, self.pad_token_id)
+        input_ids = padded_batch.input_ids
+        attention_mask = padded_batch.attention_mask
+        position_ids = padded_batch.position_ids
+        prompts_padded = padded_batch.prompts
+        responses_padded = padded_batch.responses
         
         # Build token-level scores
         token_level_scores = _build_token_level_scores(
