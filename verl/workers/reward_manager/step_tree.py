@@ -1,17 +1,24 @@
 """StepTreeRewardManager — reward manager for the step_treerl sampling strategy.
 
-Two reward signals are produced:
+Three outputs are produced:
 
-1. **PRM reward_tensor** (main training signal, token-level):
+1. **Training reward_tensor** (token-level):
    - If the batch already contains ``reward_fn_scores`` (placed there by
      :class:`~verl.trainer.ppo.sampling.step_treerl.StepTreeRLStrategy`),
-     those scores are used directly as the token-level reward.
+     those scores are used directly as the token-level reward. Depending on
+     the configured training mode these are dense segment rewards or a sparse
+     leaf-outcome reward.
    - Fallback (validation / non-step-tree batches): each ``<step>`` block is
      scored via the format/FOL PRM function, written at the step's last token.
    - ``self_eval`` requires precomputed scores from StepTreeRL because actor
      generation is not available inside the reward manager.
 
-2. **Outcome accuracy** (logging / tracking):
+2. **Process-reward statistics** (logging / tracking):
+   - Precomputed ``process_reward_scores`` are kept separate from the training
+     reward and summed per selected trajectory.
+   - Validation falls back to scoring each complete ``<step>...</step>`` block.
+
+3. **Outcome accuracy** (logging / tracking):
    - ``compute_score(response_str, ground_truth)`` → 0/1 binary.
    - Stored as ``acc`` so validation logs it under ``val-core/<dataset>/acc``.
 """
@@ -127,7 +134,7 @@ class StepTreeRewardManager:
         """当 batch 中没有预计算的 reward_fn_scores 时（比如验证阶段），回退到用正则提取 <step>...</step> 块，逐块调用 PRM 函数评分。"""
         import re
 
-        steps = re.findall(r"<step>(.*?)</step>", response_str, re.DOTALL)
+        steps = re.findall(r"(<step>.*?</step>)", response_str, re.DOTALL)
         if not steps:
             return []
         if self.process_reward_type == "self_eval":
@@ -149,6 +156,23 @@ class StepTreeRewardManager:
             reward_tensor = data.batch["reward_fn_scores"].clone().float()
         else:
             reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        process_reward_tensor = (
+            data.batch["process_reward_scores"]
+            if "process_reward_scores" in data.batch
+            else None
+        )
+        if process_reward_tensor is None:
+            # Backward compatibility for validation and older precomputed
+            # batches where the training reward was also the process reward.
+            process_reward_tensor = reward_tensor
+        else:
+            process_reward_tensor = process_reward_tensor.clone().float()
+            if process_reward_tensor.shape != reward_tensor.shape:
+                raise ValueError(
+                    "process_reward_scores shape "
+                    f"{tuple(process_reward_tensor.shape)} does not match reward tensor shape "
+                    f"{tuple(reward_tensor.shape)}."
+                )
 
         reward_extra_info: dict = defaultdict(list)
         prompts_list: list = []
@@ -211,7 +235,7 @@ class StepTreeRewardManager:
 
             orm_scores.append(orm_score)
             reward_extra_info["acc"].append(orm_score)
-            reward_extra_info["prm_score"].append(float(reward_tensor[i].sum()))
+            reward_extra_info["prm_score"].append(float(process_reward_tensor[i].sum()))
             format_info = classify_rollout_format(response_str)
             for key, values in rollout_format_infos_to_metric_columns([format_info]).items():
                 reward_extra_info[key].extend(values)
@@ -228,7 +252,7 @@ class StepTreeRewardManager:
                 print("[response]", response_str)
                 print("[ground_truth]", ground_truth)
                 print("[orm_score]", orm_score)
-                print("[prm_sum]", reward_tensor[i].sum().item())
+                print("[prm_sum]", process_reward_tensor[i].sum().item())
 
         if return_dict:
             outcome_reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)

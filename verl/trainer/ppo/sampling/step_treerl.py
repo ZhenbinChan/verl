@@ -104,6 +104,13 @@ class StepTreeRLStrategy(SamplingStrategy):
         self.adv_estimator = str(config.algorithm.get("adv_estimator", "")) if "algorithm" in config else ""
         self.use_origin_advantage = self.adv_estimator in ("step_treerl_origin", "step_rl")
         self.use_branch_point_search = self.adv_estimator == "step_treerl_origin"
+        self.training_reward_mode = str(cfg.get("training_reward_mode", "segment")).lower()
+        if self.training_reward_mode not in {"segment", "leaf_outcome"}:
+            raise ValueError(
+                "Unsupported trainer.step_treerl_config.training_reward_mode="
+                f"{self.training_reward_mode!r}. Expected 'segment' or 'leaf_outcome'."
+            )
+        self.use_process_rewards = self.training_reward_mode == "segment" and not self.use_origin_advantage
 
         # Shared generation bounds
         self.max_depth = cfg.get("max_depth", 40)
@@ -275,6 +282,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         nodes: List[MCTSNode],
         generate_fn: Optional[Callable[[DataProto], DataProto]] = None,
         device: Optional[torch.device] = None,
+        update_value_fields: bool = True,
     ) -> None:
         step_nodes = [node for node in nodes if getattr(node, "node_type", "step") == "step"]
         if not step_nodes:
@@ -293,8 +301,9 @@ class StepTreeRLStrategy(SamplingStrategy):
         scores = self._score_process_rewards(requests, generate_fn=generate_fn, device=device)
         for node, score in zip(step_nodes, scores):
             node.process_reward = float(score)
-            node.R = float(score)
-            node.value = float(score)
+            if update_value_fields:
+                node.R = float(score)
+                node.value = float(score)
 
     def _format_self_eval_prompt(self, req: StepRewardRequest) -> str:
         question_text = req.question_text or ""
@@ -431,7 +440,9 @@ class StepTreeRLStrategy(SamplingStrategy):
             self._node_counters = {}
             self._metrics = StepTreeRLMetrics()
             self._timing = {}
-            if not self.use_origin_advantage and self.process_reward_type in {"fol", "self_eval"}:
+            # Dense segment training scores every candidate step. Other modes
+            # still score the selected paths for process-reward statistics.
+            if self.process_reward_type in {"fol", "self_eval"}:
                 self._prepare_process_reward_context(
                     gen_batch,
                     require_sample_id=self.process_reward_type == "fol",
@@ -443,7 +454,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             with _timer("init_parse", self._timing):
                 roots = self._init_roots(gen_batch, device)
                 initial_nodes = self._generate_full_solutions(gen_batch, gen_batch_output, roots, batch_size)
-            if not self.use_origin_advantage:
+            if self.use_process_rewards:
                 with _timer("process_reward", self._timing):
                     self._assign_process_rewards(initial_nodes, generate_fn=generate_fn, device=device)
             candidate_pool = self._build_candidate_pool(roots, initial_nodes)
@@ -465,7 +476,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             # 4. Build output with padding
             ground_truths = self._get_ground_truths(gen_batch, batch_size)
             with _timer("build_output", self._timing):
-                result = self._build_output(gen_batch, roots, device, ground_truths)
+                result = self._build_output(gen_batch, roots, device, ground_truths, generate_fn=generate_fn)
             result.gen_batch_output.meta_info["step_treerl_timing"] = dict(self._timing)
 
         return result
@@ -673,7 +684,7 @@ class StepTreeRLStrategy(SamplingStrategy):
                     branch_round=_round_idx + 1,
                 )
             if new_nodes:
-                if not self.use_origin_advantage:
+                if self.use_process_rewards:
                     with _timer("process_reward", self._timing):
                         self._assign_process_rewards(new_nodes, generate_fn=generate_fn, device=device)
                 self._add_candidates(candidate_pool, new_nodes)
@@ -971,6 +982,12 @@ class StepTreeRLStrategy(SamplingStrategy):
                 if leaf.is_correct:
                     leaf.main_chain = True # 如果叶子节点正确, 则设置为 True
 
+            # Standard GRPO consumes the raw trajectory-level outcome. Stop
+            # before optional trajectory-RM fusion, leaf RLOO, and tree value
+            # backpropagation so none of those signals can affect the score.
+            if self.training_reward_mode == "leaf_outcome":
+                continue
+
             # Optionally refine leaf outcome with LLM trajectory quality evaluation.
             # The external RM changes the value used by RLOO, but never overrides
             # format-aware correctness or main-chain membership.
@@ -1222,6 +1239,7 @@ class StepTreeRLStrategy(SamplingStrategy):
         roots: List[MCTSNode],
         device: torch.device,
         ground_truths: List[Optional[str]],
+        generate_fn: Optional[Callable[[DataProto], DataProto]] = None,
     ) -> SamplingResult:
         """Output selected terminal paths with GPU padding."""
         all_paths: List[List[MCTSNode]] = []
@@ -1257,11 +1275,12 @@ class StepTreeRLStrategy(SamplingStrategy):
             self._metrics.terminal_padding += terminal_padding
             for leaf in leaves:
                 self._record_trace_format_metrics(leaf)
-            for leaf in leaves:
-                self._selected_backpropagate(leaf)
-            if self.use_weighted_value:
-                self._compute_weighted_update(root)
-            self._assign_segment_rewards(root)
+            if self.training_reward_mode == "segment":
+                for leaf in leaves:
+                    self._selected_backpropagate(leaf)
+                if self.use_weighted_value:
+                    self._compute_weighted_update(root)
+                self._assign_segment_rewards(root)
 
             for leaf in leaves:
                 all_paths.append(gather_path(leaf))
@@ -1286,6 +1305,27 @@ class StepTreeRLStrategy(SamplingStrategy):
                 for path in all_paths
             ) / len(all_paths)
 
+        # In leaf-outcome and origin modes PRM does not participate in the
+        # training reward. Score only the unique selected step nodes so the
+        # process-reward metric remains available without re-scoring duplicated
+        # terminal or GPU-padding paths. Do not overwrite tree value fields.
+        if not self.use_process_rewards and all_paths:
+            selected_step_nodes: List[MCTSNode] = []
+            seen_node_ids = set()
+            for path in all_paths:
+                for node in path:
+                    if getattr(node, "node_type", "step") != "step" or id(node) in seen_node_ids:
+                        continue
+                    seen_node_ids.add(id(node))
+                    selected_step_nodes.append(node)
+            with _timer("process_reward", self._timing):
+                self._assign_process_rewards(
+                    selected_step_nodes,
+                    generate_fn=generate_fn,
+                    device=device,
+                    update_value_fields=False,
+                )
+
         return _build_sampling_result(
             all_paths,
             all_gt,
@@ -1293,6 +1333,7 @@ class StepTreeRLStrategy(SamplingStrategy):
             device,
             len(roots),
             metrics=self._metrics,
+            training_reward_mode=self.training_reward_mode,
         )
 
     def _select_terminals(self, leaves: List[MCTSNode], num_traces: int) -> Tuple[List[MCTSNode], int]:
@@ -1462,15 +1503,23 @@ def _build_sampling_result(
     device: torch.device,
     batch_size: int,
     metrics: Optional[StepTreeRLMetrics] = None,
+    training_reward_mode: str = "segment",
 ) -> SamplingResult:
     """Build padded tensors and SamplingResult from selected paths."""
+    if training_reward_mode not in {"segment", "leaf_outcome"}:
+        raise ValueError(
+            f"Unsupported training_reward_mode={training_reward_mode!r}. "
+            "Expected 'segment' or 'leaf_outcome'."
+        )
     prompt_ids_list: List[torch.Tensor] = []
     resp_ids_list: List[torch.Tensor] = []
     step_spans_list: List[List[Tuple[int, int]]] = []
     step_rewards_list: List[List[float]] = []
+    process_rewards_list: List[List[float]] = []
     step_correctness_scores_list: List[List[float]] = []
     response_lens: List[int] = []
     leaf_accuracy_list: List[float] = []
+    leaf_outcome_list: List[float] = []
     trace_source_list: List[str] = []
     branch_round_list: List[int] = []
 
@@ -1485,6 +1534,7 @@ def _build_sampling_result(
         response_tokens: List[int] = []
         spans: List[Tuple[int, int]] = []
         rewards: List[float] = []
+        process_rewards: List[float] = []
         correctness_scores: List[float] = []
         offset = 0
         for node in path:
@@ -1494,6 +1544,9 @@ def _build_sampling_result(
             start, end = offset, offset + len(tokens)
             spans.append((start, end))
             rewards.append(float(node.segment_reward))
+            process_rewards.append(
+                float(node.process_reward) if getattr(node, "node_type", "step") == "step" else 0.0
+            )
             v_score = float(node.state_value)
             correctness_scores.append(v_score)
             response_tokens.extend(tokens)
@@ -1505,9 +1558,11 @@ def _build_sampling_result(
         resp_ids_list.append(resp_tensor)
         step_spans_list.append(spans)
         step_rewards_list.append(rewards)
+        process_rewards_list.append(process_rewards)
         step_correctness_scores_list.append(correctness_scores)
         response_lens.append(len(response_tokens))
         leaf_accuracy_list.append(1.0 if path[-1].is_correct else 0.0)
+        leaf_outcome_list.append(float(path[-1].leaf_outcome))
         max_branch_round = max((int(node.branch_round) for node in path), default=0)
         trace_source_list.append("branch" if max_branch_round > 0 else "origin")
         branch_round_list.append(max_branch_round)
@@ -1522,13 +1577,26 @@ def _build_sampling_result(
     prompts_padded = padded_batch.prompts
     responses_padded = padded_batch.responses
 
-    # Token-level PRM scores
-    reward_fn_scores = _build_token_level_scores(
+    # Preserve the existing dense segment rewards as the default training
+    # signal. In leaf_outcome mode, expose one scalar trajectory score at the
+    # last valid response token so standard GRPO can sum and normalize it.
+    segment_reward_scores = _build_token_level_scores(
         responses=responses_padded,
         response_lens=response_lens,
         all_step_spans=step_spans_list,
         all_step_rewards=step_rewards_list,
     )
+    process_reward_scores = _build_step_endpoint_scores(
+        responses=responses_padded,
+        response_lens=response_lens,
+        all_step_spans=step_spans_list,
+        all_step_rewards=process_rewards_list,
+    )
+    leaf_outcome_scores = torch.zeros_like(responses_padded, dtype=torch.float32)
+    for i, (rlen, leaf_outcome) in enumerate(zip(response_lens, leaf_outcome_list)):
+        if rlen > 0:
+            leaf_outcome_scores[i, rlen - 1] = leaf_outcome
+    reward_fn_scores = leaf_outcome_scores if training_reward_mode == "leaf_outcome" else segment_reward_scores
 
     # score_ids and reward_mask
     n_paths = len(prompt_ids_list)
@@ -1566,9 +1634,9 @@ def _build_sampling_result(
             else 0.0
         ),
         "format_ratio": (metrics.format_steps / metrics.total_steps) if metrics is not None and metrics.total_steps > 0 else 0.0,
-        "process_reward_mean": (
-            metrics.process_reward_sum / metrics.process_reward_count
-            if metrics is not None and metrics.process_reward_count > 0
+        "selected_process_reward_sum_mean": (
+            sum(sum(path_rewards) for path_rewards in process_rewards_list) / len(process_rewards_list)
+            if process_rewards_list
             else 0.0
         ),
         "leaf_acc": (metrics.leaf_correct / metrics.leaf_total) if metrics is not None and metrics.leaf_total > 0 else 0.0,
@@ -1588,6 +1656,18 @@ def _build_sampling_result(
             if metrics is not None and trace_total > 0
             else 0.0
         ),
+        "selected_leaf_outcome_mean": (
+            sum(leaf_outcome_list) / len(leaf_outcome_list) if leaf_outcome_list else 0.0
+        ),
+        "selected_leaf_outcome_invalid_ratio": (
+            sum(value == 0.0 for value in leaf_outcome_list) / len(leaf_outcome_list) if leaf_outcome_list else 0.0
+        ),
+        "selected_leaf_outcome_wrong_ratio": (
+            sum(value == 0.1 for value in leaf_outcome_list) / len(leaf_outcome_list) if leaf_outcome_list else 0.0
+        ),
+        "selected_leaf_outcome_correct_ratio": (
+            sum(value == 1.0 for value in leaf_outcome_list) / len(leaf_outcome_list) if leaf_outcome_list else 0.0
+        ),
     }
     for category in FORMAT_PRIMARY_CATEGORIES:
         count = format_primary_counts.get(category, 0)
@@ -1602,6 +1682,7 @@ def _build_sampling_result(
             "prompts": prompts_padded,
             "responses": responses_padded,
             "reward_fn_scores": reward_fn_scores,
+            "process_reward_scores": process_reward_scores,
             "score_ids": score_ids,
             "reward_mask": reward_mask,
             "leaf_accuracy": leaf_accuracy,
@@ -1659,4 +1740,21 @@ def _build_token_level_scores(
             if start >= end:
                 continue
             scores[i, start:end] = float(r)
+    return scores
+
+
+def _build_step_endpoint_scores(
+    responses: torch.Tensor,
+    response_lens: List[int],
+    all_step_spans: List[List[Tuple[int, int]]],
+    all_step_rewards: List[List[float]],
+) -> torch.Tensor:
+    """Store each step reward once, at the final token of its response span."""
+    scores = torch.zeros_like(responses, dtype=torch.float32)
+    max_len = responses.size(1)
+    for i, (rlen, spans, rewards) in enumerate(zip(response_lens, all_step_spans, all_step_rewards)):
+        for (_, end), reward in zip(spans, rewards):
+            endpoint = min(end, rlen, max_len) - 1
+            if endpoint >= 0:
+                scores[i, endpoint] = float(reward)
     return scores

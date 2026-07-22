@@ -300,6 +300,7 @@ trainer:
     average_one_generation: false
   # step_treerl-specific settings (step-level entropy-guided tree, simplified)
   step_treerl_config:
+    training_reward_mode: segment # segment | leaf_outcome; leaf_outcome is for standard GRPO
     trajectory_rm_enabled: true # call the external trajectory RM when a URL is configured
     max_depth: 40               # max step depth
     max_token_num: 512          # max new tokens per step generation

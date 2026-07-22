@@ -76,6 +76,11 @@ FORMAT_ERROR_ADVANTAGE_MASK_KEY = "format_error_advantage_mask"
 VALIDATION_CORE_REWARD_VARS = {"reward", "verifiable_reward"}
 
 
+def _should_aggregate_validation_reward(sampling_strategy: str) -> bool:
+    """StepTreeRL validation exposes canonical answer accuracy, not its PRM sum."""
+    return str(sampling_strategy).lower() != "step_treerl"
+
+
 def _validation_metric_section(var_name: str, available_vars) -> str:
     if var_name in VALIDATION_CORE_REWARD_VARS:
         return "val-core"
@@ -98,14 +103,18 @@ def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_t
                 "Tree/total_steps": step_treerl_metrics.get("total_steps", 0),
                 "Tree/steps_per_problem": step_treerl_metrics.get("steps_per_problem", 0.0),
                 "Tree/format_ratio": step_treerl_metrics.get("format_ratio", 0.0),
-                "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("process_reward_mean", 0.0),
+                "reward/step_treerl_process_reward_mean": step_treerl_metrics.get("selected_process_reward_sum_mean", 0.0),
                 "Tree/leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
-                "val-core/llm_rm_score": step_treerl_metrics.get("llm_rm_score", 0.0),
+                "Tree/llm_rm_score": step_treerl_metrics.get("llm_rm_score", 0.0),
                 "Tree/candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
                 "Tree/selected_traces": step_treerl_metrics.get("selected_traces", 0),
                 "rollout/step_num": step_treerl_metrics.get("step_num", 0.0),
                 "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
                 "Tree/trace_total": step_treerl_metrics.get("trace_total", 0),
+                "reward/outcome_reward": step_treerl_metrics.get("selected_leaf_outcome_mean", 0.0),
+                "Tree/selected_leaf_outcome_invalid_ratio": step_treerl_metrics.get("selected_leaf_outcome_invalid_ratio", 0.0),
+                "Tree/selected_leaf_outcome_wrong_ratio": step_treerl_metrics.get("selected_leaf_outcome_wrong_ratio", 0.0),
+                "Tree/selected_leaf_outcome_correct_ratio": step_treerl_metrics.get("selected_leaf_outcome_correct_ratio", 0.0),
                 "Tree/format_primary/relaxed_format_correct_count": step_treerl_metrics.get("relaxed_format_correct_count", 0),
                 "Tree/format_primary/relaxed_format_correct_ratio": step_treerl_metrics.get("relaxed_format_correct_ratio", 0.0),
             }
@@ -616,9 +625,9 @@ class RayPPOTrainer:
 
         self.sampling_strategy = create_sampling_strategy(config, self.tokenizer)
         # tree_search strategy requires tree-specific reward manager / adv estimator
-        self.tree_sampling = (
-            str(config.trainer.get("sampling_strategy", "")).lower() == "tree_search"
-        )
+        sampling_strategy_name = str(config.trainer.get("sampling_strategy", "")).lower()
+        self.tree_sampling = sampling_strategy_name == "tree_search"
+        self.step_treerl_sampling = sampling_strategy_name == "step_treerl"
 
         self.record_table = None
 
@@ -824,21 +833,49 @@ class RayPPOTrainer:
         # step_treerl strategy requires step_tree reward manager
         if str(config.trainer.get("sampling_strategy", "")).lower() == "step_treerl":
             reward_manager_name = config.reward_model.get("reward_manager", "naive")
+            step_treerl_cfg = config.trainer.get("step_treerl_config", {})
+            training_reward_mode = str(step_treerl_cfg.get("training_reward_mode", "segment")).lower()
             assert reward_manager_name == "step_tree", (
                 f"sampling_strategy='step_treerl' requires reward_model.reward_manager='step_tree', "
                 f"but got '{reward_manager_name}'. "
-                f"Use StepTreeRewardManager for step-level PRM-based dense rewards."
+                f"Use StepTreeRewardManager for StepTreeRL training rewards."
             )
             assert config.algorithm.adv_estimator in [
+                AdvantageEstimator.GRPO,
                 AdvantageEstimator.STEP_TREERL_GRPO,
                 AdvantageEstimator.STEP_TREERL_REINFORCE,
                 AdvantageEstimator.STEP_TREERL_ORIGIN,
                 AdvantageEstimator.STEP_RL,
             ], (
                 "sampling_strategy='step_treerl' requires algorithm.adv_estimator to be "
-                "'step_treerl_grpo', 'step_treerl_reinforce', 'step_treerl_origin', or 'step_rl', "
+                "'grpo', 'step_treerl_grpo', 'step_treerl_reinforce', 'step_treerl_origin', or 'step_rl', "
                 f"but got '{config.algorithm.adv_estimator}'."
             )
+            if config.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+                assert training_reward_mode == "leaf_outcome", (
+                    "sampling_strategy='step_treerl' with algorithm.adv_estimator='grpo' requires "
+                    "trainer.step_treerl_config.training_reward_mode='leaf_outcome', "
+                    f"but got '{training_reward_mode}'."
+                )
+                path_selection = str(step_treerl_cfg.get("path_selection", "selected_terminals")).lower()
+                selected_num_traces = step_treerl_cfg.get("selected_num_traces", None)
+                assert path_selection == "selected_terminals", (
+                    "StepTreeRL standard GRPO requires path_selection='selected_terminals' so every prompt has "
+                    "a fixed-size rollout group."
+                )
+                assert selected_num_traces is not None and int(selected_num_traces) > 1, (
+                    "StepTreeRL standard GRPO requires selected_num_traces > 1 for group-relative advantages."
+                )
+                policy_loss_name = config.actor_rollout_ref.actor.get("policy_loss", None)
+                assert policy_loss_name != "tree_loss", (
+                    "StepTreeRL standard GRPO must use the standard policy loss; remove "
+                    "actor_rollout_ref.actor.policy_loss=tree_loss."
+                )
+            else:
+                assert training_reward_mode == "segment", (
+                    "trainer.step_treerl_config.training_reward_mode='leaf_outcome' is only supported with "
+                    "algorithm.adv_estimator='grpo'."
+                )
             assert process_reward_type in {"format", "fol", "self_eval"}, (
                 "sampling_strategy='step_treerl' requires trainer.process_reward.type to be "
                 f"'format', 'fol', or 'self_eval', but got '{process_reward_type}'."
@@ -1195,7 +1232,8 @@ class RayPPOTrainer:
                 pprint("Detail Reward Info is None !")
             ##################################################################
 
-            reward_extra_infos_dict["reward"].extend(scores)
+            if _should_aggregate_validation_reward(self.config.trainer.get("sampling_strategy", "")):
+                reward_extra_infos_dict["reward"].extend(scores)
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
@@ -1604,7 +1642,7 @@ class RayPPOTrainer:
                             # if "reward_detail" in reward_dict.keys():
                             #     metrics.update(reward_dict["reward_detail"])
                             #     print(reward_dict["reward_detail"])
-                            if "outcome_reward" in reward_dict.keys():
+                            if "outcome_reward" in reward_dict.keys() and not self.step_treerl_sampling:
                                 metrics.update({"reward/mean_fn_reward": np.mean(reward_dict["outcome_reward"])})
 
                                 if "sample_id" in batch.non_tensor_batch.keys():

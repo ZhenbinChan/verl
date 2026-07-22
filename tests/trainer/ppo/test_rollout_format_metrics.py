@@ -15,7 +15,13 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     rollout_format_infos_to_columns,
     rollout_format_infos_to_metric_columns,
 )
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, _build_step_treerl_sampling_metrics, _validation_metric_section
+from verl.trainer.ppo.metric_utils import process_validation_metrics
+from verl.trainer.ppo.ray_trainer import (
+    RayPPOTrainer,
+    _build_step_treerl_sampling_metrics,
+    _should_aggregate_validation_reward,
+    _validation_metric_section,
+)
 
 
 class DummyTokenizer:
@@ -146,6 +152,19 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
 
         self.assertEqual(_validation_metric_section("answer_acc", {"answer_acc": {}, "reward": {}}), "val-core")
 
+    def test_step_treerl_validation_aggregates_acc_but_not_reward(self):
+        self.assertFalse(_should_aggregate_validation_reward("step_treerl"))
+        self.assertTrue(_should_aggregate_validation_reward("none"))
+
+        grouped = process_validation_metrics(
+            data_sources=np.asarray(["logiqa", "logiqa", "logiqa"], dtype=object),
+            sample_inputs=["question-1", "question-2", "question-3"],
+            infos_dict={"acc": [1.0, 0.0, 1.0]},
+        )
+
+        self.assertAlmostEqual(grouped["logiqa"]["acc"]["mean@1"], 2 / 3)
+        self.assertNotIn("reward", grouped["logiqa"])
+
     def test_step_treerl_sampling_metrics_use_tree_prefix_except_reward(self):
         metrics = _build_step_treerl_sampling_metrics(
             {
@@ -153,13 +172,17 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 "total_steps": 6,
                 "steps_per_problem": 1.5,
                 "format_ratio": 0.5,
-                "process_reward_mean": 0.25,
+                "selected_process_reward_sum_mean": 1.25,
                 "leaf_acc": 0.75,
                 "candidate_leaves": 4,
                 "selected_traces": 2,
                 "step_num": 2.5,
                 "terminal_padding": 1,
                 "trace_total": 2,
+                "selected_leaf_outcome_mean": 0.55,
+                "selected_leaf_outcome_invalid_ratio": 0.25,
+                "selected_leaf_outcome_wrong_ratio": 0.25,
+                "selected_leaf_outcome_correct_ratio": 0.5,
                 "format_primary_full_count": 1,
                 "format_primary_full_ratio": 0.5,
                 "format_primary_no_step_count": 0,
@@ -182,6 +205,7 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
 
         self.assertEqual(metrics["Tree/format_steps"], 3)
         self.assertEqual(metrics["Tree/leaf_acc"], 0.75)
+        self.assertEqual(metrics["Tree/llm_rm_score"], 0.0)
         self.assertEqual(metrics["Tree/format_primary/full_count"], 1)
         self.assertEqual(metrics["Tree/format_primary/full_ratio"], 0.5)
         self.assertEqual(metrics["Tree/format_primary/boxed_missing_count"], 1)
@@ -189,8 +213,14 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(metrics["Tree/format_primary/relaxed_format_correct_count"], 1)
         self.assertEqual(metrics["Tree/format_primary/relaxed_format_correct_ratio"], 0.5)
         self.assertEqual(metrics["Tree/time_branch_generation"], 2.0)
-        self.assertEqual(metrics["reward/step_treerl_process_reward_mean"], 0.25)
+        self.assertEqual(metrics["reward/step_treerl_process_reward_mean"], 1.25)
         self.assertEqual(metrics["rollout/step_num"], 2.5)
+        self.assertEqual(metrics["reward/outcome_reward"], 0.55)
+        self.assertNotIn("reward/step_treerl_selected_leaf_outcome_mean", metrics)
+        self.assertEqual(metrics["Tree/selected_leaf_outcome_invalid_ratio"], 0.25)
+        self.assertEqual(metrics["Tree/selected_leaf_outcome_wrong_ratio"], 0.25)
+        self.assertEqual(metrics["Tree/selected_leaf_outcome_correct_ratio"], 0.5)
+        self.assertFalse(any(key.startswith("val-core/") for key in metrics))
         self.assertFalse(any(key.startswith("training/step_treerl") for key in metrics))
 
     def test_answer_acc_metrics_keep_only_two_ratios(self):

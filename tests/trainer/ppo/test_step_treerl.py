@@ -71,6 +71,7 @@ def make_strategy(
     selected_num_traces=2,
     adv_estimator="step_treerl_reinforce",
     trajectory_rm_enabled=None,
+    training_reward_mode="segment",
 ):
     config = OmegaConf.create(
         {
@@ -88,6 +89,7 @@ def make_strategy(
                     },
                 },
                 "step_treerl_config": {
+                    "training_reward_mode": training_reward_mode,
                     "n": top_k,
                     "l": iter_rounds,
                     "t": branch_repeats,
@@ -245,6 +247,192 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(scored.cached_entropy, 0.3)
         self.assertEqual(pending_a.cached_entropy, 0.7)
         self.assertEqual(pending_b.cached_entropy, 0.9)
+
+    def test_leaf_outcome_reward_is_sparse_at_last_valid_token(self):
+        device = torch.device("cpu")
+        short_root = MCTSNode(state=[1, 2], tree_idx=0)
+        short_leaf = MCTSNode(
+            state=[1, 2, 10, 11],
+            step_tokens=[10, 11],
+            segment_reward=9.0,
+            process_reward=0.25,
+            leaf_outcome=0.1,
+            parent=short_root,
+            tree_idx=0,
+        )
+        long_root = MCTSNode(state=[3], tree_idx=1)
+        long_step = MCTSNode(
+            state=[3, 20, 21],
+            step_tokens=[20, 21],
+            segment_reward=-4.0,
+            process_reward=1.0,
+            parent=long_root,
+            tree_idx=1,
+        )
+        long_leaf = MCTSNode(
+            state=[3, 20, 21, 22],
+            step_tokens=[22],
+            segment_reward=7.0,
+            process_reward=99.0,
+            leaf_outcome=1.0,
+            parent=long_step,
+            tree_idx=1,
+            node_type="answer",
+        )
+        short_root.children = [short_leaf]
+        long_root.children = [long_step]
+        long_step.children = [long_leaf]
+
+        result = _build_sampling_result(
+            all_paths=[[short_leaf], [long_step, long_leaf]],
+            all_gt=[None, None],
+            pad_token_id=0,
+            device=device,
+            batch_size=2,
+            training_reward_mode="leaf_outcome",
+        )
+
+        rewards = result.gen_batch_output.batch["reward_fn_scores"]
+        self.assertTrue(torch.allclose(rewards, torch.tensor([[0.0, 0.1, 0.0], [0.0, 0.0, 1.0]])))
+        process_rewards = result.gen_batch_output.batch["process_reward_scores"]
+        self.assertTrue(torch.allclose(process_rewards, torch.tensor([[0.0, 0.25, 0.0], [0.0, 1.0, 0.0]])))
+        metrics = result.gen_batch_output.meta_info["step_treerl_metrics"]
+        self.assertAlmostEqual(metrics["selected_process_reward_sum_mean"], 0.625)
+        self.assertAlmostEqual(metrics["selected_leaf_outcome_mean"], 0.55)
+        self.assertEqual(metrics["selected_leaf_outcome_invalid_ratio"], 0.0)
+        self.assertEqual(metrics["selected_leaf_outcome_wrong_ratio"], 0.5)
+        self.assertEqual(metrics["selected_leaf_outcome_correct_ratio"], 0.5)
+
+    def test_leaf_outcome_scores_use_standard_grpo_group_normalization(self):
+        rewards = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.1],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=torch.float32,
+        )
+        response_mask = torch.tensor(
+            [
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+            ]
+        )
+        prompt_uids = np.asarray(["prompt_a", "prompt_a", "prompt_b", "prompt_b"], dtype=object)
+
+        advantages, returns = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=rewards,
+            response_mask=response_mask,
+            index=prompt_uids,
+            norm_adv_by_std_in_grpo=True,
+        )
+
+        expected_scale = 1.0 / (2.0**0.5)
+        self.assertTrue(torch.allclose(advantages[0, :2], torch.full((2,), -expected_scale), atol=2e-5))
+        self.assertTrue(torch.allclose(advantages[1], torch.full((3,), expected_scale), atol=2e-5))
+        self.assertAlmostEqual(advantages[2, 0].item(), -expected_scale, places=5)
+        self.assertTrue(torch.allclose(advantages[3], torch.full((3,), expected_scale), atol=2e-5))
+        self.assertEqual(advantages[0, 2].item(), 0.0)
+        self.assertEqual(advantages[2, 1:].sum().item(), 0.0)
+        self.assertTrue(torch.equal(returns, advantages))
+
+    def test_segment_mode_keeps_dense_training_reward_separate_from_process_reward(self):
+        root = MCTSNode(state=[1], tree_idx=0)
+        step = MCTSNode(
+            state=[1, 2, 3],
+            step_tokens=[2, 3],
+            segment_reward=0.5,
+            process_reward=1.0,
+            parent=root,
+            tree_idx=0,
+        )
+        answer = MCTSNode(
+            state=[1, 2, 3, 4],
+            step_tokens=[4],
+            segment_reward=-0.25,
+            process_reward=99.0,
+            parent=step,
+            tree_idx=0,
+            node_type="answer",
+        )
+        root.children = [step]
+        step.children = [answer]
+
+        result = _build_sampling_result(
+            all_paths=[[step, answer]],
+            all_gt=[None],
+            pad_token_id=0,
+            device=torch.device("cpu"),
+            batch_size=1,
+            training_reward_mode="segment",
+        )
+
+        self.assertTrue(
+            torch.allclose(
+                result.gen_batch_output.batch["reward_fn_scores"],
+                torch.tensor([[0.5, 0.5, -0.25]]),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                result.gen_batch_output.batch["process_reward_scores"],
+                torch.tensor([[0.0, 1.0, 0.0]]),
+            )
+        )
+
+    def test_leaf_outcome_scores_unique_selected_steps_and_weights_duplicate_paths(self):
+        strategy = make_strategy(adv_estimator="grpo", training_reward_mode="leaf_outcome")
+        strategy.path_selection = "all_leaves"
+        strategy._n_gpus = 2
+        root = MCTSNode(state=[1], tree_idx=0)
+        shared_step = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            step_text="<step><premise>a</premise><conclusion>b</conclusion></step>",
+            parent=root,
+            tree_idx=0,
+            node_idx=1,
+        )
+        answer_a = MCTSNode(
+            state=[1, 2, 3],
+            step_tokens=[3],
+            step_text=r"\boxed{A}",
+            process_reward=99.0,
+            parent=shared_step,
+            tree_idx=0,
+            node_idx=2,
+            node_type="answer",
+        )
+        answer_b = MCTSNode(
+            state=[1, 2, 4],
+            step_tokens=[4],
+            step_text=r"\boxed{B}",
+            process_reward=88.0,
+            parent=shared_step,
+            tree_idx=0,
+            node_idx=3,
+            node_type="answer",
+        )
+        root.children = [shared_step]
+        shared_step.children = [answer_a, answer_b]
+
+        with patch.object(strategy, "_score_process_rewards", return_value=[0.75]) as score_mock:
+            result = strategy._build_output(
+                gen_batch=None,
+                roots=[root],
+                device=torch.device("cpu"),
+                ground_truths=["A"],
+            )
+
+        requests = score_mock.call_args.args[0]
+        self.assertEqual(len(requests), 1)
+        process_sums = result.gen_batch_output.batch["process_reward_scores"].sum(-1)
+        self.assertTrue(torch.allclose(process_sums, torch.tensor([0.75, 0.75])))
+        metrics = result.gen_batch_output.meta_info["step_treerl_metrics"]
+        self.assertEqual(metrics["selected_process_reward_sum_mean"], 0.75)
 
     def test_branch_by_entropy_selects_top_k_per_tree_with_reselection(self):
         strategy = make_strategy(top_k=1, iter_rounds=2)
@@ -803,6 +991,52 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertAlmostEqual(a.segment_reward, -0.9)
         self.assertAlmostEqual(b.segment_reward, 0.9)
 
+    def test_leaf_outcome_mode_stops_before_tree_backprop_and_trajectory_rm(self):
+        strategy = make_strategy(
+            adv_estimator="grpo",
+            training_reward_mode="leaf_outcome",
+            trajectory_rm_enabled=True,
+        )
+        strategy.trajectory_rm_url = "http://unused.invalid/v1"
+        root = MCTSNode(state=[1], tree_idx=0)
+        invalid = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            accumulated_text=r"plain reasoning \boxed{A}",
+            parent=root,
+            tree_idx=0,
+        )
+        valid_wrong = MCTSNode(
+            state=[1, 3],
+            step_tokens=[3],
+            accumulated_text=r"<step><premise>a</premise><conclusion>b</conclusion></step>\boxed{B}",
+            parent=root,
+            tree_idx=0,
+        )
+        valid_correct = MCTSNode(
+            state=[1, 4],
+            step_tokens=[4],
+            accumulated_text=r"<step><premise>a</premise><conclusion>b</conclusion></step>\boxed{A}",
+            parent=root,
+            tree_idx=0,
+        )
+        root.children = [invalid, valid_wrong, valid_correct]
+        gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+
+        with (
+            patch("verl.utils.reward_score.logi.compute_score", side_effect=[(1.0, {}), (0.0, {}), (1.0, {})]),
+            patch.object(strategy, "_evaluate_leaves_quality") as evaluate_mock,
+            patch.object(strategy, "_apply_rloo_to_leaves") as rloo_mock,
+        ):
+            strategy._backpropagate_all([root], gen_batch)
+
+        self.assertEqual([invalid.leaf_outcome, valid_wrong.leaf_outcome, valid_correct.leaf_outcome], [0.0, 0.1, 1.0])
+        self.assertEqual([invalid.R, valid_wrong.R, valid_correct.R], [0.0, 0.1, 1.0])
+        self.assertEqual(root.terminal_in_subtree, 0)
+        self.assertTrue(valid_correct.main_chain)
+        evaluate_mock.assert_not_called()
+        rloo_mock.assert_not_called()
+
     def test_origin_segment_reward_uses_value_formula_without_prm_or_length_penalty(self):
         strategy = make_strategy(adv_estimator="step_treerl_origin")
         strategy.length_penalty_enabled = True
@@ -964,6 +1198,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(logi_compute_score(r"reasoning \boxed{(A)}", "B"), (0.0, None))
         self.assertEqual(logi_compute_score(r"reasoning \boxed{(AB)}", "A"), (0.0, None))
         self.assertEqual(logi_compute_score(r"reasoning \boxed{A}}", "A"), (0.0, None))
+        self.assertEqual(logi_compute_score(r"reasoning \boxed{A} trailing text", "a"), (1.0, None))
+        self.assertEqual(logi_compute_score(r"first \boxed{A}, final \boxed{B}", "B"), (1.0, None))
+        self.assertEqual(logi_compute_score(r"first \boxed{A}, final \boxed{B}", "A"), (0.0, None))
+        self.assertEqual(logi_compute_score("no boxed answer", "A"), (0.0, None))
 
         self.assertEqual(classify_rollout_format(full)["format_primary"], "full")
         self.assertEqual(classify_rollout_format(full_parenthesized)["format_primary"], "full")
@@ -1049,8 +1287,14 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(metrics["format_primary_no_step_count"], 1)
         self.assertEqual(metrics["format_primary_boxed_missing_count"], 1)
         self.assertAlmostEqual(metrics["format_primary_full_ratio"], 1 / 3)
-        self.assertAlmostEqual(metrics["process_reward_mean"], 2 / 3)
+        self.assertAlmostEqual(metrics["selected_process_reward_sum_mean"], 0.75)
         self.assertEqual(result.gen_batch_output.batch["responses"].shape[0], 4)
+        self.assertTrue(
+            torch.allclose(
+                result.gen_batch_output.batch["process_reward_scores"].sum(-1),
+                torch.tensor([1.0, 0.0, 1.0, 1.0]),
+            )
+        )
 
     def test_step_tree_reward_manager_returns_validation_format_metrics(self):
         tokenizer = TextTokenizer()
@@ -1080,6 +1324,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
 
         extra = result["reward_extra_info"]
         self.assertEqual(extra["acc"], [1.0])
+        self.assertEqual(extra["prm_score"], [1.0])
+        self.assertEqual(result["reward_tensor"].sum().item(), 1.0)
         self.assertEqual(extra["format_primary_full"], [1.0])
         self.assertEqual(extra["format_error_advantage_mask"], [0.0])
         self.assertEqual(extra["boxed_status_valid"], [1.0])
@@ -1194,12 +1440,16 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         attention_mask = torch.ones((1, len(prompt_ids) + len(response_ids)), dtype=torch.long)
         reward_fn_scores = torch.zeros((1, len(response_ids)), dtype=torch.float32)
         reward_fn_scores[0, -1] = 1.0
+        process_reward_scores = torch.zeros((1, len(response_ids)), dtype=torch.float32)
+        process_reward_scores[0, 0] = 0.25
+        process_reward_scores[0, -1] = 0.5
         data = DataProto.from_dict(
             tensors={
                 "prompts": torch.tensor([prompt_ids], dtype=torch.long),
                 "responses": torch.tensor([response_ids], dtype=torch.long),
                 "attention_mask": attention_mask,
                 "reward_fn_scores": reward_fn_scores,
+                "process_reward_scores": process_reward_scores,
             },
             non_tensors={
                 "answer": np.array(["A"], dtype=object),
@@ -1216,7 +1466,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         result = manager(data, return_dict=True)
 
         self.assertTrue(torch.equal(result["reward_tensor"], reward_fn_scores))
-        self.assertEqual(result["reward_extra_info"]["prm_score"], [1.0])
+        self.assertEqual(result["reward_extra_info"]["prm_score"], [0.75])
 
 
 if __name__ == "__main__":
