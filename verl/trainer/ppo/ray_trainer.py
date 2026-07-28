@@ -53,6 +53,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.sampling.base import STEP_TREERL_INITIAL_ROLLOUT_N_KEY, STEP_TREERL_REPEAT_TIMES_KEY
 from verl.trainer.ppo.sampling.mcts_prm import (
     FORMAT_PRIMARY_CATEGORIES,
     aggregate_rollout_answer_acc_metrics,
@@ -81,6 +82,23 @@ def _should_aggregate_validation_reward(sampling_strategy: str) -> bool:
     return str(sampling_strategy).lower() != "step_treerl"
 
 
+def _compute_real_train_batch_size(config) -> int:
+    """Return the global trajectory count produced by one prompt batch."""
+    sampling_strategy_name = str(config.trainer.get("sampling_strategy", "")).lower()
+    if sampling_strategy_name == "step_treerl":
+        step_treerl_cfg = config.trainer.get("step_treerl_config", {})
+        selected_num_traces = int(step_treerl_cfg.get("selected_num_traces", config.actor_rollout_ref.rollout.n))
+        return int(config.data.train_batch_size) * selected_num_traces
+    if sampling_strategy_name == "parallel_mcts":
+        mcts_cfg = config.trainer.get("parallel_mcts_config", {})
+        tree_multiplier = mcts_cfg.get("num_traces", config.trainer.get("tree_rounds", 1) + 1) * mcts_cfg.get("tree_top_k", 1)
+        if tree_multiplier == 1:
+            tree_multiplier = mcts_cfg.get("num_traces", 1)
+    else:
+        tree_multiplier = (config.trainer.get("tree_rounds", 0) + 1) * config.trainer.get("tree_top_k", 1)
+    return int(config.data.train_batch_size) * int(config.actor_rollout_ref.rollout.n) * int(tree_multiplier)
+
+
 def _validation_metric_section(var_name: str, available_vars) -> str:
     if var_name in VALIDATION_CORE_REWARD_VARS:
         return "val-core"
@@ -107,6 +125,9 @@ def _build_step_treerl_sampling_metrics(step_treerl_metrics: dict, step_treerl_t
                 "Tree/leaf_acc": step_treerl_metrics.get("leaf_acc", 0.0),
                 "Tree/llm_rm_score": step_treerl_metrics.get("llm_rm_score", 0.0),
                 "Tree/candidate_leaves": step_treerl_metrics.get("candidate_leaves", 0),
+                "Tree/candidate_terminals": step_treerl_metrics.get("candidate_terminals", 0),
+                "Tree/frontier_leaves": step_treerl_metrics.get("frontier_leaves", 0),
+                "Tree/selected_nonterminal": step_treerl_metrics.get("selected_nonterminal", 0),
                 "Tree/selected_traces": step_treerl_metrics.get("selected_traces", 0),
                 "rollout/step_num": step_treerl_metrics.get("step_num", 0.0),
                 "Tree/terminal_padding": step_treerl_metrics.get("terminal_padding", 0),
@@ -675,14 +696,7 @@ class RayPPOTrainer:
         # real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         # For tree_search / treerl: use (tree_rounds+1) * tree_top_k
         # For parallel_mcts: use num_traces from parallel_mcts_config
-        if config.trainer.get("sampling_strategy") == "parallel_mcts":
-            mcts_cfg = config.trainer.get("parallel_mcts_config", {})
-            tree_multiplier = mcts_cfg.get("num_traces", config.trainer.get("tree_rounds", 1) + 1) * mcts_cfg.get("tree_top_k", 1)
-            if tree_multiplier == 1:  # num_traces is standalone, not paired
-                tree_multiplier = mcts_cfg.get("num_traces", 1)
-        else:
-            tree_multiplier = (config.trainer.get("tree_rounds", 0) + 1) * config.trainer.get("tree_top_k", 1)
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n * tree_multiplier
+        real_train_batch_size = _compute_real_train_batch_size(config)
         assert real_train_batch_size % n_gpus == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
@@ -1571,6 +1585,10 @@ class RayPPOTrainer:
                         repeat_times = sampling_result.repeat_times
                     else:
                         repeat_times = self.config.actor_rollout_ref.rollout.n
+                    if self.step_treerl_sampling:
+                        batch.meta_info[STEP_TREERL_REPEAT_TIMES_KEY] = int(repeat_times)
+                        batch.meta_info[STEP_TREERL_INITIAL_ROLLOUT_N_KEY] = int(self.config.actor_rollout_ref.rollout.n)
+                        metrics["actor/step_treerl_repeat_times"] = int(repeat_times)
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=repeat_times, interleave=True)

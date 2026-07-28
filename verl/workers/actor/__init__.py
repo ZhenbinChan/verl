@@ -12,7 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import BasePPOActor
+from .base import (
+    STEP_TREERL_INITIAL_ROLLOUT_N_KEY,
+    STEP_TREERL_REPEAT_TIMES_KEY,
+    BasePPOActor,
+    resolve_ppo_mini_batch_size,
+)
 from .dp_actor import DataParallelPPOActor
 
-__all__ = ["BasePPOActor", "DataParallelPPOActor"]
+__all__ = [
+    "BasePPOActor",
+    "DataParallelPPOActor",
+    "STEP_TREERL_INITIAL_ROLLOUT_N_KEY",
+    "STEP_TREERL_REPEAT_TIMES_KEY",
+    "resolve_ppo_mini_batch_size",
+]

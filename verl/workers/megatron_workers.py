@@ -40,6 +40,7 @@ from verl.utils.megatron_utils import (
     offload_megatron_optimizer,
 )
 from verl.utils.model import load_mcore_dist_weights, load_megatron_gptmodel_weights
+from verl.workers.actor.base import STEP_TREERL_REPEAT_TIMES_KEY, resolve_ppo_mini_batch_size
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
@@ -379,6 +380,12 @@ class ActorRolloutRefWorker(MegatronWorker):
     @GPUMemoryLogger(role="update_actor", logger=logger)
     def update_actor(self, data: DataProto):
         assert self._is_actor
+        effective_ppo_mini_batch_size = resolve_ppo_mini_batch_size(
+            self.config.actor.ppo_mini_batch_size,
+            data.meta_info,
+            local_batch_size=data.batch.batch_size[0],
+            micro_batch_size=self.config.actor.ppo_micro_batch_size_per_gpu,
+        )
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
             log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)
@@ -392,6 +399,11 @@ class ActorRolloutRefWorker(MegatronWorker):
         dataloader = self.actor.make_minibatch_iterator(data=data)
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(dataloader=dataloader)
+        if STEP_TREERL_REPEAT_TIMES_KEY in data.meta_info:
+            metrics.setdefault("actor/effective_ppo_mini_batch_size", []).append(effective_ppo_mini_batch_size)
+            metrics.setdefault("actor/ppo_num_mini_batches", []).append(
+                data.batch.batch_size[0] // effective_ppo_mini_batch_size
+            )
         delta_time = timer.last
         global_num_tokens = data.meta_info["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)

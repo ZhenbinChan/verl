@@ -19,6 +19,7 @@ from verl.trainer.ppo.metric_utils import process_validation_metrics
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
     _build_step_treerl_sampling_metrics,
+    _compute_real_train_batch_size,
     _should_aggregate_validation_reward,
     _validation_metric_section,
 )
@@ -165,6 +166,28 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertAlmostEqual(grouped["logiqa"]["acc"]["mean@1"], 2 / 3)
         self.assertNotIn("reward", grouped["logiqa"])
 
+    def test_step_treerl_real_train_batch_uses_selected_traces_only(self):
+        plain_config = OmegaConf.create(
+            {
+                "data": {"train_batch_size": 16},
+                "actor_rollout_ref": {"rollout": {"n": 4}},
+                "trainer": {"sampling_strategy": "none"},
+            }
+        )
+        step_treerl_config = OmegaConf.create(
+            {
+                "data": {"train_batch_size": 16},
+                "actor_rollout_ref": {"rollout": {"n": 4}},
+                "trainer": {
+                    "sampling_strategy": "step_treerl",
+                    "step_treerl_config": {"selected_num_traces": 16},
+                },
+            }
+        )
+
+        self.assertEqual(_compute_real_train_batch_size(plain_config), 64)
+        self.assertEqual(_compute_real_train_batch_size(step_treerl_config), 256)
+
     def test_step_treerl_sampling_metrics_use_tree_prefix_except_reward(self):
         metrics = _build_step_treerl_sampling_metrics(
             {
@@ -175,6 +198,9 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
                 "selected_process_reward_sum_mean": 1.25,
                 "leaf_acc": 0.75,
                 "candidate_leaves": 4,
+                "candidate_terminals": 3,
+                "frontier_leaves": 1,
+                "selected_nonterminal": 0,
                 "selected_traces": 2,
                 "step_num": 2.5,
                 "terminal_padding": 1,
@@ -206,6 +232,9 @@ class TestTrainerRolloutFormatMetrics(unittest.TestCase):
         self.assertEqual(metrics["Tree/format_steps"], 3)
         self.assertEqual(metrics["Tree/leaf_acc"], 0.75)
         self.assertEqual(metrics["Tree/llm_rm_score"], 0.0)
+        self.assertEqual(metrics["Tree/candidate_terminals"], 3)
+        self.assertEqual(metrics["Tree/frontier_leaves"], 1)
+        self.assertEqual(metrics["Tree/selected_nonterminal"], 0)
         self.assertEqual(metrics["Tree/format_primary/full_count"], 1)
         self.assertEqual(metrics["Tree/format_primary/full_ratio"], 0.5)
         self.assertEqual(metrics["Tree/format_primary/boxed_missing_count"], 1)

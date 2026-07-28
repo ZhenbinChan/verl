@@ -61,6 +61,9 @@ class StepTreeRLMetrics:
     leaf_total: int = 0
     selected_traces: int = 0
     candidate_leaves: int = 0
+    candidate_terminals: int = 0
+    frontier_leaves: int = 0
+    selected_nonterminal: int = 0
     terminal_padding: int = 0
     trace_total: int = 0
     format_primary_counts: Dict[str, int] = field(default_factory=lambda: {category: 0 for category in FORMAT_PRIMARY_CATEGORIES})
@@ -76,6 +79,20 @@ class GenerationSegment:
     node_type: str
     text: str
     tokens: List[int]
+
+
+def _collect_terminal_nodes(root: MCTSNode) -> List[MCTSNode]:
+    """Return completed trajectories, including terminal nodes with children."""
+    return [node for node in collect_all_nodes(root) if node.parent is not None and node.terminal]
+
+
+def _collect_frontier_leaves(root: MCTSNode) -> List[MCTSNode]:
+    """Return structural leaves whose generation has not actually terminated."""
+    return [
+        node
+        for node in collect_all_nodes(root)
+        if node.parent is not None and not node.children and not node.terminal
+    ]
 
 
 @contextmanager
@@ -557,10 +574,16 @@ class StepTreeRLStrategy(SamplingStrategy):
                 for seg_idx, segment in enumerate(segments):
                     is_last_segment = seg_idx == len(segments) - 1
                     is_answer = segment.node_type == "answer"
-                    is_terminal = is_answer or (is_last_segment and hit_eos) or (current_parent.depth + 1 > self.max_depth)
 
                     accumulated_text = current_parent.accumulated_text + segment.text
                     new_state = current_parent.state + segment.tokens
+                    response_budget_exhausted = len(step_tokens_content) >= self.max_token_num
+                    context_budget_exhausted = len(root.state) + len(step_tokens_content) >= self.max_model_len
+                    is_terminal = (
+                        is_answer
+                        or (is_last_segment and (hit_eos or response_budget_exhausted or context_budget_exhausted))
+                        or (current_parent.depth + 1 > self.max_depth)
+                    )
 
                     child = MCTSNode(
                         state=new_state,
@@ -889,13 +912,21 @@ class StepTreeRLStrategy(SamplingStrategy):
             segments = self._split_generation_segments(full_text, step_tokens_content)
 
             current_parent = step
+            root = self._root_of(step)
+            response_used_before = max(0, len(step.state) - len(root.state))
+            response_budget_exhausted = response_used_before + len(step_tokens_content) >= self.max_token_num
+            context_budget_exhausted = len(step.state) + len(step_tokens_content) >= self.max_model_len
             for seg_idx, segment in enumerate(segments): # 遍历每个 segment
                 is_last_segment = seg_idx == len(segments) - 1   # 是否是最后一个 segment
                 is_answer = segment.node_type == "answer"
-                is_terminal = is_answer or (is_last_segment and hit_eos) or (current_parent.depth + 1 > self.max_depth)
 
                 accumulated_text = current_parent.accumulated_text + segment.text
                 new_state = current_parent.state + segment.tokens
+                is_terminal = (
+                    is_answer
+                    or (is_last_segment and (hit_eos or response_budget_exhausted or context_budget_exhausted))
+                    or (current_parent.depth + 1 > self.max_depth)
+                )
 
                 # Deduplication is limited to sibling branches from the same parent.
                 if self.dedup_sibling_steps and self._is_duplicate_step(segment.tokens, current_parent):
@@ -949,8 +980,9 @@ class StepTreeRLStrategy(SamplingStrategy):
             gt = self._get_ground_truths(gen_batch, len(roots))[tree_idx]
             self._reset_tree_statistics(root)
 
-            # Collect all leaves
-            leaves = [n for n in collect_all_nodes(root) if not n.children]
+            # A terminal node remains a completed trajectory even if tree
+            # expansion later attaches an alternative continuation to it.
+            leaves = _collect_terminal_nodes(root)
 
             if not leaves:
                 continue
@@ -1249,28 +1281,38 @@ class StepTreeRLStrategy(SamplingStrategy):
         for i, root in enumerate(roots):
             gt = ground_truths[i] if i < len(ground_truths) else None
 
-            # Collect all leaves (initial + branched)
-            candidate_leaves = [n for n in collect_all_nodes(root) if not n.children]
+            all_nodes = [node for node in collect_all_nodes(root) if node.parent is not None]
+            structural_leaves = [node for node in all_nodes if not node.children]
+            frontier_leaves = [node for node in structural_leaves if not node.terminal]
+            candidate_terminals = [node for node in all_nodes if node.terminal]
 
-            if not candidate_leaves:
-                # Fallback: deepest non-root node
-                all_nodes = collect_all_nodes(root)
-                non_root = [n for n in all_nodes if n.parent is not None]
-                candidate_leaves = [max(non_root, key=lambda n: n.depth)] if non_root else [root]
+            if not candidate_terminals:
+                raise RuntimeError(
+                    "StepTreeRL produced no terminal trajectory for "
+                    f"tree_idx={root.tree_idx}; frontier_leaves={len(frontier_leaves)}, "
+                    f"max_token_num={self.max_token_num}, max_model_len={self.max_model_len}, "
+                    f"branch_max_new_tokens={self.branch_max_new_tokens}."
+                )
 
             if self.path_selection == "selected_terminals":
-                num_traces = int(self.selected_num_traces or self.rollout_n or len(candidate_leaves))
-                leaves, terminal_padding = self._select_terminals(candidate_leaves, num_traces)
+                num_traces = int(self.selected_num_traces or self.rollout_n or len(candidate_terminals))
+                leaves, terminal_padding = self._select_terminals(candidate_terminals, num_traces)
             elif self.path_selection != "all_leaves":
                 raise ValueError(
                     f"Unsupported trainer.step_treerl_config.path_selection={self.path_selection!r}. "
                     "Expected 'all_leaves' or 'selected_terminals'."
                 )
             else:
-                leaves = list(candidate_leaves)
+                leaves = list(candidate_terminals)
                 terminal_padding = 0
 
-            self._metrics.candidate_leaves += len(candidate_leaves)
+            selected_nonterminal = sum(1 for leaf in leaves if not leaf.terminal)
+            if selected_nonterminal:
+                raise RuntimeError(f"StepTreeRL selected {selected_nonterminal} nonterminal trajectories for tree_idx={root.tree_idx}.")
+            self._metrics.candidate_leaves += len(structural_leaves)
+            self._metrics.candidate_terminals += len(candidate_terminals)
+            self._metrics.frontier_leaves += len(frontier_leaves)
+            self._metrics.selected_nonterminal += selected_nonterminal
             self._metrics.selected_traces += len(leaves)
             self._metrics.terminal_padding += terminal_padding
             for leaf in leaves:
@@ -1388,11 +1430,11 @@ class StepTreeRLStrategy(SamplingStrategy):
             metrics.format_steps += sum(1 for node in step_nodes if format_step_reward(node.step_text) > 0.0)
             metrics.process_reward_sum += sum(float(node.process_reward) for node in step_nodes)
             metrics.process_reward_count += len(step_nodes)
-            leaves = [node for node in nodes if not node.children]
-            metrics.leaf_total += len(leaves)
-            metrics.leaf_correct += sum(1 for leaf in leaves if bool(leaf.is_correct))
-            # Accumulate LLM RM quality scores from leaves that have them
-            for leaf in leaves:
+            terminals = [node for node in nodes if node.terminal]
+            metrics.leaf_total += len(terminals)
+            metrics.leaf_correct += sum(1 for terminal in terminals if bool(terminal.is_correct))
+            # Accumulate LLM RM quality scores from completed trajectories.
+            for leaf in terminals:
                 qs = getattr(leaf, "llm_quality_score", None)
                 if qs is not None:
                     metrics.llm_rm_score_sum += float(qs)
@@ -1646,6 +1688,9 @@ def _build_sampling_result(
             else 0.0
         ),
         "candidate_leaves": metrics.candidate_leaves if metrics is not None else 0,
+        "candidate_terminals": metrics.candidate_terminals if metrics is not None else 0,
+        "frontier_leaves": metrics.frontier_leaves if metrics is not None else 0,
+        "selected_nonterminal": metrics.selected_nonterminal if metrics is not None else 0,
         "selected_traces": metrics.selected_traces if metrics is not None else 0,
         "step_num": metrics.step_num if metrics is not None else 0.0,
         "terminal_padding": metrics.terminal_padding if metrics is not None else 0,

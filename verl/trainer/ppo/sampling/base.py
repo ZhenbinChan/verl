@@ -6,6 +6,9 @@ from typing import Callable
 
 from verl import DataProto
 
+STEP_TREERL_REPEAT_TIMES_KEY = "step_treerl_repeat_times"
+STEP_TREERL_INITIAL_ROLLOUT_N_KEY = "step_treerl_initial_rollout_n"
+
 
 @dataclass
 class SamplingResult:

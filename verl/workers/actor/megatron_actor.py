@@ -45,7 +45,7 @@ from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_pa
 from verl.utils.megatron_utils import get_model_config
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import broadcast_dict_tensor, split_dict_tensor_into_batches
-from verl.workers.actor import BasePPOActor
+from verl.workers.actor import BasePPOActor, resolve_ppo_mini_batch_size
 
 __all__ = ["MegatronPPOActor"]
 
@@ -250,9 +250,15 @@ class MegatronPPOActor(BasePPOActor):
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
+        ppo_mini_batch_size = resolve_ppo_mini_batch_size(
+            self.config.ppo_mini_batch_size,
+            data.meta_info,
+            local_batch_size=data.batch.batch_size[0],
+            micro_batch_size=self.config.ppo_micro_batch_size_per_gpu,
+        )
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(
-            mini_batch_size=self.config.ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
             epochs=self.config.ppo_epochs,
             seed=self.config.data_loader_seed,
             dataloader_kwargs={"shuffle": self.config.shuffle},

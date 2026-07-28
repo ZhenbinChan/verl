@@ -34,9 +34,20 @@ from verl.trainer.ppo.sampling.mcts_prm import (
     format_step_reward,
     strict_step_xml_correct,
 )
-from verl.trainer.ppo.sampling.step_treerl import StepTreeRLStrategy, _build_sampling_result, _pad_sequences
+from verl.trainer.ppo.sampling.step_treerl import (
+    StepTreeRLStrategy,
+    _build_sampling_result,
+    _collect_frontier_leaves,
+    _collect_terminal_nodes,
+    _pad_sequences,
+)
 from verl.utils.ppo_batch import build_padded_prompt_response_batch
 from verl.utils.reward_score.logi import compute_score as logi_compute_score
+from verl.workers.actor.base import (
+    STEP_TREERL_INITIAL_ROLLOUT_N_KEY,
+    STEP_TREERL_REPEAT_TIMES_KEY,
+    resolve_ppo_mini_batch_size,
+)
 from verl.workers.rollout.sampling_params import extract_rollout_sampling_kwargs
 from verl.workers.reward_manager.step_tree import StepTreeRewardManager
 
@@ -405,6 +416,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             tree_idx=0,
             node_idx=2,
             node_type="answer",
+            terminal=True,
         )
         answer_b = MCTSNode(
             state=[1, 2, 4],
@@ -415,6 +427,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             tree_idx=0,
             node_idx=3,
             node_type="answer",
+            terminal=True,
         )
         root.children = [shared_step]
         shared_step.children = [answer_a, answer_b]
@@ -715,6 +728,24 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(metrics["format_primary_full_count"], 1)
         self.assertEqual(metrics["step_num"], 1.0)
 
+    def test_generate_full_solutions_marks_total_response_budget_as_terminal(self):
+        strategy = make_strategy(selected_num_traces=1)
+        strategy.max_token_num = 2
+        root = MCTSNode(state=[1], tree_idx=0)
+        gen_batch_output = SimpleNamespace(
+            batch={"responses": torch.tensor([[10, 11]], dtype=torch.long)},
+        )
+
+        created = strategy._generate_full_solutions(
+            gen_batch=None,
+            gen_batch_output=gen_batch_output,
+            roots=[root],
+            batch_size=1,
+        )
+
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].terminal)
+
     def test_leaf_outcome_combines_full_format_and_answer_correctness(self):
         valid = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}"
         invalid = "unwrapped reasoning \\boxed{A}"
@@ -739,6 +770,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
                     accumulated_text=trajectory,
                     parent=root,
                     tree_idx=0,
+                    terminal=True,
                 )
                 root.children = [leaf]
                 gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -762,6 +794,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text="unwrapped reasoning \\boxed{A}",
             parent=root,
             tree_idx=0,
+            terminal=True,
         )
         root.children = [leaf]
         gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -792,6 +825,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             parent=root,
             tree_idx=0,
             llm_quality_score=1.0,
+            terminal=True,
         )
         root.children = [leaf]
         gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -814,10 +848,10 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         root = MCTSNode(state=[1], tree_idx=0)
 
         short_step = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, node_idx=1)
-        short_answer = MCTSNode(state=[1, 2, 3], step_tokens=[3], parent=short_step, tree_idx=0, node_idx=2, node_type="answer")
+        short_answer = MCTSNode(state=[1, 2, 3], step_tokens=[3], parent=short_step, tree_idx=0, node_idx=2, node_type="answer", terminal=True)
         long_step_1 = MCTSNode(state=[1, 4], step_tokens=[4], parent=root, tree_idx=0, node_idx=3)
         long_step_2 = MCTSNode(state=[1, 4, 5], step_tokens=[5], parent=long_step_1, tree_idx=0, node_idx=4)
-        long_answer = MCTSNode(state=[1, 4, 5, 6], step_tokens=[6], parent=long_step_2, tree_idx=0, node_idx=5, node_type="answer")
+        long_answer = MCTSNode(state=[1, 4, 5, 6], step_tokens=[6], parent=long_step_2, tree_idx=0, node_idx=5, node_type="answer", terminal=True)
         root.children = [short_step, long_step_1]
         short_step.children = [short_answer]
         long_step_1.children = [long_step_2]
@@ -974,8 +1008,8 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         root = MCTSNode(state=[1], tree_idx=0)
         valid_a = "<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}"
         valid_b = "<step><premise>c</premise><conclusion>d</conclusion></step>\\boxed{B}"
-        a = MCTSNode(state=[1, 2], step_tokens=[2], step_text="a", accumulated_text=valid_a, parent=root, tree_idx=0, process_reward=1.0)
-        b = MCTSNode(state=[1, 3], step_tokens=[3], step_text="b", accumulated_text=valid_b, parent=root, tree_idx=0, process_reward=1.0)
+        a = MCTSNode(state=[1, 2], step_tokens=[2], step_text="a", accumulated_text=valid_a, parent=root, tree_idx=0, process_reward=1.0, terminal=True)
+        b = MCTSNode(state=[1, 3], step_tokens=[3], step_text="b", accumulated_text=valid_b, parent=root, tree_idx=0, process_reward=1.0, terminal=True)
         root.children = [a, b]
 
         gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -1005,6 +1039,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text=r"plain reasoning \boxed{A}",
             parent=root,
             tree_idx=0,
+            terminal=True,
         )
         valid_wrong = MCTSNode(
             state=[1, 3],
@@ -1012,6 +1047,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text=r"<step><premise>a</premise><conclusion>b</conclusion></step>\boxed{B}",
             parent=root,
             tree_idx=0,
+            terminal=True,
         )
         valid_correct = MCTSNode(
             state=[1, 4],
@@ -1019,6 +1055,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             accumulated_text=r"<step><premise>a</premise><conclusion>b</conclusion></step>\boxed{A}",
             parent=root,
             tree_idx=0,
+            terminal=True,
         )
         root.children = [invalid, valid_wrong, valid_correct]
         gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
@@ -1123,6 +1160,137 @@ class TestStepTreeRLStrategy(unittest.TestCase):
         self.assertEqual(len(selected), 4)
         self.assertEqual(padding, 2)
         self.assertTrue(any(leaf.main_chain for leaf in selected))
+
+    def test_step_treerl_repeat_rescales_actor_mini_batch_only_with_metadata(self):
+        self.assertEqual(resolve_ppo_mini_batch_size(16, {}, local_batch_size=64, micro_batch_size=16), 16)
+
+        meta_info = {
+            STEP_TREERL_REPEAT_TIMES_KEY: 16,
+            STEP_TREERL_INITIAL_ROLLOUT_N_KEY: 4,
+        }
+        self.assertEqual(
+            resolve_ppo_mini_batch_size(
+                16,
+                meta_info,
+                local_batch_size=64,
+                micro_batch_size=16,
+            ),
+            64,
+        )
+
+    def test_step_treerl_repeat_rejects_invalid_effective_mini_batch(self):
+        with self.assertRaisesRegex(ValueError, "not integral"):
+            resolve_ppo_mini_batch_size(
+                10,
+                {
+                    STEP_TREERL_REPEAT_TIMES_KEY: 3,
+                    STEP_TREERL_INITIAL_ROLLOUT_N_KEY: 4,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "local actor batch"):
+            resolve_ppo_mini_batch_size(
+                16,
+                {
+                    STEP_TREERL_REPEAT_TIMES_KEY: 16,
+                    STEP_TREERL_INITIAL_ROLLOUT_N_KEY: 4,
+                },
+                local_batch_size=96,
+            )
+
+    def test_terminal_collection_excludes_frontier_and_keeps_internal_terminal(self):
+        root = MCTSNode(state=[1], tree_idx=0)
+        completed = MCTSNode(
+            state=[1, 2],
+            step_tokens=[2],
+            accumulated_text="<step><premise>a</premise><conclusion>b</conclusion></step>\\boxed{A}",
+            parent=root,
+            tree_idx=0,
+            node_idx=1,
+            terminal=True,
+        )
+        frontier = MCTSNode(
+            state=[1, 2, 3],
+            step_tokens=[3],
+            accumulated_text=completed.accumulated_text + "<step>unfinished",
+            parent=completed,
+            tree_idx=0,
+            node_idx=2,
+            terminal=False,
+        )
+        root.children = [completed]
+        completed.children = [frontier]
+
+        self.assertEqual(_collect_terminal_nodes(root), [completed])
+        self.assertEqual(_collect_frontier_leaves(root), [frontier])
+
+        strategy = make_strategy(selected_num_traces=1)
+        strategy._n_gpus = 1
+        gen_batch = SimpleNamespace(non_tensor_batch={"answer": ["A"]})
+        with patch("verl.utils.reward_score.logi.compute_score", return_value=(1.0, {})):
+            strategy._backpropagate_all([root], gen_batch)
+        self.assertEqual(root.terminal_in_subtree, 1)
+        self.assertIsNone(frontier.is_correct)
+
+        result = strategy._build_output(
+            gen_batch=None,
+            roots=[root],
+            device=torch.device("cpu"),
+            ground_truths=["A"],
+        )
+        metrics = result.gen_batch_output.meta_info["step_treerl_metrics"]
+        self.assertEqual(metrics["candidate_leaves"], 1)
+        self.assertEqual(metrics["candidate_terminals"], 1)
+        self.assertEqual(metrics["frontier_leaves"], 1)
+        self.assertEqual(metrics["selected_nonterminal"], 0)
+        self.assertNotIn(3, result.gen_batch_output.batch["responses"][0].tolist())
+
+    def test_build_output_fails_when_tree_has_only_frontier(self):
+        strategy = make_strategy(selected_num_traces=1)
+        root = MCTSNode(state=[1], tree_idx=7)
+        frontier = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=7, node_idx=1)
+        root.children = [frontier]
+
+        with self.assertRaisesRegex(RuntimeError, "tree_idx=7; frontier_leaves=1"):
+            strategy._build_output(
+                gen_batch=None,
+                roots=[root],
+                device=torch.device("cpu"),
+                ground_truths=[None],
+            )
+
+    def test_total_response_budget_marks_terminal_but_branch_chunk_cap_does_not(self):
+        strategy = make_strategy(selected_num_traces=1)
+        strategy.max_token_num = 4
+        strategy.max_model_len = 32
+        root = MCTSNode(state=[1], tree_idx=0)
+        step = MCTSNode(state=[1, 2], step_tokens=[2], parent=root, tree_idx=0, node_idx=1)
+        root.children = [step]
+
+        def generate_fn(_data):
+            return SimpleNamespace(batch={"responses": torch.tensor([[3, 4]], dtype=torch.long)})
+
+        created = strategy._generate_continuations_for_budget(
+            active_steps=[step],
+            max_new_tokens=2,
+            generate_fn=generate_fn,
+            device=torch.device("cpu"),
+            branch_round=1,
+        )[0]
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].terminal)
+
+        second_root = MCTSNode(state=[1], tree_idx=1)
+        second_step = MCTSNode(state=[1, 2], step_tokens=[2], parent=second_root, tree_idx=1, node_idx=1)
+        second_root.children = [second_step]
+        strategy.max_token_num = 3
+        created = strategy._generate_continuations_for_budget(
+            active_steps=[second_step],
+            max_new_tokens=2,
+            generate_fn=generate_fn,
+            device=torch.device("cpu"),
+            branch_round=1,
+        )[0]
+        self.assertTrue(created[0].terminal)
 
     def test_weighted_update_uses_selected_terminal_counts(self):
         strategy = make_strategy()
@@ -1244,6 +1412,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             tree_idx=0,
             node_idx=1,
             terminal_in_subtree=1,
+            terminal=True,
         )
         answer_leaf = MCTSNode(
             state=[1, 3],
@@ -1256,6 +1425,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             tree_idx=0,
             node_idx=2,
             terminal_in_subtree=1,
+            terminal=True,
         )
         step_leaf = MCTSNode(
             state=[1, 4],
@@ -1268,6 +1438,7 @@ class TestStepTreeRLStrategy(unittest.TestCase):
             tree_idx=0,
             node_idx=3,
             terminal_in_subtree=1,
+            terminal=True,
         )
         root.children = [full_leaf, answer_leaf, step_leaf]
 

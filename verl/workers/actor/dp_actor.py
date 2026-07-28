@@ -37,7 +37,11 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
-from verl.workers.actor import BasePPOActor
+from verl.workers.actor import (
+    STEP_TREERL_REPEAT_TIMES_KEY,
+    BasePPOActor,
+    resolve_ppo_mini_batch_size,
+)
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -287,30 +291,47 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        fixed_micro_batch_size = None
+        if has_multi_modal_inputs or not self.config.use_dynamic_bsz:
+            fixed_micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+        ppo_mini_batch_size = resolve_ppo_mini_batch_size(
+            self.config.ppo_mini_batch_size,
+            data.meta_info,
+            local_batch_size=data.batch.batch_size[0],
+            micro_batch_size=fixed_micro_batch_size,
+        )
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         if has_multi_modal_inputs:
-            num_mini_batches = data.batch.batch_size[0] // self.config.ppo_mini_batch_size
+            num_mini_batches = data.batch.batch_size[0] // ppo_mini_batch_size
             non_tensor_select_keys = ["multi_modal_inputs"]
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
-            dataloader = batch.split(self.config.ppo_mini_batch_size)
+            dataloader = batch.split(ppo_mini_batch_size)
 
         metrics = {}
+        if STEP_TREERL_REPEAT_TIMES_KEY in data.meta_info:
+            append_to_dict(
+                metrics,
+                {
+                    "actor/effective_ppo_mini_batch_size": ppo_mini_batch_size,
+                    "actor/ppo_num_mini_batches": data.batch.batch_size[0] // ppo_mini_batch_size,
+                },
+            )
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
                 # split batch into micro_batches
                 mini_batch = data
                 if has_multi_modal_inputs:
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    self.gradient_accumulation = ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     num_micro_batches = mini_batch.batch.batch_size[0] // self.config.ppo_micro_batch_size_per_gpu
                     micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
                 elif self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
                 else:
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    self.gradient_accumulation = ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
@@ -402,7 +423,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        loss = policy_loss * (len(data) / ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
